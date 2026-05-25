@@ -1,0 +1,32 @@
+[project]
+name = "breeze-elf"
+version = "0.1.0"
+description = "Phone microphone streaming over Tailscale to local ASR."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
+    "faster-whisper>=1.1.0",
+    "numpy>=1.26.0",
+    "opencc-python-reimplemented>=0.1.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+breeze-elf = "breeze_elf.main:run"
+
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["breeze_elf"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
