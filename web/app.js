@@ -85,6 +85,9 @@ function renderStats(data = {}) {
   if (typeof data.queueDepth === "number" && data.queueDepth > 0) {
     parts.push(`佇列 ${data.queueDepth}`);
   }
+  if (typeof data.asrQueueDepth === "number" && data.asrQueueDepth > 0) {
+    parts.push(`ASR ${data.asrQueueDepth}`);
+  }
 
   if (parts.length) {
     els.stats.textContent = parts.join(" · ");

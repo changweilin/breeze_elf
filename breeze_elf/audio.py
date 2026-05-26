@@ -52,24 +52,27 @@ class AudioWindowBuffer:
         self.step_samples = self.window_samples - self.overlap_samples
         self.rms_threshold = rms_threshold
 
-        self._samples = np.empty(0, dtype=np.float32)
+        initial_capacity = max(self.window_samples * 2, self.step_samples * 4, 1)
+        self._buffer = np.empty(initial_capacity, dtype=np.float32)
+        self._start = 0
+        self._length = 0
         self._absolute_start = 0
         self._next_index = 0
 
     @property
     def buffered_seconds(self) -> float:
-        return self._samples.size / self.sample_rate
+        return self._length / self.sample_rate
 
     def append_pcm16(self, payload: bytes) -> list[AudioWindow]:
         chunk = pcm16le_to_float32(payload)
         if chunk.size:
-            self._samples = np.concatenate((self._samples, chunk))
+            self._append_samples(chunk)
         return self.pop_ready()
 
     def pop_ready(self) -> list[AudioWindow]:
         windows: list[AudioWindow] = []
-        while self._samples.size >= self.window_samples:
-            samples = self._samples[: self.window_samples].copy()
+        while self._length >= self.window_samples:
+            samples = self._copy_samples(self.window_samples)
             rms = calculate_rms(samples)
             start = self._absolute_start / self.sample_rate
             end = (self._absolute_start + self.window_samples) / self.sample_rate
@@ -83,8 +86,45 @@ class AudioWindowBuffer:
                     is_speech=rms >= self.rms_threshold,
                 )
             )
-            self._samples = self._samples[self.step_samples :]
+            self._drop_samples(self.step_samples)
             self._absolute_start += self.step_samples
             self._next_index += 1
         return windows
 
+    def _append_samples(self, samples: np.ndarray) -> None:
+        self._ensure_capacity(self._length + samples.size)
+        end = (self._start + self._length) % self._buffer.size
+        first = min(samples.size, self._buffer.size - end)
+        self._buffer[end : end + first] = samples[:first]
+        remaining = samples.size - first
+        if remaining:
+            self._buffer[:remaining] = samples[first:]
+        self._length += samples.size
+
+    def _ensure_capacity(self, required: int) -> None:
+        if required <= self._buffer.size:
+            return
+
+        new_capacity = max(required, self._buffer.size * 2)
+        next_buffer = np.empty(new_capacity, dtype=np.float32)
+        if self._length:
+            next_buffer[: self._length] = self._copy_samples(self._length)
+        self._buffer = next_buffer
+        self._start = 0
+
+    def _copy_samples(self, count: int) -> np.ndarray:
+        count = min(count, self._length)
+        output = np.empty(count, dtype=np.float32)
+        first = min(count, self._buffer.size - self._start)
+        output[:first] = self._buffer[self._start : self._start + first]
+        remaining = count - first
+        if remaining:
+            output[first:] = self._buffer[:remaining]
+        return output
+
+    def _drop_samples(self, count: int) -> None:
+        count = min(count, self._length)
+        self._start = (self._start + count) % self._buffer.size
+        self._length -= count
+        if self._length == 0:
+            self._start = 0

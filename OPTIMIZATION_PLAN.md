@@ -8,8 +8,8 @@
 | P0-2 | 高 | 背壓觀測 | 回報 queue depth、掉窗數與 ASR 等候時間 | 完成 | 單元測試通過，手機端待實測 |
 | P0-3 | 高 | 前端背壓保護 | WebSocket 積壓時丟棄舊音訊 chunk，避免延遲無限累積 | 完成 | 單元測試通過，手機端待實測 |
 | P0-4 | 高 | 設定可靠性 | `get_settings()` 每次呼叫都讀取目前環境變數 | 完成 | config 單元測試 |
-| P1-1 | 中 | 音訊 ring buffer | 降低 Python 與 AudioWorklet 的重複配置與記憶體拷貝 | 待辦 | 長時間錄音 benchmark |
-| P1-2 | 中 | ASR worker queue | 讓多 client 共用穩定的 ASR 佇列與取消策略 | 待辦 | 並發串流壓測 |
+| P1-1 | 中 | 音訊 ring buffer | 降低 Python 與 AudioWorklet 的重複配置與記憶體拷貝 | 完成 | `npm.cmd run bench -- --seconds 120` |
+| P1-2 | 中 | ASR worker queue | 讓多 client 共用穩定的 ASR 佇列與取消策略 | 完成 | 單元測試通過，實際並發串流待實測 |
 | P1-3 | 中 | VAD 與字幕去重 | 以語音段落為單位送 ASR，減少重複字幕 | 待辦 | 固定音檔轉寫比較 |
 | P2-1 | 中 | 前端體驗 | 增加複製、下載、延遲、掉窗、麥克風音量提示 | 待辦 | 手機端實測 |
 | P2-2 | 低 | 打包與 CI | 補 package data、ruff、CI 測試流程 | 待辦 | GitHub Actions |

@@ -13,7 +13,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.websockets import WebSocketState
 
-from .asr import ASREngine, build_asr_from_env
+from .asr import build_asr_from_env
+from .asr_queue import ASRQueue
 from .audio import AudioWindow, AudioWindowBuffer
 from .config import Settings, get_settings
 from .protocol import PingMessage, ProtocolError, StartMessage, StopMessage, parse_client_text, server_event
@@ -33,7 +34,8 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
     app.state.asr = asr_engine
     app.state.asr_error = None
-    app.state.asr_semaphore = asyncio.Semaphore(max(1, settings.asr_concurrency))
+    app.state.asr_queue = ASRQueue(asr_engine, settings.asr_concurrency)
+    await app.state.asr_queue.start()
 
     if settings.asr_load_on_startup:
         loop = asyncio.get_running_loop()
@@ -43,7 +45,10 @@ async def lifespan(app: FastAPI):
             app.state.asr_error = str(exc)
             LOGGER.exception("ASR startup load failed")
 
-    yield
+    try:
+        yield
+    finally:
+        await app.state.asr_queue.stop()
 
 
 app = FastAPI(title="Breeze Elf", lifespan=lifespan)
@@ -74,6 +79,7 @@ async def health() -> JSONResponse:
             "asrBackend": asr_engine.backend,
             "asrDevice": asr_engine.device,
             "asrConcurrency": settings.asr_concurrency,
+            "asrQueueDepth": app.state.asr_queue.queue_depth,
             "asrError": app.state.asr_error,
         }
     )
@@ -120,8 +126,7 @@ async def audio_socket(websocket: WebSocket) -> None:
                     text,
                     state,
                     send_json,
-                    websocket.app.state.asr,
-                    websocket.app.state.asr_semaphore,
+                    websocket.app.state.asr_queue,
                 )
                 if should_stop:
                     break
@@ -140,8 +145,7 @@ async def _handle_text_message(
     raw: str,
     state: StreamState,
     send_json: Callable[[dict[str, Any]], Awaitable[None]],
-    asr: ASREngine,
-    asr_semaphore: asyncio.Semaphore,
+    asr_queue: ASRQueue,
 ) -> bool:
     try:
         message = parse_client_text(raw)
@@ -171,7 +175,7 @@ async def _handle_text_message(
         state.queue = asyncio.Queue(maxsize=settings.max_queue_windows)
         state.stop_event.clear()
         state.processor_task = asyncio.create_task(
-            _process_windows(state, send_json, asr, asr_semaphore, message.language)
+            _process_windows(state, send_json, asr_queue, message.language)
         )
         state.started = True
         await send_json(
@@ -181,8 +185,8 @@ async def _handle_text_message(
                 language=message.language,
                 windowSeconds=settings.window_seconds,
                 overlapSeconds=settings.overlap_seconds,
-                backend=asr.backend,
-                device=asr.device,
+                backend=asr_queue.backend,
+                device=asr_queue.device,
             )
         )
         return False
@@ -226,12 +230,10 @@ async def _handle_audio_payload(
 async def _process_windows(
     state: StreamState,
     send_json: Callable[[dict[str, Any]], Awaitable[None]],
-    asr: ASREngine,
-    asr_semaphore: asyncio.Semaphore,
+    asr_queue: ASRQueue,
     language: str,
 ) -> None:
     assert state.queue is not None
-    loop = asyncio.get_running_loop()
 
     while True:
         try:
@@ -251,22 +253,18 @@ async def _process_windows(
                         rms=round(window.rms, 5),
                         droppedWindows=state.dropped_windows,
                         queueDepth=state.queue.qsize(),
+                        asrQueueDepth=asr_queue.queue_depth,
                     )
                 )
                 continue
 
             asr_queue_wait_ms = 0
             try:
-                wait_started = time.perf_counter()
-                async with asr_semaphore:
-                    asr_queue_wait_ms = round((time.perf_counter() - wait_started) * 1000)
-                    result = await loop.run_in_executor(
-                        None,
-                        asr.transcribe,
-                        window.samples,
-                        settings.sample_rate,
-                        language,
-                    )
+                queued_result = await asr_queue.transcribe(window.samples, settings.sample_rate, language)
+                result = queued_result.result
+                asr_queue_wait_ms = queued_result.queue_wait_ms
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:
                 await send_json(
                     server_event(
@@ -274,6 +272,7 @@ async def _process_windows(
                         message=str(exc),
                         windowIndex=window.index,
                         asrQueueWaitMs=asr_queue_wait_ms,
+                        asrQueueDepth=asr_queue.queue_depth,
                     )
                 )
                 continue
@@ -314,6 +313,7 @@ async def _process_windows(
                     device=result.device,
                     droppedWindows=state.dropped_windows,
                     queueDepth=state.queue.qsize(),
+                    asrQueueDepth=asr_queue.queue_depth,
                 )
             )
         finally:

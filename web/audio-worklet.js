@@ -8,7 +8,9 @@ class BreezeMicProcessor extends AudioWorkletProcessor {
       Math.round((this.targetSampleRate * (processorOptions.chunkMs || 250)) / 1000),
     );
     this.ratio = sampleRate / this.targetSampleRate;
-    this.buffer = new Float32Array(0);
+    this.buffer = new Float32Array(Math.max(4096, Math.ceil(sampleRate / 4)));
+    this.bufferStart = 0;
+    this.bufferLength = 0;
     this.readIndex = 0;
     this.pending = new Int16Array(this.chunkSamples);
     this.pendingLength = 0;
@@ -26,27 +28,34 @@ class BreezeMicProcessor extends AudioWorkletProcessor {
   }
 
   appendInput(input) {
-    const next = new Float32Array(this.buffer.length + input.length);
-    next.set(this.buffer);
-    next.set(input, this.buffer.length);
-    this.buffer = next;
+    this.ensureCapacity(this.bufferLength + input.length);
+    const writeIndex = (this.bufferStart + this.bufferLength) % this.buffer.length;
+    const first = Math.min(input.length, this.buffer.length - writeIndex);
+    this.buffer.set(input.subarray(0, first), writeIndex);
+    const remaining = input.length - first;
+    if (remaining > 0) {
+      this.buffer.set(input.subarray(first), 0);
+    }
+    this.bufferLength += input.length;
   }
 
   drainResampled() {
-    const available = this.buffer.length - 1;
+    const available = this.bufferLength - 1;
     while (this.readIndex + this.ratio < available) {
       const index = this.readIndex;
       const left = Math.floor(index);
       const right = left + 1;
       const fraction = index - left;
-      const sample = this.buffer[left] + (this.buffer[right] - this.buffer[left]) * fraction;
+      const leftSample = this.sampleAt(left);
+      const rightSample = this.sampleAt(right);
+      const sample = leftSample + (rightSample - leftSample) * fraction;
       this.pushSample(sample);
       this.readIndex += this.ratio;
     }
 
     const consumed = Math.floor(this.readIndex);
     if (consumed > 0) {
-      this.buffer = this.buffer.slice(consumed);
+      this.dropInput(consumed);
       this.readIndex -= consumed;
     }
   }
@@ -57,12 +66,38 @@ class BreezeMicProcessor extends AudioWorkletProcessor {
     this.pendingLength += 1;
 
     if (this.pendingLength >= this.pending.length) {
-      const out = this.pending.slice(0, this.pendingLength);
+      const out = this.pending;
       this.port.postMessage({ type: "audio", buffer: out.buffer }, [out.buffer]);
+      this.pending = new Int16Array(this.chunkSamples);
       this.pendingLength = 0;
+    }
+  }
+
+  ensureCapacity(required) {
+    if (required <= this.buffer.length) {
+      return;
+    }
+
+    const next = new Float32Array(Math.max(required, this.buffer.length * 2));
+    for (let i = 0; i < this.bufferLength; i += 1) {
+      next[i] = this.sampleAt(i);
+    }
+    this.buffer = next;
+    this.bufferStart = 0;
+  }
+
+  sampleAt(offset) {
+    return this.buffer[(this.bufferStart + offset) % this.buffer.length];
+  }
+
+  dropInput(count) {
+    const dropped = Math.min(count, this.bufferLength);
+    this.bufferStart = (this.bufferStart + dropped) % this.buffer.length;
+    this.bufferLength -= dropped;
+    if (this.bufferLength === 0) {
+      this.bufferStart = 0;
     }
   }
 }
 
 registerProcessor("breeze-mic-processor", BreezeMicProcessor);
-
