@@ -10,10 +10,12 @@
 | P0-4 | 高 | 設定可靠性 | `get_settings()` 每次呼叫都讀取目前環境變數 | 完成 | config 單元測試 |
 | P1-1 | 中 | 音訊 ring buffer | 降低 Python 與 AudioWorklet 的重複配置與記憶體拷貝 | 完成 | `npm.cmd run bench -- --seconds 120` |
 | P1-2 | 中 | ASR worker queue | 讓多 client 共用穩定的 ASR 佇列與取消策略 | 完成 | 單元測試通過，實際並發串流待實測 |
-| P1-3 | 中 | VAD 與字幕去重 | 以語音段落為單位送 ASR，減少重複字幕 | 待辦 | 固定音檔轉寫比較 |
-| P2-1 | 中 | 前端體驗 | 增加複製、下載、延遲、掉窗、麥克風音量提示 | 待辦 | 手機端實測 |
-| P2-2 | 低 | 打包與 CI | 補 package data、ruff、CI 測試流程 | 待辦 | GitHub Actions |
+| P1-3 | 中 | VAD 與字幕去重 | 以語音段落為單位送 ASR，減少重複字幕 | 完成 | `npm.cmd run bench -- --segmenter window/vad --seconds 8` |
+| P2-1 | 中 | 前端體驗 | 增加複製、下載、延遲、掉窗、麥克風音量提示 | 完成 | 本機 mock 服務通過，手機端待實測 |
+| P2-2 | 低 | 打包與 CI | 補 package data、ruff、CI 測試流程 | 完成 | `uv run --extra dev ruff check .`、`uv build --wheel` |
 
-## 本輪執行範圍
+## 本輪執行結果
 
-已完成 P0-1 到 P0-4。這些項目能讓後續調整有量測基準，也能先避免網路或 ASR 慢速時延遲一路堆高。
+已完成 P0-1 到 P2-2 的本機驗證。`npm.cmd run test` 通過 22 個單元測試，`npm.cmd run bench:mock` 產生 mock ASR 基準結果，並確認本機 mock 服務 `http://127.0.0.1:8790/health` 回報正常。
+
+P2-2 已補上 wheel 靜態資源打包、ruff 設定與 GitHub Actions CI。手機端與實際並發串流仍需實測。

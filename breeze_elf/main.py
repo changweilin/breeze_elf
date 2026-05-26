@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
@@ -15,14 +16,22 @@ from starlette.websockets import WebSocketState
 
 from .asr import build_asr_from_env
 from .asr_queue import ASRQueue
-from .audio import AudioWindow, AudioWindowBuffer
-from .config import Settings, get_settings
-from .protocol import PingMessage, ProtocolError, StartMessage, StopMessage, parse_client_text, server_event
-
+from .audio import AudioUtteranceBuffer, AudioWindow, AudioWindowBuffer
+from .config import get_settings
+from .protocol import (
+    PingMessage,
+    ProtocolError,
+    StartMessage,
+    StopMessage,
+    parse_client_text,
+    server_event,
+)
 
 LOGGER = logging.getLogger("breeze_elf")
 ROOT_DIR = Path(__file__).resolve().parent.parent
-WEB_DIR = ROOT_DIR / "web"
+PACKAGE_WEB_DIR = Path(__file__).resolve().parent / "web"
+PROJECT_WEB_DIR = ROOT_DIR / "web"
+WEB_DIR = PACKAGE_WEB_DIR if PACKAGE_WEB_DIR.exists() else PROJECT_WEB_DIR
 
 
 settings = get_settings()
@@ -76,6 +85,9 @@ async def health() -> JSONResponse:
         {
             "ok": True,
             "sampleRate": settings.sample_rate,
+            "segmenter": settings.segmenter,
+            "vadFrameMs": settings.vad_frame_ms,
+            "vadEndSilenceMs": settings.vad_end_silence_ms,
             "asrBackend": asr_engine.backend,
             "asrDevice": asr_engine.device,
             "asrConcurrency": settings.asr_concurrency,
@@ -88,7 +100,7 @@ async def health() -> JSONResponse:
 @dataclass
 class StreamState:
     started: bool = False
-    segmenter: AudioWindowBuffer | None = None
+    segmenter: AudioWindowBuffer | AudioUtteranceBuffer | None = None
     queue: asyncio.Queue[AudioWindow] | None = None
     stop_event: asyncio.Event = field(default_factory=asyncio.Event)
     processor_task: asyncio.Task[None] | None = None
@@ -154,7 +166,8 @@ async def _handle_text_message(
         return False
 
     if isinstance(message, PingMessage):
-        await send_json(server_event("stats", uptimeMs=round((time.monotonic() - state.started_at) * 1000)))
+        uptime_ms = round((time.monotonic() - state.started_at) * 1000)
+        await send_json(server_event("stats", uptimeMs=uptime_ms))
         return False
 
     if isinstance(message, StopMessage):
@@ -166,12 +179,7 @@ async def _handle_text_message(
             await send_json(server_event("error", message="stream already started"))
             return False
 
-        state.segmenter = AudioWindowBuffer(
-            sample_rate=message.sample_rate,
-            window_seconds=settings.window_seconds,
-            overlap_seconds=settings.overlap_seconds,
-            rms_threshold=settings.rms_threshold,
-        )
+        state.segmenter = _build_segmenter(message.sample_rate)
         state.queue = asyncio.Queue(maxsize=settings.max_queue_windows)
         state.stop_event.clear()
         state.processor_task = asyncio.create_task(
@@ -185,6 +193,7 @@ async def _handle_text_message(
                 language=message.language,
                 windowSeconds=settings.window_seconds,
                 overlapSeconds=settings.overlap_seconds,
+                segmenter=settings.segmenter,
                 backend=asr_queue.backend,
                 device=asr_queue.device,
             )
@@ -204,6 +213,17 @@ async def _handle_audio_payload(
         return
 
     windows = state.segmenter.append_pcm16(payload)
+    await _enqueue_windows(windows, state, send_json)
+
+
+async def _enqueue_windows(
+    windows: list[AudioWindow],
+    state: StreamState,
+    send_json: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+) -> None:
+    if state.queue is None:
+        return
+
     dropped = 0
     for window in windows:
         if state.queue.full():
@@ -216,7 +236,7 @@ async def _handle_audio_payload(
                 pass
         await state.queue.put(window)
 
-    if dropped:
+    if dropped and send_json is not None:
         await send_json(
             server_event(
                 "stats",
@@ -260,7 +280,11 @@ async def _process_windows(
 
             asr_queue_wait_ms = 0
             try:
-                queued_result = await asr_queue.transcribe(window.samples, settings.sample_rate, language)
+                queued_result = await asr_queue.transcribe(
+                    window.samples,
+                    settings.sample_rate,
+                    language,
+                )
                 result = queued_result.result
                 asr_queue_wait_ms = queued_result.queue_wait_ms
             except asyncio.CancelledError:
@@ -284,6 +308,7 @@ async def _process_windows(
                         text=result.text,
                         language=result.language,
                         windowIndex=window.index,
+                        segmentKind=window.kind,
                         startSeconds=round(window.start_seconds, 2),
                         endSeconds=round(window.end_seconds, 2),
                     )
@@ -298,6 +323,7 @@ async def _process_windows(
                             transcript=state.transcript,
                             language=result.language,
                             windowIndex=window.index,
+                            segmentKind=window.kind,
                         )
                     )
 
@@ -305,6 +331,7 @@ async def _process_windows(
                 server_event(
                     "stats",
                     windowIndex=window.index,
+                    segmentKind=window.kind,
                     speech=True,
                     rms=round(window.rms, 5),
                     asrMs=result.duration_ms,
@@ -321,6 +348,10 @@ async def _process_windows(
 
 
 async def _stop_state(state: StreamState) -> None:
+    if state.segmenter is not None and hasattr(state.segmenter, "flush"):
+        flushed = state.segmenter.flush()
+        await _enqueue_windows(flushed, state)
+
     state.stop_event.set()
     if state.processor_task is None:
         return
@@ -332,6 +363,25 @@ async def _stop_state(state: StreamState) -> None:
         pass
 
 
+def _build_segmenter(sample_rate: int) -> AudioWindowBuffer | AudioUtteranceBuffer:
+    if settings.segmenter == "window":
+        return AudioWindowBuffer(
+            sample_rate=sample_rate,
+            window_seconds=settings.window_seconds,
+            overlap_seconds=settings.overlap_seconds,
+            rms_threshold=settings.rms_threshold,
+        )
+
+    return AudioUtteranceBuffer(
+        sample_rate=sample_rate,
+        frame_ms=settings.vad_frame_ms,
+        pre_roll_ms=settings.vad_pre_roll_ms,
+        end_silence_ms=settings.vad_end_silence_ms,
+        max_segment_seconds=settings.vad_max_segment_seconds,
+        rms_threshold=settings.rms_threshold,
+    )
+
+
 def _novel_text(transcript: str, current: str) -> str:
     current = " ".join(current.split())
     if not current:
@@ -339,23 +389,56 @@ def _novel_text(transcript: str, current: str) -> str:
     if not transcript:
         return current
 
-    tail = transcript[-120:]
-    if current in tail:
+    tail = transcript[-160:]
+    normalized_tail = _normalize_for_dedupe(tail)
+    normalized_current = _normalize_for_dedupe(current)
+    if normalized_current and normalized_current in normalized_tail:
         return ""
 
-    min_overlap = _min_overlap_size(tail, current)
-    max_overlap = min(len(tail), len(current))
-    for size in range(max_overlap, min_overlap - 1, -1):
-        if tail.endswith(current[:size]):
-            return current[size:].lstrip(" ，,。.!?！？")
+    overlap_end = _overlap_end_index(tail, current)
+    if overlap_end is not None:
+        return current[overlap_end:].lstrip(" ，,。.!?！？")
     return f" {current}"
 
 
-def _min_overlap_size(tail: str, current: str) -> int:
-    probe = f"{tail[-24:]}{current[:24]}"
+def _overlap_end_index(tail: str, current: str) -> int | None:
+    tail_chars = _dedupe_chars(tail)
+    current_chars = _dedupe_chars(current)
+    if not tail_chars or not current_chars:
+        return None
+
+    min_overlap = _min_overlap_size(tail_chars, current_chars)
+    max_overlap = min(len(tail_chars), len(current_chars))
+    normalized_tail = "".join(char for char, _ in tail_chars)
+    normalized_current = "".join(char for char, _ in current_chars)
+    for size in range(max_overlap, min_overlap - 1, -1):
+        if normalized_tail.endswith(normalized_current[:size]):
+            return current_chars[size - 1][1]
+    return None
+
+
+def _min_overlap_size(
+    tail_chars: list[tuple[str, int]],
+    current_chars: list[tuple[str, int]],
+) -> int:
+    probe = "".join(char for char, _ in tail_chars[-24:] + current_chars[:24])
     if any("\u4e00" <= char <= "\u9fff" for char in probe):
         return 2
     return 6
+
+
+def _normalize_for_dedupe(text: str) -> str:
+    return "".join(char for char, _ in _dedupe_chars(text))
+
+
+def _dedupe_chars(text: str) -> list[tuple[str, int]]:
+    ignored = set(" \t\r\n，,。.!?！？、；;：:\"'“”‘’（）()[]【】")
+    chars: list[tuple[str, int]] = []
+    for index, char in enumerate(text):
+        if char in ignored:
+            continue
+        chars.append((char.casefold(), index + 1))
+    return chars
 
 
 def run() -> None:

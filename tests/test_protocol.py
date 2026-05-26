@@ -1,11 +1,19 @@
 import unittest
 
-from breeze_elf.protocol import ProtocolError, StartMessage, StopMessage, parse_client_text, server_event
+from breeze_elf.protocol import (
+    ProtocolError,
+    StartMessage,
+    StopMessage,
+    parse_client_text,
+    server_event,
+)
 
 
 class ProtocolTests(unittest.TestCase):
     def test_parse_start(self):
-        message = parse_client_text('{"type":"start","sampleRate":16000,"language":"zh","chunkMs":1000}')
+        message = parse_client_text(
+            '{"type":"start","sampleRate":16000,"language":"zh","chunkMs":1000}'
+        )
         self.assertEqual(message, StartMessage(sample_rate=16000, language="zh", chunk_ms=1000))
 
     def test_rejects_wrong_sample_rate(self):
@@ -17,9 +25,11 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(message, StopMessage(reason="button"))
 
     def test_server_event(self):
-        self.assertEqual(server_event("ready", sampleRate=16000), {"type": "ready", "sampleRate": 16000})
+        self.assertEqual(
+            server_event("ready", sampleRate=16000),
+            {"type": "ready", "sampleRate": 16000},
+        )
 
 
 if __name__ == "__main__":
     unittest.main()
-

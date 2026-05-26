@@ -1,4 +1,4 @@
-const CACHE_NAME = "breeze-elf-v1";
+const CACHE_NAME = "breeze-elf-v2";
 const ASSETS = ["/", "/static/app.js", "/static/audio-worklet.js", "/manifest.webmanifest"];
 
 self.addEventListener("install", (event) => {
@@ -7,7 +7,12 @@ self.addEventListener("install", (event) => {
 });
 
 self.addEventListener("activate", (event) => {
-  event.waitUntil(self.clients.claim());
+  event.waitUntil(
+    caches
+      .keys()
+      .then((names) => Promise.all(names.filter((name) => name !== CACHE_NAME).map((name) => caches.delete(name))))
+      .then(() => self.clients.claim()),
+  );
 });
 
 self.addEventListener("fetch", (event) => {
@@ -16,4 +21,3 @@ self.addEventListener("fetch", (event) => {
   }
   event.respondWith(fetch(event.request).catch(() => caches.match(event.request)));
 });
-

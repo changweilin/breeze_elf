@@ -14,6 +14,7 @@ class BreezeMicProcessor extends AudioWorkletProcessor {
     this.readIndex = 0;
     this.pending = new Int16Array(this.chunkSamples);
     this.pendingLength = 0;
+    this.pendingEnergy = 0;
   }
 
   process(inputs) {
@@ -63,13 +64,16 @@ class BreezeMicProcessor extends AudioWorkletProcessor {
   pushSample(sample) {
     const clamped = Math.max(-1, Math.min(1, sample));
     this.pending[this.pendingLength] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
+    this.pendingEnergy += clamped * clamped;
     this.pendingLength += 1;
 
     if (this.pendingLength >= this.pending.length) {
       const out = this.pending;
-      this.port.postMessage({ type: "audio", buffer: out.buffer }, [out.buffer]);
+      const rms = Math.sqrt(this.pendingEnergy / this.pendingLength);
+      this.port.postMessage({ type: "audio", buffer: out.buffer, rms }, [out.buffer]);
       this.pending = new Int16Array(this.chunkSamples);
       this.pendingLength = 0;
+      this.pendingEnergy = 0;
     }
   }
 

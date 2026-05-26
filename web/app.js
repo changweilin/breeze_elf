@@ -2,12 +2,15 @@ const els = {
   start: document.querySelector("#start"),
   stop: document.querySelector("#stop"),
   clear: document.querySelector("#clear"),
+  copy: document.querySelector("#copy"),
+  download: document.querySelector("#download"),
   status: document.querySelector("#status"),
   stats: document.querySelector("#stats"),
   lines: document.querySelector("#lines"),
   partial: document.querySelector("#partial"),
   backend: document.querySelector("#backend"),
   clock: document.querySelector("#clock"),
+  level: document.querySelector("#level"),
 };
 
 const AUDIO_CHUNK_MS = 250;
@@ -24,6 +27,7 @@ const state = {
   clockTimer: 0,
   transcript: "",
   droppedClientChunks: 0,
+  statsTimer: 0,
 };
 
 function websocketUrl() {
@@ -45,6 +49,7 @@ function renderTranscript(text) {
   state.transcript = text;
   els.lines.textContent = text;
   els.lines.scrollTop = els.lines.scrollHeight;
+  setTranscriptActions(Boolean(text.trim()));
 }
 
 function appendTranscript(text) {
@@ -73,6 +78,9 @@ function renderStats(data = {}) {
     parts.push("延遲");
   }
 
+  if (data.segmentKind === "utterance") {
+    parts.push("段落");
+  }
   if (typeof data.asrQueueWaitMs === "number" && data.asrQueueWaitMs > 0) {
     parts.push(`等候 ${data.asrQueueWaitMs} ms`);
   }
@@ -92,6 +100,25 @@ function renderStats(data = {}) {
   if (parts.length) {
     els.stats.textContent = parts.join(" · ");
   }
+}
+
+function flashStats(text) {
+  window.clearTimeout(state.statsTimer);
+  const previous = els.stats.textContent;
+  els.stats.textContent = text;
+  state.statsTimer = window.setTimeout(() => {
+    els.stats.textContent = previous;
+  }, 1200);
+}
+
+function renderLevel(rms = 0) {
+  const scaled = Math.min(1, Math.max(0, rms / 0.12));
+  els.level.style.transform = `scaleX(${scaled.toFixed(3)})`;
+}
+
+function setTranscriptActions(hasTranscript) {
+  els.copy.disabled = !hasTranscript;
+  els.download.disabled = !hasTranscript;
 }
 
 function stopClock() {
@@ -136,6 +163,7 @@ async function start() {
   setStatus("連線中");
   state.droppedClientChunks = 0;
   els.stats.textContent = "0 ms";
+  renderLevel(0);
 
   try {
     const ws = new WebSocket(websocketUrl());
@@ -174,6 +202,7 @@ async function start() {
       if (event.data?.type !== "audio") {
         return;
       }
+      renderLevel(event.data.rms || 0);
       if (state.ws?.readyState === WebSocket.OPEN) {
         if (state.ws.bufferedAmount > MAX_WS_BUFFERED_BYTES) {
           state.droppedClientChunks += 1;
@@ -219,6 +248,7 @@ function cleanupAudio() {
   state.silence = null;
   state.stream = null;
   state.audioContext = null;
+  renderLevel(0);
 }
 
 function handleServerMessage(event) {
@@ -230,7 +260,7 @@ function handleServerMessage(event) {
   }
 
   if (data.type === "ready") {
-    els.backend.textContent = `${data.backend} · ${data.device}`;
+    els.backend.textContent = `${data.backend} · ${data.device} · ${data.segmenter || "audio"}`;
     setStatus("收音中", "live");
     return;
   }
@@ -265,6 +295,31 @@ els.stop.addEventListener("click", stop);
 els.clear.addEventListener("click", () => {
   renderTranscript("");
   els.partial.textContent = "";
+});
+els.copy.addEventListener("click", async () => {
+  if (!state.transcript.trim()) {
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(state.transcript);
+    flashStats("已複製");
+  } catch {
+    flashStats("複製失敗");
+  }
+});
+els.download.addEventListener("click", () => {
+  if (!state.transcript.trim()) {
+    return;
+  }
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const blob = new Blob([state.transcript], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `breeze-elf-${stamp}.txt`;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  flashStats("已下載");
 });
 
 if ("serviceWorker" in navigator && window.isSecureContext) {

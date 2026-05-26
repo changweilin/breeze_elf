@@ -68,7 +68,12 @@ class ASRQueue:
                 await worker
         self._workers.clear()
 
-    async def transcribe(self, samples: np.ndarray, sample_rate: int, language: str) -> QueuedASRResult:
+    async def transcribe(
+        self,
+        samples: np.ndarray,
+        sample_rate: int,
+        language: str,
+    ) -> QueuedASRResult:
         await self.start()
         loop = asyncio.get_running_loop()
         future: asyncio.Future[QueuedASRResult] = loop.create_future()

@@ -1,8 +1,10 @@
 import asyncio
 import unittest
+from pathlib import Path
 
 import numpy as np
 
+from breeze_elf import main
 from breeze_elf.audio import AudioWindowBuffer
 from breeze_elf.main import StreamState, _handle_audio_payload, _novel_text
 
@@ -49,6 +51,17 @@ class NovelTextTests(unittest.TestCase):
 
     def test_novel_text_ignores_duplicate_tail(self):
         self.assertEqual(_novel_text("今天 天氣很好", "天氣很好"), "")
+
+    def test_novel_text_ignores_punctuation_and_spacing_when_deduping(self):
+        self.assertEqual(_novel_text("今天，天氣很好。", "今天 天氣很好"), "")
+
+    def test_novel_text_removes_overlap_with_spacing_difference(self):
+        self.assertEqual(_novel_text("今天，天氣很好", "天氣 很好 我們出門"), "我們出門")
+
+
+class StaticAssetsTests(unittest.TestCase):
+    def test_web_dir_points_to_existing_static_assets(self):
+        self.assertTrue((Path(main.WEB_DIR) / "index.html").is_file())
 
 
 if __name__ == "__main__":

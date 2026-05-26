@@ -40,6 +40,11 @@ class Settings:
     overlap_seconds: float = 0.5
     rms_threshold: float = 0.008
     max_queue_windows: int = 4
+    segmenter: str = "vad"
+    vad_frame_ms: int = 100
+    vad_pre_roll_ms: int = 300
+    vad_end_silence_ms: int = 700
+    vad_max_segment_seconds: float = 12.0
     language: str = "zh"
     asr_model: str = "medium"
     asr_device: str = "auto"
@@ -57,6 +62,11 @@ def get_settings() -> Settings:
         overlap_seconds=_float_env("BREEZE_OVERLAP_SECONDS", 0.5),
         rms_threshold=_float_env("BREEZE_RMS_THRESHOLD", 0.008),
         max_queue_windows=max(1, _int_env("BREEZE_MAX_QUEUE_WINDOWS", 4)),
+        segmenter=os.getenv("BREEZE_SEGMENTER", "vad").strip().lower(),
+        vad_frame_ms=max(1, _int_env("BREEZE_VAD_FRAME_MS", 100)),
+        vad_pre_roll_ms=max(0, _int_env("BREEZE_VAD_PRE_ROLL_MS", 300)),
+        vad_end_silence_ms=max(1, _int_env("BREEZE_VAD_END_SILENCE_MS", 700)),
+        vad_max_segment_seconds=max(0.1, _float_env("BREEZE_VAD_MAX_SEGMENT_SECONDS", 12.0)),
         language=os.getenv("BREEZE_LANGUAGE", "zh"),
         asr_model=os.getenv("BREEZE_ASR_MODEL", "medium"),
         asr_device=os.getenv("BREEZE_ASR_DEVICE", "auto"),

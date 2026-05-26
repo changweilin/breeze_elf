@@ -34,6 +34,11 @@ Environment variables:
 | `BREEZE_WINDOW_SECONDS` | `2.0` | ASR window duration. |
 | `BREEZE_OVERLAP_SECONDS` | `0.5` | Overlap between ASR windows. |
 | `BREEZE_MAX_QUEUE_WINDOWS` | `4` | Maximum pending ASR windows per client. |
+| `BREEZE_SEGMENTER` | `vad` | `vad` for utterance segments, or `window` for fixed windows. |
+| `BREEZE_VAD_FRAME_MS` | `100` | RMS VAD frame size. |
+| `BREEZE_VAD_PRE_ROLL_MS` | `300` | Audio kept before detected speech. |
+| `BREEZE_VAD_END_SILENCE_MS` | `700` | Silence required to finish an utterance. |
+| `BREEZE_VAD_MAX_SEGMENT_SECONDS` | `12.0` | Maximum utterance length before forced flush. |
 | `BREEZE_ASR_MODEL` | `medium` | Whisper model name. |
 | `BREEZE_ASR_DEVICE` | `auto` | `auto`, `cuda`, or `cpu`. |
 | `BREEZE_ASR_COMPUTE_TYPE` | `int8` | Compute type for custom ASR device values. |
@@ -64,4 +69,11 @@ Run only audio segmentation, using the current environment configuration:
 
 ```powershell
 npm.cmd run bench
+```
+
+Compare fixed windows against VAD utterance segments:
+
+```powershell
+npm.cmd run bench -- --segmenter window
+npm.cmd run bench -- --segmenter vad
 ```

@@ -13,6 +13,8 @@ class ConfigTests(unittest.TestCase):
                 "BREEZE_PORT": "9999",
                 "BREEZE_ASR_PROVIDER": "mock",
                 "BREEZE_ASR_CONCURRENCY": "3",
+                "BREEZE_SEGMENTER": "window",
+                "BREEZE_VAD_END_SILENCE_MS": "900",
             },
         ):
             settings = get_settings()
@@ -20,6 +22,8 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.port, 9999)
         self.assertEqual(settings.asr_provider, "mock")
         self.assertEqual(settings.asr_concurrency, 3)
+        self.assertEqual(settings.segmenter, "window")
+        self.assertEqual(settings.vad_end_silence_ms, 900)
 
     def test_queue_and_asr_concurrency_are_at_least_one(self):
         with patch.dict(

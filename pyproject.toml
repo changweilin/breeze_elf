@@ -15,6 +15,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",
+    "ruff>=0.8.0",
 ]
 
 [project.scripts]
@@ -26,7 +27,15 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["breeze_elf"]
+force-include = { "web" = "breeze_elf/web" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = [".venv", ".uv-cache", ".hf-cache"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]

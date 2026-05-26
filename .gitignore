@@ -8,6 +8,7 @@ __pycache__/
 .mypy_cache/
 .env
 .server.log
+.dev-*.log
 dist/
 build/
 *.egg-info/

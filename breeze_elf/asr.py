@@ -10,7 +10,6 @@ import numpy as np
 
 from .config import Settings, get_settings
 
-
 TRADITIONAL_CHINESE_PROMPT = (
     "以下是台灣繁體中文語音轉寫，內容可能包含國語、台灣用語、英文詞彙與標點。"
 )
