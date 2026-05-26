@@ -70,12 +70,16 @@ function startClock() {
 
 function renderStats(data = {}) {
   const parts = [];
-  if (typeof data.asrMs === "number") {
+  if (data.filtered) {
+    parts.push("靜音");
+  } else if (typeof data.asrMs === "number") {
     parts.push(`${data.asrMs} ms`);
   } else if (data.speech === false) {
     parts.push("靜音");
   } else if (data.backpressure) {
     parts.push("延遲");
+  } else if (data.stopped) {
+    parts.push("完成");
   }
 
   if (data.segmentKind === "utterance") {
@@ -174,6 +178,7 @@ async function start() {
       setRunning(false);
       setStatus("待命");
       stopClock();
+      state.ws = null;
     });
     state.ws = ws;
     await waitForOpen(ws);
@@ -226,15 +231,20 @@ async function start() {
 }
 
 function stop() {
+  cleanupAudio();
+  stopClock();
+
   if (state.ws?.readyState === WebSocket.OPEN) {
+    els.start.disabled = true;
+    els.stop.disabled = true;
+    setStatus("收尾中");
     state.ws.send(JSON.stringify({ type: "stop" }));
-    window.setTimeout(() => state.ws?.close(), 100);
+    return;
   } else {
     state.ws?.close();
   }
-  cleanupAudio();
   setRunning(false);
-  stopClock();
+  setStatus("待命");
 }
 
 function cleanupAudio() {
@@ -282,6 +292,9 @@ function handleServerMessage(event) {
 
   if (data.type === "stats") {
     renderStats(data);
+    if (data.stopped) {
+      state.ws?.close();
+    }
     return;
   }
 

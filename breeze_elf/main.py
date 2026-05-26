@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.websockets import WebSocketState
 
-from .asr import build_asr_from_env
+from .asr import ASRResult, build_asr_from_env
 from .asr_queue import ASRQueue
 from .audio import AudioUtteranceBuffer, AudioWindow, AudioWindowBuffer
 from .config import get_settings
@@ -32,6 +32,15 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 PACKAGE_WEB_DIR = Path(__file__).resolve().parent / "web"
 PROJECT_WEB_DIR = ROOT_DIR / "web"
 WEB_DIR = PACKAGE_WEB_DIR if PACKAGE_WEB_DIR.exists() else PROJECT_WEB_DIR
+
+COMMON_SILENCE_HALLUCINATION_FRAGMENTS = (
+    "請不吝點贊訂閱轉發打賞支持明鏡與點點欄目",
+    "請不吝點讚訂閱轉發打賞支持明鏡與點點欄目",
+    "字幕由 Amara.org 社群提供",
+    "由 Amara.org 社群提供的字幕",
+    "歡迎訂閱按讚分享",
+)
+HALLUCINATION_TEXT_TRANSLATION = str.maketrans({"讚": "贊", "赞": "贊"})
 
 
 settings = get_settings()
@@ -171,6 +180,7 @@ async def _handle_text_message(
         return False
 
     if isinstance(message, StopMessage):
+        await _stop_state(state, drain_timeout=settings.stop_drain_timeout_seconds)
         await send_json(server_event("stats", stopped=True, reason=message.reason))
         return True
 
@@ -301,7 +311,8 @@ async def _process_windows(
                 )
                 continue
 
-            if result.text:
+            filtered_as_silence = bool(result.text and _should_drop_asr_result(window, result))
+            if result.text and not filtered_as_silence:
                 await send_json(
                     server_event(
                         "partial",
@@ -332,7 +343,8 @@ async def _process_windows(
                     "stats",
                     windowIndex=window.index,
                     segmentKind=window.kind,
-                    speech=True,
+                    speech=not filtered_as_silence,
+                    filtered=filtered_as_silence,
                     rms=round(window.rms, 5),
                     asrMs=result.duration_ms,
                     asrQueueWaitMs=asr_queue_wait_ms,
@@ -347,8 +359,11 @@ async def _process_windows(
             state.queue.task_done()
 
 
-async def _stop_state(state: StreamState) -> None:
-    if state.segmenter is not None and hasattr(state.segmenter, "flush"):
+async def _stop_state(state: StreamState, drain_timeout: float = 2.0) -> None:
+    if not state.stop_event.is_set() and state.segmenter is not None and hasattr(
+        state.segmenter,
+        "flush",
+    ):
         flushed = state.segmenter.flush()
         await _enqueue_windows(flushed, state)
 
@@ -356,7 +371,7 @@ async def _stop_state(state: StreamState) -> None:
     if state.processor_task is None:
         return
     try:
-        await asyncio.wait_for(state.processor_task, timeout=2.0)
+        await asyncio.wait_for(state.processor_task, timeout=drain_timeout)
     except asyncio.TimeoutError:
         state.processor_task.cancel()
     except asyncio.CancelledError:
@@ -379,6 +394,38 @@ def _build_segmenter(sample_rate: int) -> AudioWindowBuffer | AudioUtteranceBuff
         end_silence_ms=settings.vad_end_silence_ms,
         max_segment_seconds=settings.vad_max_segment_seconds,
         rms_threshold=settings.rms_threshold,
+    )
+
+
+def _should_drop_asr_result(window: AudioWindow, result: ASRResult) -> bool:
+    likely_no_speech = (
+        result.no_speech_prob is not None
+        and result.no_speech_prob >= settings.asr_no_speech_prob_threshold
+    )
+    low_energy = window.rms <= settings.asr_hallucination_rms_threshold
+    common_hallucination = _is_common_silence_hallucination(result.text)
+
+    return (likely_no_speech and low_energy) or (
+        common_hallucination and (likely_no_speech or low_energy)
+    )
+
+
+def _is_common_silence_hallucination(text: str) -> bool:
+    normalized = _normalize_hallucination_text(text)
+    if not normalized:
+        return False
+    return any(
+        _normalize_hallucination_text(fragment) in normalized
+        for fragment in COMMON_SILENCE_HALLUCINATION_FRAGMENTS
+    )
+
+
+def _normalize_hallucination_text(text: str) -> str:
+    ignored = set(" \t\r\n，,。.!?！？、；;：:\"'“”‘’（）()[]【】<>《》·-_/")
+    return "".join(
+        char.casefold()
+        for char in text.translate(HALLUCINATION_TEXT_TRANSLATION)
+        if char not in ignored
     )
 
 

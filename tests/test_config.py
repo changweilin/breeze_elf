@@ -15,6 +15,9 @@ class ConfigTests(unittest.TestCase):
                 "BREEZE_ASR_CONCURRENCY": "3",
                 "BREEZE_SEGMENTER": "window",
                 "BREEZE_VAD_END_SILENCE_MS": "900",
+                "BREEZE_STOP_DRAIN_TIMEOUT_SECONDS": "12.5",
+                "BREEZE_ASR_NO_SPEECH_PROB_THRESHOLD": "0.7",
+                "BREEZE_ASR_HALLUCINATION_RMS_THRESHOLD": "0.03",
             },
         ):
             settings = get_settings()
@@ -24,6 +27,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.asr_concurrency, 3)
         self.assertEqual(settings.segmenter, "window")
         self.assertEqual(settings.vad_end_silence_ms, 900)
+        self.assertEqual(settings.stop_drain_timeout_seconds, 12.5)
+        self.assertEqual(settings.asr_no_speech_prob_threshold, 0.7)
+        self.assertEqual(settings.asr_hallucination_rms_threshold, 0.03)
 
     def test_queue_and_asr_concurrency_are_at_least_one(self):
         with patch.dict(

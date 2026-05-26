@@ -51,6 +51,9 @@ class Settings:
     asr_provider: str = "faster-whisper"
     asr_load_on_startup: bool = True
     asr_concurrency: int = 1
+    asr_no_speech_prob_threshold: float = 0.6
+    asr_hallucination_rms_threshold: float = 0.02
+    stop_drain_timeout_seconds: float = 60.0
 
 
 def get_settings() -> Settings:
@@ -73,4 +76,7 @@ def get_settings() -> Settings:
         asr_provider=os.getenv("BREEZE_ASR_PROVIDER", "faster-whisper"),
         asr_load_on_startup=_bool_env("BREEZE_ASR_LOAD_ON_STARTUP", True),
         asr_concurrency=max(1, _int_env("BREEZE_ASR_CONCURRENCY", 1)),
+        asr_no_speech_prob_threshold=_float_env("BREEZE_ASR_NO_SPEECH_PROB_THRESHOLD", 0.6),
+        asr_hallucination_rms_threshold=_float_env("BREEZE_ASR_HALLUCINATION_RMS_THRESHOLD", 0.02),
+        stop_drain_timeout_seconds=max(0.1, _float_env("BREEZE_STOP_DRAIN_TIMEOUT_SECONDS", 60.0)),
     )

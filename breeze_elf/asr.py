@@ -22,6 +22,7 @@ class ASRResult:
     duration_ms: int
     backend: str
     device: str
+    no_speech_prob: float | None = None
 
 
 class ASREngine(Protocol):
@@ -117,7 +118,8 @@ class FasterWhisperASR:
             condition_on_previous_text=False,
             initial_prompt=TRADITIONAL_CHINESE_PROMPT,
         )
-        text = " ".join(segment.text.strip() for segment in segments).strip()
+        segment_list = list(segments)
+        text = " ".join(segment.text.strip() for segment in segment_list).strip()
         text = _to_traditional(text, self._converter)
         detected_language = getattr(info, "language", language) or language
         return ASRResult(
@@ -126,6 +128,7 @@ class FasterWhisperASR:
             duration_ms=round((time.perf_counter() - started) * 1000),
             backend=self.backend,
             device=f"{self.device}/{self.compute_type}",
+            no_speech_prob=_max_segment_float(segment_list, "no_speech_prob"),
         )
 
     def _device_candidates(self) -> list[tuple[str, str]]:
@@ -168,3 +171,15 @@ def _to_traditional(text: str, converter) -> str:
     except Exception:
         return text
 
+
+def _max_segment_float(segments, attr: str) -> float | None:
+    values: list[float] = []
+    for segment in segments:
+        value = getattr(segment, attr, None)
+        if value is None:
+            continue
+        try:
+            values.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    return max(values) if values else None

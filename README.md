@@ -45,6 +45,9 @@ Environment variables:
 | `BREEZE_ASR_CONCURRENCY` | `1` | Maximum concurrent ASR transcriptions. |
 | `BREEZE_ASR_PROVIDER` | `faster-whisper` | Set `mock` for development without ASR dependencies. |
 | `BREEZE_ASR_LOAD_ON_STARTUP` | `1` | Load Whisper during server startup. |
+| `BREEZE_ASR_NO_SPEECH_PROB_THRESHOLD` | `0.6` | Drop low-energy ASR results above this Whisper no-speech probability. |
+| `BREEZE_ASR_HALLUCINATION_RMS_THRESHOLD` | `0.02` | RMS ceiling used when filtering likely silence hallucinations. |
+| `BREEZE_STOP_DRAIN_TIMEOUT_SECONDS` | `60.0` | Time allowed to transcribe the final flushed utterance after stop. |
 | `BREEZE_RMS_THRESHOLD` | `0.008` | Silence gate threshold. |
 
 On an RTX 3060, `auto` tries CUDA with `float16`, then CUDA with `int8_float16`, then CPU with `int8`.
