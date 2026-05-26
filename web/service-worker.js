@@ -1,4 +1,4 @@
-const CACHE_NAME = "breeze-elf-v3";
+const CACHE_NAME = "breeze-elf-v4";
 const ASSETS = ["/", "/static/app.js", "/static/audio-worklet.js", "/manifest.webmanifest"];
 
 self.addEventListener("install", (event) => {

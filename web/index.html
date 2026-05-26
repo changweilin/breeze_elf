@@ -3,11 +3,29 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#10201d" />
+    <meta name="theme-color" content="#f6f7f8" />
     <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/static/apple-touch-icon.png" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <title>Breeze Elf</title>
+    <script>
+      (() => {
+        try {
+          const stored = localStorage.getItem("breeze-elf-theme");
+          const theme =
+            stored === "dark" || stored === "light"
+              ? stored
+              : matchMedia("(prefers-color-scheme: dark)").matches
+                ? "dark"
+                : "light";
+          document.documentElement.dataset.theme = theme;
+          document.querySelector("meta[name='theme-color']").content =
+            theme === "dark" ? "#111614" : "#f6f7f8";
+        } catch {
+          document.documentElement.dataset.theme = "light";
+        }
+      })();
+    </script>
     <style>
       :root {
         color-scheme: light;
@@ -16,10 +34,37 @@
         --muted: #5d6b67;
         --line: #ccd5d2;
         --panel: #ffffff;
+        --panel-subtle: #eef3f1;
         --live: #087f5b;
+        --live-contrast: #ffffff;
+        --live-soft: #a9d9c9;
         --warn: #b7791f;
         --danger: #b42318;
+        --danger-soft: #e7b2ad;
         --accent: #2454a6;
+        --button-hover: #eef3f1;
+        --shadow: rgba(20, 33, 31, 0.08);
+        --theme-color: #f6f7f8;
+      }
+
+      :root[data-theme="dark"] {
+        color-scheme: dark;
+        --bg: #111614;
+        --ink: #ecf2ef;
+        --muted: #a4b1ad;
+        --line: #34433f;
+        --panel: #1b2421;
+        --panel-subtle: #24312d;
+        --live: #41c999;
+        --live-contrast: #071411;
+        --live-soft: #245c49;
+        --warn: #e2b45e;
+        --danger: #ff8a80;
+        --danger-soft: #6f3732;
+        --accent: #91b8ff;
+        --button-hover: #24312d;
+        --shadow: rgba(0, 0, 0, 0.28);
+        --theme-color: #111614;
       }
 
       * {
@@ -38,6 +83,9 @@
           "Segoe UI",
           sans-serif;
         letter-spacing: 0;
+        transition:
+          background-color 160ms ease,
+          color 160ms ease;
       }
 
       .shell {
@@ -55,6 +103,13 @@
         align-items: center;
         justify-content: space-between;
         gap: 12px;
+      }
+
+      .header-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex: 0 0 auto;
       }
 
       .brand {
@@ -92,12 +147,12 @@
 
       .status.live {
         color: var(--live);
-        border-color: color-mix(in srgb, var(--live), white 65%);
+        border-color: var(--live-soft);
       }
 
       .status.error {
         color: var(--danger);
-        border-color: color-mix(in srgb, var(--danger), white 60%);
+        border-color: var(--danger-soft);
       }
 
       .controls {
@@ -116,22 +171,45 @@
         font: inherit;
         font-weight: 740;
         cursor: pointer;
+        transition:
+          background-color 140ms ease,
+          border-color 140ms ease,
+          color 140ms ease;
+      }
+
+      button:hover:not(:disabled) {
+        background: var(--button-hover);
       }
 
       button.primary {
         border-color: var(--live);
         background: var(--live);
-        color: white;
+        color: var(--live-contrast);
+      }
+
+      button.primary:hover:not(:disabled) {
+        background: var(--live);
       }
 
       button.danger {
-        border-color: color-mix(in srgb, var(--danger), white 55%);
+        border-color: var(--danger-soft);
         color: var(--danger);
       }
 
       button:disabled {
         cursor: not-allowed;
         opacity: 0.48;
+      }
+
+      .theme-toggle {
+        width: 42px;
+        min-width: 42px;
+        min-height: 42px;
+        padding: 0;
+        display: inline-grid;
+        place-items: center;
+        font-size: 1.08rem;
+        line-height: 1;
       }
 
       .transcript {
@@ -142,6 +220,7 @@
         display: grid;
         grid-template-rows: auto 1fr auto;
         overflow: hidden;
+        box-shadow: 0 1px 2px var(--shadow);
       }
 
       .bar {
@@ -230,7 +309,7 @@
         overflow: hidden;
         border: 1px solid var(--line);
         border-radius: 999px;
-        background: color-mix(in srgb, var(--line), white 55%);
+        background: var(--panel-subtle);
       }
 
       .meter > span {
@@ -299,6 +378,10 @@
           padding-inline: 8px;
         }
 
+        .theme-toggle {
+          width: 38px;
+          min-width: 38px;
+        }
       }
     </style>
   </head>
@@ -309,7 +392,10 @@
           <img class="brand-mark" src="/static/favicon.svg" width="42" height="42" alt="" />
           <h1>Breeze Elf</h1>
         </div>
-        <div id="status" class="status">待命</div>
+        <div class="header-actions">
+          <button id="theme" class="theme-toggle" type="button" aria-label="切換深色模式" aria-pressed="false" title="切換深色模式">☾</button>
+          <div id="status" class="status">待命</div>
+        </div>
       </header>
 
       <section class="controls" aria-label="controls">

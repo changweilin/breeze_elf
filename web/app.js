@@ -5,6 +5,8 @@ const els = {
   copy: document.querySelector("#copy"),
   download: document.querySelector("#download"),
   save: document.querySelector("#save"),
+  theme: document.querySelector("#theme"),
+  themeColor: document.querySelector("meta[name='theme-color']"),
   status: document.querySelector("#status"),
   stats: document.querySelector("#stats"),
   lines: document.querySelector("#lines"),
@@ -16,6 +18,12 @@ const els = {
 
 const AUDIO_CHUNK_MS = 250;
 const MAX_WS_BUFFERED_BYTES = 256 * 1024;
+const THEME_STORAGE_KEY = "breeze-elf-theme";
+const SYSTEM_DARK_QUERY = window.matchMedia("(prefers-color-scheme: dark)");
+const THEME_COLORS = {
+  light: "#f6f7f8",
+  dark: "#111614",
+};
 
 const state = {
   ws: null,
@@ -31,6 +39,53 @@ const state = {
   statsTimer: 0,
   savingRemote: false,
 };
+
+function storedTheme() {
+  try {
+    const value = localStorage.getItem(THEME_STORAGE_KEY);
+    return value === "dark" || value === "light" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function preferredTheme() {
+  return storedTheme() || (SYSTEM_DARK_QUERY.matches ? "dark" : "light");
+}
+
+function applyTheme(theme, { persist = false } = {}) {
+  const nextTheme = theme === "dark" ? "dark" : "light";
+  document.documentElement.dataset.theme = nextTheme;
+  els.themeColor.content = THEME_COLORS[nextTheme];
+
+  const switchLabel = nextTheme === "dark" ? "切換淺色模式" : "切換深色模式";
+  els.theme.textContent = nextTheme === "dark" ? "☀" : "☾";
+  els.theme.setAttribute("aria-label", switchLabel);
+  els.theme.setAttribute("title", switchLabel);
+  els.theme.setAttribute("aria-pressed", String(nextTheme === "dark"));
+
+  if (persist) {
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
+    } catch {
+      flashStats("無法記住主題");
+    }
+  }
+}
+
+function selectedTheme() {
+  return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+}
+
+function toggleTheme() {
+  applyTheme(selectedTheme() === "dark" ? "light" : "dark", { persist: true });
+}
+
+function syncSystemTheme() {
+  if (!storedTheme()) {
+    applyTheme(preferredTheme());
+  }
+}
 
 function websocketUrl() {
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
@@ -313,6 +368,10 @@ function handleServerMessage(event) {
   }
 }
 
+applyTheme(preferredTheme());
+
+els.theme.addEventListener("click", toggleTheme);
+SYSTEM_DARK_QUERY.addEventListener("change", syncSystemTheme);
 els.start.addEventListener("click", start);
 els.stop.addEventListener("click", stop);
 els.clear.addEventListener("click", () => {
