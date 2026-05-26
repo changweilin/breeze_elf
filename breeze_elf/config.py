@@ -54,6 +54,7 @@ class Settings:
     asr_no_speech_prob_threshold: float = 0.6
     asr_hallucination_rms_threshold: float = 0.02
     stop_drain_timeout_seconds: float = 60.0
+    remote_storage_dir: str = "remote_transcripts"
 
 
 def get_settings() -> Settings:
@@ -79,4 +80,5 @@ def get_settings() -> Settings:
         asr_no_speech_prob_threshold=_float_env("BREEZE_ASR_NO_SPEECH_PROB_THRESHOLD", 0.6),
         asr_hallucination_rms_threshold=_float_env("BREEZE_ASR_HALLUCINATION_RMS_THRESHOLD", 0.02),
         stop_drain_timeout_seconds=max(0.1, _float_env("BREEZE_STOP_DRAIN_TIMEOUT_SECONDS", 60.0)),
+        remote_storage_dir=os.getenv("BREEZE_REMOTE_STORAGE_DIR", "remote_transcripts"),
     )

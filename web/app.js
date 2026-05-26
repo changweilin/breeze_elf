@@ -4,6 +4,7 @@ const els = {
   clear: document.querySelector("#clear"),
   copy: document.querySelector("#copy"),
   download: document.querySelector("#download"),
+  save: document.querySelector("#save"),
   status: document.querySelector("#status"),
   stats: document.querySelector("#stats"),
   lines: document.querySelector("#lines"),
@@ -28,6 +29,7 @@ const state = {
   transcript: "",
   droppedClientChunks: 0,
   statsTimer: 0,
+  savingRemote: false,
 };
 
 function websocketUrl() {
@@ -106,12 +108,11 @@ function renderStats(data = {}) {
   }
 }
 
-function flashStats(text) {
+function flashStats(text, restoreText = els.stats.textContent) {
   window.clearTimeout(state.statsTimer);
-  const previous = els.stats.textContent;
   els.stats.textContent = text;
   state.statsTimer = window.setTimeout(() => {
-    els.stats.textContent = previous;
+    els.stats.textContent = restoreText;
   }, 1200);
 }
 
@@ -123,6 +124,15 @@ function renderLevel(rms = 0) {
 function setTranscriptActions(hasTranscript) {
   els.copy.disabled = !hasTranscript;
   els.download.disabled = !hasTranscript;
+  els.save.disabled = !hasTranscript || state.savingRemote;
+}
+
+function transcriptTitle(text) {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean)
+    ?.slice(0, 80);
 }
 
 function stopClock() {
@@ -333,6 +343,42 @@ els.download.addEventListener("click", () => {
   link.click();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   flashStats("已下載");
+});
+els.save.addEventListener("click", async () => {
+  const text = state.transcript.trim();
+  if (!text || state.savingRemote) {
+    return;
+  }
+
+  state.savingRemote = true;
+  setTranscriptActions(true);
+  window.clearTimeout(state.statsTimer);
+  const previousStats = els.stats.textContent;
+  els.stats.textContent = "遠端儲存中";
+
+  try {
+    const response = await fetch("/api/transcripts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text,
+        title: transcriptTitle(text),
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) {
+      throw new Error(data.detail || "遠端儲存失敗");
+    }
+    flashStats(
+      data.filename ? `已遠端儲存 ${data.filename}` : "已遠端儲存",
+      previousStats,
+    );
+  } catch (error) {
+    flashStats(error.message || "遠端儲存失敗", previousStats);
+  } finally {
+    state.savingRemote = false;
+    setTranscriptActions(Boolean(state.transcript.trim()));
+  }
 });
 
 if ("serviceWorker" in navigator && window.isSecureContext) {

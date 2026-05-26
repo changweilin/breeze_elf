@@ -268,7 +268,7 @@
 
         .bar-actions {
           display: grid;
-          grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+          grid-template-columns: repeat(3, minmax(0, 1fr));
           width: 100%;
         }
 
@@ -325,6 +325,7 @@
             <span id="stats">0 ms</span>
             <button id="copy" class="mini" type="button" disabled>複製</button>
             <button id="download" class="mini" type="button" disabled>下載</button>
+            <button id="save" class="mini" type="button" disabled>遠端儲存</button>
           </div>
         </div>
         <div id="lines"></div>

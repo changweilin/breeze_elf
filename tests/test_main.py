@@ -1,6 +1,10 @@
 import asyncio
+import json
+import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -38,6 +42,22 @@ class ImmediateASRQueue:
 
 
 class MainTests(unittest.IsolatedAsyncioTestCase):
+    async def test_remote_transcript_endpoint_saves_to_configured_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(main, "settings", replace(main.settings, remote_storage_dir=tmp)):
+                response = await main.create_remote_transcript(
+                    main.TranscriptSaveRequest(text="遠端儲存測試")
+                )
+
+            data = json.loads(response.body)
+
+            self.assertTrue(data["ok"])
+            self.assertTrue(data["filename"].endswith(".txt"))
+            self.assertEqual(
+                (Path(tmp) / data["filename"]).read_text(encoding="utf-8"),
+                "遠端儲存測試\n",
+            )
+
     async def test_audio_payload_reports_backpressure_when_queue_drops_window(self):
         state = StreamState(
             started=True,

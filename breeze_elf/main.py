@@ -9,9 +9,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 from starlette.websockets import WebSocketState
 
 from .asr import ASRResult, build_asr_from_env
@@ -26,6 +27,7 @@ from .protocol import (
     parse_client_text,
     server_event,
 )
+from .storage import save_transcript
 
 LOGGER = logging.getLogger("breeze_elf")
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -41,6 +43,11 @@ COMMON_SILENCE_HALLUCINATION_FRAGMENTS = (
     "歡迎訂閱按讚分享",
 )
 HALLUCINATION_TEXT_TRANSLATION = str.maketrans({"讚": "贊", "赞": "贊"})
+
+
+class TranscriptSaveRequest(BaseModel):
+    text: str = Field(min_length=1)
+    title: str | None = None
 
 
 settings = get_settings()
@@ -104,6 +111,38 @@ async def health() -> JSONResponse:
             "asrError": app.state.asr_error,
         }
     )
+
+
+@app.post("/api/transcripts")
+async def create_remote_transcript(payload: TranscriptSaveRequest) -> JSONResponse:
+    try:
+        stored = save_transcript(
+            payload.text,
+            _remote_storage_dir(),
+            title=payload.title,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        LOGGER.exception("Remote transcript storage failed")
+        raise HTTPException(status_code=500, detail="remote transcript storage failed") from exc
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "id": stored.id,
+            "filename": stored.filename,
+            "createdAt": stored.created_at,
+            "sizeBytes": stored.size_bytes,
+        }
+    )
+
+
+def _remote_storage_dir() -> Path:
+    configured = Path(settings.remote_storage_dir).expanduser()
+    if configured.is_absolute():
+        return configured
+    return ROOT_DIR / configured
 
 
 @dataclass

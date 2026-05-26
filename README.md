@@ -22,6 +22,14 @@ Open the HTTPS Tailscale Serve URL on your phone, allow microphone access, then 
 
 If the Tailscale command reports access denied on Windows, run the command from an Administrator PowerShell.
 
+## Remote Transcript Saving
+
+The web app can save the current transcript back to the Breeze Elf host. Tap `遠端儲存`
+after text appears, and the server writes a UTF-8 `.txt` file under
+`remote_transcripts/` by default.
+
+Set `BREEZE_REMOTE_STORAGE_DIR` to choose another host-side directory.
+
 ## Configuration
 
 Environment variables:
@@ -49,6 +57,7 @@ Environment variables:
 | `BREEZE_ASR_HALLUCINATION_RMS_THRESHOLD` | `0.02` | RMS ceiling used when filtering likely silence hallucinations. |
 | `BREEZE_STOP_DRAIN_TIMEOUT_SECONDS` | `60.0` | Time allowed to transcribe the final flushed utterance after stop. |
 | `BREEZE_RMS_THRESHOLD` | `0.008` | Silence gate threshold. |
+| `BREEZE_REMOTE_STORAGE_DIR` | `remote_transcripts` | Host-side directory for remotely saved transcript `.txt` files. |
 
 On an RTX 3060, `auto` tries CUDA with `float16`, then CUDA with `int8_float16`, then CPU with `int8`.
 
