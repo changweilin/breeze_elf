@@ -1,0 +1,39 @@
+import os
+import unittest
+from unittest.mock import patch
+
+from breeze_elf.config import get_settings
+
+
+class ConfigTests(unittest.TestCase):
+    def test_get_settings_reads_environment_at_call_time(self):
+        with patch.dict(
+            os.environ,
+            {
+                "BREEZE_PORT": "9999",
+                "BREEZE_ASR_PROVIDER": "mock",
+                "BREEZE_ASR_CONCURRENCY": "3",
+            },
+        ):
+            settings = get_settings()
+
+        self.assertEqual(settings.port, 9999)
+        self.assertEqual(settings.asr_provider, "mock")
+        self.assertEqual(settings.asr_concurrency, 3)
+
+    def test_queue_and_asr_concurrency_are_at_least_one(self):
+        with patch.dict(
+            os.environ,
+            {
+                "BREEZE_MAX_QUEUE_WINDOWS": "0",
+                "BREEZE_ASR_CONCURRENCY": "0",
+            },
+        ):
+            settings = get_settings()
+
+        self.assertEqual(settings.max_queue_windows, 1)
+        self.assertEqual(settings.asr_concurrency, 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

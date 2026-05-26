@@ -33,20 +33,34 @@ def _bool_env(name: str, default: bool) -> bool:
 
 @dataclass(frozen=True)
 class Settings:
-    host: str = os.getenv("BREEZE_HOST", "127.0.0.1")
-    port: int = _int_env("BREEZE_PORT", 8788)
-    sample_rate: int = _int_env("BREEZE_SAMPLE_RATE", 16_000)
-    window_seconds: float = _float_env("BREEZE_WINDOW_SECONDS", 2.0)
-    overlap_seconds: float = _float_env("BREEZE_OVERLAP_SECONDS", 0.5)
-    rms_threshold: float = _float_env("BREEZE_RMS_THRESHOLD", 0.008)
-    max_queue_windows: int = _int_env("BREEZE_MAX_QUEUE_WINDOWS", 4)
-    language: str = os.getenv("BREEZE_LANGUAGE", "zh")
-    asr_model: str = os.getenv("BREEZE_ASR_MODEL", "medium")
-    asr_device: str = os.getenv("BREEZE_ASR_DEVICE", "auto")
-    asr_provider: str = os.getenv("BREEZE_ASR_PROVIDER", "faster-whisper")
-    asr_load_on_startup: bool = _bool_env("BREEZE_ASR_LOAD_ON_STARTUP", True)
+    host: str = "127.0.0.1"
+    port: int = 8788
+    sample_rate: int = 16_000
+    window_seconds: float = 2.0
+    overlap_seconds: float = 0.5
+    rms_threshold: float = 0.008
+    max_queue_windows: int = 4
+    language: str = "zh"
+    asr_model: str = "medium"
+    asr_device: str = "auto"
+    asr_provider: str = "faster-whisper"
+    asr_load_on_startup: bool = True
+    asr_concurrency: int = 1
 
 
 def get_settings() -> Settings:
-    return Settings()
-
+    return Settings(
+        host=os.getenv("BREEZE_HOST", "127.0.0.1"),
+        port=_int_env("BREEZE_PORT", 8788),
+        sample_rate=_int_env("BREEZE_SAMPLE_RATE", 16_000),
+        window_seconds=_float_env("BREEZE_WINDOW_SECONDS", 2.0),
+        overlap_seconds=_float_env("BREEZE_OVERLAP_SECONDS", 0.5),
+        rms_threshold=_float_env("BREEZE_RMS_THRESHOLD", 0.008),
+        max_queue_windows=max(1, _int_env("BREEZE_MAX_QUEUE_WINDOWS", 4)),
+        language=os.getenv("BREEZE_LANGUAGE", "zh"),
+        asr_model=os.getenv("BREEZE_ASR_MODEL", "medium"),
+        asr_device=os.getenv("BREEZE_ASR_DEVICE", "auto"),
+        asr_provider=os.getenv("BREEZE_ASR_PROVIDER", "faster-whisper"),
+        asr_load_on_startup=_bool_env("BREEZE_ASR_LOAD_ON_STARTUP", True),
+        asr_concurrency=max(1, _int_env("BREEZE_ASR_CONCURRENCY", 1)),
+    )

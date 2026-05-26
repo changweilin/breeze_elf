@@ -8,6 +8,8 @@
     "dev:mock": "powershell -NoProfile -Command \"$env:BREEZE_ASR_PROVIDER='mock'; $env:BREEZE_ASR_LOAD_ON_STARTUP='0'; uv run python -m breeze_elf\"",
     "serve:tailscale": "tailscale serve --bg 8788",
     "serve:status": "tailscale serve status",
-    "test": "uv run python -m unittest discover"
+    "test": "uv run python -m unittest discover",
+    "bench": "uv run python -m breeze_elf.benchmark",
+    "bench:mock": "uv run python -m breeze_elf.benchmark --provider mock --transcribe"
   }
 }

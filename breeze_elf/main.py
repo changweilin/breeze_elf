@@ -33,6 +33,7 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
     app.state.asr = asr_engine
     app.state.asr_error = None
+    app.state.asr_semaphore = asyncio.Semaphore(max(1, settings.asr_concurrency))
 
     if settings.asr_load_on_startup:
         loop = asyncio.get_running_loop()
@@ -72,6 +73,7 @@ async def health() -> JSONResponse:
             "sampleRate": settings.sample_rate,
             "asrBackend": asr_engine.backend,
             "asrDevice": asr_engine.device,
+            "asrConcurrency": settings.asr_concurrency,
             "asrError": app.state.asr_error,
         }
     )
@@ -114,7 +116,13 @@ async def audio_socket(websocket: WebSocket) -> None:
             payload = message.get("bytes")
 
             if text is not None:
-                should_stop = await _handle_text_message(text, state, send_json, websocket.app.state.asr)
+                should_stop = await _handle_text_message(
+                    text,
+                    state,
+                    send_json,
+                    websocket.app.state.asr,
+                    websocket.app.state.asr_semaphore,
+                )
                 if should_stop:
                     break
                 continue
@@ -133,6 +141,7 @@ async def _handle_text_message(
     state: StreamState,
     send_json: Callable[[dict[str, Any]], Awaitable[None]],
     asr: ASREngine,
+    asr_semaphore: asyncio.Semaphore,
 ) -> bool:
     try:
         message = parse_client_text(raw)
@@ -161,7 +170,9 @@ async def _handle_text_message(
         )
         state.queue = asyncio.Queue(maxsize=settings.max_queue_windows)
         state.stop_event.clear()
-        state.processor_task = asyncio.create_task(_process_windows(state, send_json, asr, message.language))
+        state.processor_task = asyncio.create_task(
+            _process_windows(state, send_json, asr, asr_semaphore, message.language)
+        )
         state.started = True
         await send_json(
             server_event(
@@ -189,21 +200,34 @@ async def _handle_audio_payload(
         return
 
     windows = state.segmenter.append_pcm16(payload)
+    dropped = 0
     for window in windows:
         if state.queue.full():
             try:
                 state.queue.get_nowait()
                 state.queue.task_done()
                 state.dropped_windows += 1
+                dropped += 1
             except asyncio.QueueEmpty:
                 pass
         await state.queue.put(window)
+
+    if dropped:
+        await send_json(
+            server_event(
+                "stats",
+                backpressure=True,
+                droppedWindows=state.dropped_windows,
+                queueDepth=state.queue.qsize(),
+            )
+        )
 
 
 async def _process_windows(
     state: StreamState,
     send_json: Callable[[dict[str, Any]], Awaitable[None]],
     asr: ASREngine,
+    asr_semaphore: asyncio.Semaphore,
     language: str,
 ) -> None:
     assert state.queue is not None
@@ -226,20 +250,32 @@ async def _process_windows(
                         speech=False,
                         rms=round(window.rms, 5),
                         droppedWindows=state.dropped_windows,
+                        queueDepth=state.queue.qsize(),
                     )
                 )
                 continue
 
+            asr_queue_wait_ms = 0
             try:
-                result = await loop.run_in_executor(
-                    None,
-                    asr.transcribe,
-                    window.samples,
-                    settings.sample_rate,
-                    language,
-                )
+                wait_started = time.perf_counter()
+                async with asr_semaphore:
+                    asr_queue_wait_ms = round((time.perf_counter() - wait_started) * 1000)
+                    result = await loop.run_in_executor(
+                        None,
+                        asr.transcribe,
+                        window.samples,
+                        settings.sample_rate,
+                        language,
+                    )
             except Exception as exc:
-                await send_json(server_event("error", message=str(exc), windowIndex=window.index))
+                await send_json(
+                    server_event(
+                        "error",
+                        message=str(exc),
+                        windowIndex=window.index,
+                        asrQueueWaitMs=asr_queue_wait_ms,
+                    )
+                )
                 continue
 
             if result.text:
@@ -273,9 +309,11 @@ async def _process_windows(
                     speech=True,
                     rms=round(window.rms, 5),
                     asrMs=result.duration_ms,
+                    asrQueueWaitMs=asr_queue_wait_ms,
                     backend=result.backend,
                     device=result.device,
                     droppedWindows=state.dropped_windows,
+                    queueDepth=state.queue.qsize(),
                 )
             )
         finally:
@@ -305,11 +343,19 @@ def _novel_text(transcript: str, current: str) -> str:
     if current in tail:
         return ""
 
+    min_overlap = _min_overlap_size(tail, current)
     max_overlap = min(len(tail), len(current))
-    for size in range(max_overlap, 5, -1):
+    for size in range(max_overlap, min_overlap - 1, -1):
         if tail.endswith(current[:size]):
             return current[size:].lstrip(" ，,。.!?！？")
     return f" {current}"
+
+
+def _min_overlap_size(tail: str, current: str) -> int:
+    probe = f"{tail[-24:]}{current[:24]}"
+    if any("\u4e00" <= char <= "\u9fff" for char in probe):
+        return 2
+    return 6
 
 
 def run() -> None:
@@ -317,4 +363,3 @@ def run() -> None:
 
     logging.basicConfig(level=logging.INFO)
     uvicorn.run("breeze_elf.main:app", host=settings.host, port=settings.port, reload=False)
-

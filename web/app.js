@@ -10,6 +10,9 @@ const els = {
   clock: document.querySelector("#clock"),
 };
 
+const AUDIO_CHUNK_MS = 250;
+const MAX_WS_BUFFERED_BYTES = 256 * 1024;
+
 const state = {
   ws: null,
   audioContext: null,
@@ -20,6 +23,7 @@ const state = {
   startedAt: 0,
   clockTimer: 0,
   transcript: "",
+  droppedClientChunks: 0,
 };
 
 function websocketUrl() {
@@ -57,6 +61,34 @@ function startClock() {
     const ss = String(seconds % 60).padStart(2, "0");
     els.clock.textContent = `${mm}:${ss}`;
   }, 500);
+}
+
+function renderStats(data = {}) {
+  const parts = [];
+  if (typeof data.asrMs === "number") {
+    parts.push(`${data.asrMs} ms`);
+  } else if (data.speech === false) {
+    parts.push("靜音");
+  } else if (data.backpressure) {
+    parts.push("延遲");
+  }
+
+  if (typeof data.asrQueueWaitMs === "number" && data.asrQueueWaitMs > 0) {
+    parts.push(`等候 ${data.asrQueueWaitMs} ms`);
+  }
+  if (typeof data.droppedWindows === "number" && data.droppedWindows > 0) {
+    parts.push(`後端丟 ${data.droppedWindows}`);
+  }
+  if (state.droppedClientChunks > 0) {
+    parts.push(`前端丟 ${state.droppedClientChunks}`);
+  }
+  if (typeof data.queueDepth === "number" && data.queueDepth > 0) {
+    parts.push(`佇列 ${data.queueDepth}`);
+  }
+
+  if (parts.length) {
+    els.stats.textContent = parts.join(" · ");
+  }
 }
 
 function stopClock() {
@@ -99,6 +131,8 @@ async function start() {
 
   setRunning(true);
   setStatus("連線中");
+  state.droppedClientChunks = 0;
+  els.stats.textContent = "0 ms";
 
   try {
     const ws = new WebSocket(websocketUrl());
@@ -128,7 +162,7 @@ async function start() {
 
     state.source = state.audioContext.createMediaStreamSource(state.stream);
     state.worklet = new AudioWorkletNode(state.audioContext, "breeze-mic-processor", {
-      processorOptions: { targetSampleRate: 16000, chunkMs: 250 },
+      processorOptions: { targetSampleRate: 16000, chunkMs: AUDIO_CHUNK_MS },
     });
     state.silence = state.audioContext.createGain();
     state.silence.gain.value = 0;
@@ -138,6 +172,11 @@ async function start() {
         return;
       }
       if (state.ws?.readyState === WebSocket.OPEN) {
+        if (state.ws.bufferedAmount > MAX_WS_BUFFERED_BYTES) {
+          state.droppedClientChunks += 1;
+          renderStats({ backpressure: true });
+          return;
+        }
         state.ws.send(event.data.buffer);
       }
     };
@@ -145,7 +184,7 @@ async function start() {
     state.source.connect(state.worklet);
     state.worklet.connect(state.silence).connect(state.audioContext.destination);
 
-    ws.send(JSON.stringify({ type: "start", sampleRate: 16000, language: "zh", chunkMs: 1000 }));
+    ws.send(JSON.stringify({ type: "start", sampleRate: 16000, language: "zh", chunkMs: AUDIO_CHUNK_MS }));
     setStatus("收音中", "live");
     startClock();
   } catch (error) {
@@ -209,11 +248,7 @@ function handleServerMessage(event) {
   }
 
   if (data.type === "stats") {
-    if (typeof data.asrMs === "number") {
-      els.stats.textContent = `${data.asrMs} ms`;
-    } else if (data.speech === false) {
-      els.stats.textContent = "靜音";
-    }
+    renderStats(data);
     return;
   }
 
@@ -232,4 +267,3 @@ els.clear.addEventListener("click", () => {
 if ("serviceWorker" in navigator && window.isSecureContext) {
   navigator.serviceWorker.register("/service-worker.js").catch(() => {});
 }
-
