@@ -34,6 +34,15 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 PACKAGE_WEB_DIR = Path(__file__).resolve().parent / "web"
 PROJECT_WEB_DIR = ROOT_DIR / "web"
 WEB_DIR = PACKAGE_WEB_DIR if PACKAGE_WEB_DIR.exists() else PROJECT_WEB_DIR
+ROOT_STATIC_MEDIA_TYPES = {
+    "app.js": "application/javascript",
+    "audio-worklet.js": "application/javascript",
+    "favicon.svg": "image/svg+xml",
+    "logo.svg": "image/svg+xml",
+    "apple-touch-icon.png": "image/png",
+    "icon-192.png": "image/png",
+    "icon-512.png": "image/png",
+}
 
 COMMON_SILENCE_HALLUCINATION_FRAGMENTS = (
     "請不吝點贊訂閱轉發打賞支持明鏡與點點欄目",
@@ -111,6 +120,14 @@ async def health() -> JSONResponse:
             "asrError": app.state.asr_error,
         }
     )
+
+
+@app.get("/{asset_name}", include_in_schema=False)
+async def root_static_asset(asset_name: str) -> FileResponse:
+    media_type = ROOT_STATIC_MEDIA_TYPES.get(asset_name)
+    if media_type is None:
+        raise HTTPException(status_code=404, detail="static asset not found")
+    return FileResponse(WEB_DIR / asset_name, media_type=media_type)
 
 
 @app.post("/api/transcripts")

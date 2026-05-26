@@ -1,5 +1,5 @@
-const CACHE_NAME = "breeze-elf-v4";
-const ASSETS = ["/", "/static/app.js", "/static/audio-worklet.js", "/manifest.webmanifest"];
+const CACHE_NAME = "breeze-elf-v5";
+const ASSETS = ["./", "./app.js", "./audio-worklet.js", "./manifest.webmanifest"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS)));

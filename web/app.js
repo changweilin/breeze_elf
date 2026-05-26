@@ -20,10 +20,42 @@ const AUDIO_CHUNK_MS = 250;
 const MAX_WS_BUFFERED_BYTES = 256 * 1024;
 const THEME_STORAGE_KEY = "breeze-elf-theme";
 const SYSTEM_DARK_QUERY = window.matchMedia("(prefers-color-scheme: dark)");
+const SEARCH_PARAMS = new URLSearchParams(location.search);
+const DEMO_MODE =
+  SEARCH_PARAMS.has("demo") ||
+  SEARCH_PARAMS.get("mode") === "demo" ||
+  location.protocol === "file:" ||
+  location.hostname.endsWith(".github.io");
 const THEME_COLORS = {
   light: "#f6f7f8",
   dark: "#111614",
 };
+const DEMO_EVENTS = [
+  {
+    delay: 350,
+    partial: "今天先確認 GitHub Actions 的靜態展示。",
+    rms: 0.045,
+    stats: { asrMs: 18, segmentKind: "utterance" },
+  },
+  {
+    delay: 1100,
+    final: "今天先確認 GitHub Actions 的靜態展示。",
+    rms: 0.02,
+    stats: { asrMs: 18, segmentKind: "utterance" },
+  },
+  {
+    delay: 1850,
+    partial: "麥克風、WebSocket 與遠端儲存都維持凍結。",
+    rms: 0.05,
+    stats: { asrMs: 22, segmentKind: "utterance" },
+  },
+  {
+    delay: 2750,
+    final: "\n麥克風、WebSocket 與遠端儲存都維持凍結，只呈現操作流程。",
+    rms: 0.01,
+    stats: { asrMs: 22, segmentKind: "utterance" },
+  },
+];
 
 const state = {
   ws: null,
@@ -38,6 +70,8 @@ const state = {
   droppedClientChunks: 0,
   statsTimer: 0,
   savingRemote: false,
+  demoRunning: false,
+  demoTimers: [],
 };
 
 function storedTheme() {
@@ -179,7 +213,7 @@ function renderLevel(rms = 0) {
 function setTranscriptActions(hasTranscript) {
   els.copy.disabled = !hasTranscript;
   els.download.disabled = !hasTranscript;
-  els.save.disabled = !hasTranscript || state.savingRemote;
+  els.save.disabled = DEMO_MODE || !hasTranscript || state.savingRemote;
 }
 
 function transcriptTitle(text) {
@@ -217,7 +251,88 @@ function waitForOpen(ws) {
   });
 }
 
+function clearDemoTimers() {
+  state.demoTimers.forEach((timer) => window.clearTimeout(timer));
+  state.demoTimers = [];
+}
+
+function startDemo() {
+  clearDemoTimers();
+  state.demoRunning = true;
+  state.droppedClientChunks = 0;
+  renderTranscript("");
+  els.partial.textContent = "";
+  els.stats.textContent = "示意模式";
+  els.backend.textContent = "GitHub Actions 示意 · 隱私功能凍結";
+  setRunning(true);
+  setStatus("示意中", "live");
+  startClock();
+  renderLevel(0.02);
+
+  DEMO_EVENTS.forEach((entry) => {
+    const timer = window.setTimeout(() => {
+      if (!state.demoRunning) {
+        return;
+      }
+      if (entry.partial) {
+        els.partial.textContent = entry.partial;
+      }
+      if (entry.final) {
+        els.partial.textContent = "";
+        appendTranscript(entry.final);
+      }
+      renderLevel(entry.rms || 0);
+      renderStats(entry.stats);
+    }, entry.delay);
+    state.demoTimers.push(timer);
+  });
+
+  state.demoTimers.push(
+    window.setTimeout(() => {
+      if (!state.demoRunning) {
+        return;
+      }
+      state.demoRunning = false;
+      clearDemoTimers();
+      stopClock();
+      renderLevel(0);
+      renderStats({ stopped: true });
+      setRunning(false);
+      setStatus("示意完成");
+    }, DEMO_EVENTS.at(-1).delay + 650),
+  );
+}
+
+function stopDemo(status = "示意待命") {
+  clearDemoTimers();
+  state.demoRunning = false;
+  els.partial.textContent = "";
+  stopClock();
+  renderLevel(0);
+  setRunning(false);
+  setStatus(status);
+}
+
+function applyRuntimeMode() {
+  if (!DEMO_MODE) {
+    return;
+  }
+
+  els.backend.textContent = "GitHub Actions 示意 · 隱私功能凍結";
+  els.save.textContent = "儲存凍結";
+  els.save.setAttribute("title", "示意模式不會寫入遠端主機");
+  els.save.setAttribute("aria-label", "遠端儲存已凍結");
+  els.stats.textContent = "示意模式";
+  setStatus("示意");
+  setTranscriptActions(false);
+}
+
 async function start() {
+  if (DEMO_MODE) {
+    startDemo();
+    return;
+  }
+
   if (!window.isSecureContext && !["localhost", "127.0.0.1"].includes(location.hostname)) {
     setStatus("需要 HTTPS", "error");
     return;
@@ -259,7 +374,9 @@ async function start() {
     });
 
     state.audioContext = new AudioContext({ latencyHint: "interactive" });
-    await state.audioContext.audioWorklet.addModule("/static/audio-worklet.js");
+    await state.audioContext.audioWorklet.addModule(
+      new URL("audio-worklet.js", import.meta.url).href,
+    );
 
     state.source = state.audioContext.createMediaStreamSource(state.stream);
     state.worklet = new AudioWorkletNode(state.audioContext, "breeze-mic-processor", {
@@ -296,6 +413,11 @@ async function start() {
 }
 
 function stop() {
+  if (DEMO_MODE) {
+    stopDemo();
+    return;
+  }
+
   cleanupAudio();
   stopClock();
 
@@ -369,6 +491,7 @@ function handleServerMessage(event) {
 }
 
 applyTheme(preferredTheme());
+applyRuntimeMode();
 
 els.theme.addEventListener("click", toggleTheme);
 SYSTEM_DARK_QUERY.addEventListener("change", syncSystemTheme);
@@ -404,6 +527,11 @@ els.download.addEventListener("click", () => {
   flashStats("已下載");
 });
 els.save.addEventListener("click", async () => {
+  if (DEMO_MODE) {
+    flashStats("示意模式不會遠端儲存");
+    return;
+  }
+
   const text = state.transcript.trim();
   if (!text || state.savingRemote) {
     return;
@@ -441,5 +569,5 @@ els.save.addEventListener("click", async () => {
 });
 
 if ("serviceWorker" in navigator && window.isSecureContext) {
-  navigator.serviceWorker.register("/service-worker.js").catch(() => {});
+  navigator.serviceWorker.register(new URL("service-worker.js", location.href).href).catch(() => {});
 }

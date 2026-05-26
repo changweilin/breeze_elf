@@ -211,6 +211,10 @@ class StaticAssetsTests(unittest.TestCase):
     def test_web_dir_points_to_existing_static_assets(self):
         self.assertTrue((Path(main.WEB_DIR) / "index.html").is_file())
 
+    def test_root_static_assets_are_whitelisted_and_present(self):
+        for asset_name in main.ROOT_STATIC_MEDIA_TYPES:
+            self.assertTrue((Path(main.WEB_DIR) / asset_name).is_file(), asset_name)
+
 
 if __name__ == "__main__":
     unittest.main()

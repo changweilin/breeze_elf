@@ -30,6 +30,13 @@ after text appears, and the server writes a UTF-8 `.txt` file under
 
 Set `BREEZE_REMOTE_STORAGE_DIR` to choose another host-side directory.
 
+## GitHub Actions Web Demo
+
+The `Web Demo` workflow publishes the static `web/` folder to GitHub Pages. On
+`*.github.io`, `file://`, or when opened with `?demo=1`, the page runs in demo
+mode: microphone capture, WebSocket streaming, and remote transcript saving are
+frozen, and the Start button plays a short sample transcript instead.
+
 ## Configuration
 
 Environment variables:
