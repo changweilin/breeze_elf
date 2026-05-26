@@ -1,0 +1,13 @@
+{
+  "name": "breeze-elf",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "uv run python -m breeze_elf",
+    "dev:lan": "powershell -NoProfile -Command \"$env:BREEZE_HOST='0.0.0.0'; uv run python -m breeze_elf\"",
+    "dev:mock": "powershell -NoProfile -Command \"$env:BREEZE_ASR_PROVIDER='mock'; $env:BREEZE_ASR_LOAD_ON_STARTUP='0'; uv run python -m breeze_elf\"",
+    "serve:tailscale": "tailscale serve --bg 8788",
+    "serve:status": "tailscale serve status",
+    "test": "uv run python -m unittest discover"
+  }
+}
