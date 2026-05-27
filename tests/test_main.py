@@ -11,7 +11,7 @@ import numpy as np
 from breeze_elf import main
 from breeze_elf.asr import ASRResult
 from breeze_elf.asr_queue import QueuedASRResult
-from breeze_elf.audio import AudioUtteranceBuffer, AudioWindow, AudioWindowBuffer
+from breeze_elf.audio import AudioUtteranceBuffer, AudioWindow, AudioWindowBuffer, calculate_rms
 from breeze_elf.main import (
     StreamState,
     _handle_audio_payload,
@@ -31,6 +31,30 @@ class ImmediateASRQueue:
         return QueuedASRResult(
             result=ASRResult(
                 text="最後一句",
+                language=language,
+                duration_ms=0,
+                backend=self.backend,
+                device=self.device,
+            ),
+            queue_wait_ms=0,
+            queue_depth=0,
+        )
+
+
+class RecordingASRQueue:
+    backend = "test"
+    device = "cpu"
+    queue_depth = 0
+
+    def __init__(self):
+        self.received_rms = 0.0
+
+    async def transcribe(self, samples, sample_rate, language):
+        del sample_rate
+        self.received_rms = calculate_rms(samples)
+        return QueuedASRResult(
+            result=ASRResult(
+                text="",
                 language=language,
                 duration_ms=0,
                 backend=self.backend,
@@ -133,6 +157,38 @@ class MainTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(events[final_index]["pitch"]["medianHz"])
         self.assertEqual(events[final_index]["pitch"]["points"], [])
         self.assertEqual(events[stopped_index]["reason"], "test")
+
+    async def test_process_windows_prepares_asr_audio_without_changing_window_stats(self):
+        sample_rate = 16_000
+        time_axis = np.arange(sample_rate, dtype=np.float32) / sample_rate
+        samples = (0.02 * np.sin(2 * np.pi * 220.0 * time_axis)).astype(np.float32)
+        window = AudioWindow(
+            index=0,
+            start_seconds=0.0,
+            end_seconds=1.0,
+            samples=samples,
+            rms=calculate_rms(samples),
+            is_speech=True,
+            kind="utterance",
+        )
+        state = StreamState(started=True, queue=asyncio.Queue(maxsize=1))
+        await state.queue.put(window)
+        state.stop_event.set()
+        events = []
+
+        async def send_json(payload):
+            events.append(payload)
+
+        asr_queue = RecordingASRQueue()
+        with patch.object(
+            main,
+            "settings",
+            replace(main.settings, audio_preprocess="natural", sample_rate=sample_rate),
+        ):
+            await main._process_windows(state, send_json, asr_queue, "zh")
+
+        self.assertGreater(asr_queue.received_rms, window.rms)
+        self.assertTrue(any(event.get("rms") == round(window.rms, 5) for event in events))
 
 
 class NovelTextTests(unittest.TestCase):

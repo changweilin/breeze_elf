@@ -32,6 +32,35 @@ class PitchSummary:
     points: tuple[PitchPoint, ...]
 
 
+@dataclass(frozen=True)
+class AudioPreprocessConfig:
+    highpass_hz: float = 0.0
+    noise_reduction_db: float = 0.0
+    normalize_target_rms: float = 0.0
+    normalize_max_gain_db: float = 0.0
+    normalize_max_cut_db: float = 0.0
+    peak_headroom: float = 0.98
+
+
+_AUDIO_PREPROCESS_PROFILES = {
+    "off": AudioPreprocessConfig(),
+    "natural": AudioPreprocessConfig(
+        highpass_hz=65.0,
+        noise_reduction_db=4.5,
+        normalize_target_rms=0.08,
+        normalize_max_gain_db=6.0,
+        normalize_max_cut_db=3.0,
+    ),
+    "speech": AudioPreprocessConfig(
+        highpass_hz=80.0,
+        noise_reduction_db=7.0,
+        normalize_target_rms=0.1,
+        normalize_max_gain_db=10.0,
+        normalize_max_cut_db=6.0,
+    ),
+}
+
+
 def calculate_rms(samples: np.ndarray) -> float:
     if samples.size == 0:
         return 0.0
@@ -46,6 +75,123 @@ def pcm16le_to_float32(payload: bytes) -> np.ndarray:
         payload = payload[:-1]
     pcm = np.frombuffer(payload, dtype="<i2")
     return (pcm.astype(np.float32) / 32768.0).clip(-1.0, 1.0)
+
+
+def prepare_asr_audio(
+    samples: np.ndarray,
+    sample_rate: int,
+    *,
+    profile: str = "natural",
+) -> np.ndarray:
+    if samples.size == 0:
+        return np.empty(0, dtype=np.float32)
+
+    profile_name = profile.strip().lower()
+    config = _AUDIO_PREPROCESS_PROFILES.get(profile_name, _AUDIO_PREPROCESS_PROFILES["natural"])
+    output = samples.astype(np.float32, copy=False)
+    if config == _AUDIO_PREPROCESS_PROFILES["off"]:
+        return output
+
+    output = output.copy()
+    if config.highpass_hz > 0:
+        output = _highpass_filter(output, sample_rate, config.highpass_hz)
+    if config.noise_reduction_db > 0:
+        output = _soft_noise_floor_reduction(output, sample_rate, config.noise_reduction_db)
+    if config.normalize_target_rms > 0:
+        output = _normalize_rms(
+            output,
+            target_rms=config.normalize_target_rms,
+            max_gain_db=config.normalize_max_gain_db,
+            max_cut_db=config.normalize_max_cut_db,
+            peak_headroom=config.peak_headroom,
+        )
+    return output.astype(np.float32, copy=False)
+
+
+def _highpass_filter(samples: np.ndarray, sample_rate: int, cutoff_hz: float) -> np.ndarray:
+    if sample_rate <= 0 or cutoff_hz <= 0 or samples.size < 2:
+        return samples
+
+    rc = 1.0 / (2.0 * np.pi * cutoff_hz)
+    dt = 1.0 / sample_rate
+    alpha = rc / (rc + dt)
+    output = np.empty_like(samples)
+    previous_input = float(samples[0])
+    previous_output = 0.0
+    output[0] = 0.0
+    for index in range(1, samples.size):
+        current_input = float(samples[index])
+        current_output = alpha * (previous_output + current_input - previous_input)
+        output[index] = current_output
+        previous_input = current_input
+        previous_output = current_output
+    return output
+
+
+def _soft_noise_floor_reduction(
+    samples: np.ndarray,
+    sample_rate: int,
+    reduction_db: float,
+) -> np.ndarray:
+    if sample_rate <= 0 or reduction_db <= 0 or samples.size == 0:
+        return samples
+
+    frame_samples = max(1, round(sample_rate * 0.02))
+    hop_samples = max(1, round(sample_rate * 0.01))
+    if samples.size < frame_samples * 2:
+        return samples
+
+    starts = np.arange(0, samples.size - frame_samples + 1, hop_samples)
+    if starts.size < 3:
+        return samples
+
+    frame_rms = np.array(
+        [calculate_rms(samples[start : start + frame_samples]) for start in starts],
+        dtype=np.float32,
+    )
+    active_rms = frame_rms[frame_rms > 1e-5]
+    if active_rms.size < 3:
+        return samples
+
+    noise_floor = float(np.percentile(active_rms, 20))
+    voice_floor = float(np.percentile(active_rms, 70))
+    if noise_floor <= 1e-5 or voice_floor <= noise_floor * 1.4:
+        return samples
+
+    threshold = max(noise_floor * 2.6, noise_floor + 1e-5)
+    floor_gain = 10 ** (-reduction_db / 20.0)
+    ratios = np.clip((frame_rms - noise_floor) / (threshold - noise_floor), 0.0, 1.0)
+    smooth = ratios * ratios * (3.0 - 2.0 * ratios)
+    frame_gains = floor_gain + smooth * (1.0 - floor_gain)
+    centers = starts + frame_samples / 2
+    sample_indices = np.arange(samples.size, dtype=np.float32)
+    gain_curve = np.interp(sample_indices, centers, frame_gains).astype(np.float32)
+    return samples * gain_curve
+
+
+def _normalize_rms(
+    samples: np.ndarray,
+    *,
+    target_rms: float,
+    max_gain_db: float,
+    max_cut_db: float,
+    peak_headroom: float,
+) -> np.ndarray:
+    rms = calculate_rms(samples)
+    if rms <= 1e-6:
+        return samples
+
+    desired_gain = target_rms / rms
+    max_gain = 10 ** (max_gain_db / 20.0)
+    min_gain = 10 ** (-max_cut_db / 20.0)
+    gain = float(np.clip(desired_gain, min_gain, max_gain))
+    peak = float(np.max(np.abs(samples))) if samples.size else 0.0
+    if peak > 0:
+        gain = min(gain, peak_headroom / peak)
+
+    if abs(gain - 1.0) < 0.01:
+        return samples
+    return np.clip(samples * gain, -peak_headroom, peak_headroom).astype(np.float32)
 
 
 def summarize_pitch(

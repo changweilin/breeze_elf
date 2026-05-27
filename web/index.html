@@ -39,6 +39,7 @@
         --live-contrast: #ffffff;
         --live-soft: #a9d9c9;
         --warn: #b7791f;
+        --warn-contrast: #ffffff;
         --danger: #b42318;
         --danger-soft: #e7b2ad;
         --accent: #2454a6;
@@ -59,6 +60,7 @@
         --live-contrast: #071411;
         --live-soft: #245c49;
         --warn: #e2b45e;
+        --warn-contrast: #1d1304;
         --danger: #ff8a80;
         --danger-soft: #6f3732;
         --accent: #91b8ff;
@@ -171,6 +173,8 @@
         font: inherit;
         font-weight: 740;
         cursor: pointer;
+        touch-action: manipulation;
+        -webkit-tap-highlight-color: transparent;
         transition:
           background-color 140ms ease,
           border-color 140ms ease,
@@ -252,10 +256,22 @@
         font-weight: 720;
       }
 
+      #pitch {
+        position: relative;
+        z-index: 1;
+      }
+
+      #pitch[aria-pressed="true"],
       .mini.active {
         border-color: var(--warn);
-        color: var(--warn);
-        background: var(--panel-subtle);
+        color: var(--warn-contrast);
+        background: var(--warn);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warn-contrast) 24%, transparent);
+      }
+
+      #pitch[aria-pressed="true"]:hover:not(:disabled),
+      .mini.active:hover:not(:disabled) {
+        background: var(--warn);
       }
 
       #lines {
@@ -424,6 +440,10 @@
           width: 100%;
         }
 
+        .bar-actions > * {
+          min-width: 0;
+        }
+
         #stats {
           grid-column: 1 / -1;
           min-width: 0;
@@ -510,6 +530,6 @@
       </footer>
     </main>
 
-    <script src="./app.js" type="module"></script>
+    <script src="./app.js?v=10" type="module"></script>
   </body>
 </html>

@@ -54,6 +54,7 @@ Environment variables:
 | `BREEZE_SAMPLE_RATE` | `16000` | Expected audio sample rate. |
 | `BREEZE_WINDOW_SECONDS` | `2.0` | ASR window duration. |
 | `BREEZE_OVERLAP_SECONDS` | `0.5` | Overlap between ASR windows. |
+| `BREEZE_AUDIO_PREPROCESS` | `natural` | ASR audio preparation: `off`, `natural`, or stronger `speech`. |
 | `BREEZE_MAX_QUEUE_WINDOWS` | `4` | Maximum pending ASR windows per client. |
 | `BREEZE_SEGMENTER` | `vad` | `vad` for utterance segments, or `window` for fixed windows. |
 | `BREEZE_VAD_FRAME_MS` | `100` | RMS VAD frame size. |

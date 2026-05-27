@@ -18,6 +18,7 @@ class ConfigTests(unittest.TestCase):
                 "BREEZE_STOP_DRAIN_TIMEOUT_SECONDS": "12.5",
                 "BREEZE_ASR_NO_SPEECH_PROB_THRESHOLD": "0.7",
                 "BREEZE_ASR_HALLUCINATION_RMS_THRESHOLD": "0.03",
+                "BREEZE_AUDIO_PREPROCESS": "speech",
                 "BREEZE_REMOTE_STORAGE_DIR": "saved_transcripts",
             },
         ):
@@ -31,6 +32,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.stop_drain_timeout_seconds, 12.5)
         self.assertEqual(settings.asr_no_speech_prob_threshold, 0.7)
         self.assertEqual(settings.asr_hallucination_rms_threshold, 0.03)
+        self.assertEqual(settings.audio_preprocess, "speech")
         self.assertEqual(settings.remote_storage_dir, "saved_transcripts")
 
     def test_queue_and_asr_concurrency_are_at_least_one(self):
@@ -45,6 +47,12 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(settings.max_queue_windows, 1)
         self.assertEqual(settings.asr_concurrency, 1)
+
+    def test_audio_preprocess_falls_back_to_natural(self):
+        with patch.dict(os.environ, {"BREEZE_AUDIO_PREPROCESS": "overdone"}):
+            settings = get_settings()
+
+        self.assertEqual(settings.audio_preprocess, "natural")
 
 
 if __name__ == "__main__":

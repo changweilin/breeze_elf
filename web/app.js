@@ -85,6 +85,8 @@ const state = {
   demoTimers: [],
 };
 
+let lastPitchTouchToggleAt = 0;
+
 function demoPitch(medianHz, values) {
   return {
     medianHz,
@@ -196,7 +198,7 @@ function appendTranscriptBlock(data) {
 }
 
 function renderTranscriptView() {
-  els.lines.classList.toggle("pitch-mode", state.pitchMode && state.transcriptBlocks.length > 0);
+  els.lines.classList.toggle("pitch-mode", state.pitchMode);
   els.lines.replaceChildren();
 
   if (state.pitchMode && state.transcriptBlocks.length > 0) {
@@ -316,10 +318,38 @@ function formatClockTime(totalSeconds) {
 function setPitchMode(enabled) {
   state.pitchMode = Boolean(enabled);
   els.pitch.classList.toggle("active", state.pitchMode);
+  els.pitch.textContent = "音高";
   els.pitch.setAttribute("aria-pressed", String(state.pitchMode));
   els.pitch.setAttribute("aria-label", state.pitchMode ? "隱藏音高模式" : "顯示音高模式");
   els.pitch.setAttribute("title", state.pitchMode ? "隱藏每段文字的音高" : "顯示每段文字的音高");
   renderTranscriptView();
+}
+
+function togglePitchModeFromEvent(event) {
+  const now = Date.now();
+  const isPointer = event?.type === "pointerup";
+  const isPointerTouch = isPointer && event.pointerType !== "mouse";
+  const isTouch = event?.type === "touchend" || isPointerTouch;
+  if (isPointer && !isPointerTouch) {
+    return;
+  }
+  if (event?.type === "click" && now - lastPitchTouchToggleAt < 700) {
+    return;
+  }
+  if (isTouch) {
+    event.preventDefault();
+    lastPitchTouchToggleAt = now;
+  }
+  setPitchMode(!state.pitchMode);
+}
+
+function bindPitchToggle() {
+  if (window.PointerEvent) {
+    els.pitch.addEventListener("pointerup", togglePitchModeFromEvent);
+  } else {
+    els.pitch.addEventListener("touchend", togglePitchModeFromEvent, { passive: false });
+  }
+  els.pitch.addEventListener("click", togglePitchModeFromEvent);
 }
 
 function startClock() {
@@ -540,9 +570,9 @@ async function start() {
     state.stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         channelCount: 1,
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
       },
       video: false,
     });
@@ -667,7 +697,7 @@ applyRuntimeMode();
 setPitchMode(state.pitchMode);
 
 els.theme.addEventListener("click", toggleTheme);
-els.pitch.addEventListener("click", () => setPitchMode(!state.pitchMode));
+bindPitchToggle();
 SYSTEM_DARK_QUERY.addEventListener("change", syncSystemTheme);
 els.start.addEventListener("click", start);
 els.stop.addEventListener("click", stop);

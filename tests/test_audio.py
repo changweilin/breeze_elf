@@ -7,6 +7,7 @@ from breeze_elf.audio import (
     AudioWindowBuffer,
     calculate_rms,
     pcm16le_to_float32,
+    prepare_asr_audio,
     summarize_pitch,
 )
 
@@ -19,6 +20,46 @@ class AudioTests(unittest.TestCase):
         self.assertAlmostEqual(float(samples[0]), -1.0, places=5)
         self.assertAlmostEqual(float(samples[1]), 0.0, places=5)
         self.assertAlmostEqual(float(samples[2]), 32767 / 32768, places=5)
+
+    def test_prepare_asr_audio_off_preserves_samples(self):
+        samples = np.array([-0.25, 0.0, 0.25], dtype=np.float32)
+
+        prepared = prepare_asr_audio(samples, 16_000, profile="off")
+
+        self.assertEqual(prepared.dtype, np.float32)
+        np.testing.assert_allclose(prepared, samples)
+
+    def test_prepare_asr_audio_normalizes_with_headroom(self):
+        sample_rate = 16_000
+        time_axis = np.arange(sample_rate, dtype=np.float32) / sample_rate
+        samples = (0.02 * np.sin(2 * np.pi * 220.0 * time_axis)).astype(np.float32)
+
+        prepared = prepare_asr_audio(samples, sample_rate, profile="natural")
+
+        self.assertGreater(calculate_rms(prepared), calculate_rms(samples))
+        self.assertLessEqual(float(np.max(np.abs(prepared))), 0.98)
+
+    def test_prepare_asr_audio_speech_profile_reduces_noise_floor(self):
+        sample_rate = 16_000
+        duration = 2.0
+        time_axis = np.arange(round(sample_rate * duration), dtype=np.float32) / sample_rate
+        noise = 0.006 * np.sin(2 * np.pi * 900.0 * time_axis)
+        speech = 0.08 * np.sin(2 * np.pi * 220.0 * time_axis)
+        samples = noise.copy()
+        speech_start = round(sample_rate * 0.5)
+        speech_end = round(sample_rate * 1.5)
+        samples[speech_start:speech_end] += speech[speech_start:speech_end]
+        samples = samples.astype(np.float32)
+
+        prepared = prepare_asr_audio(samples, sample_rate, profile="speech")
+
+        before_ratio = calculate_rms(samples[:speech_start]) / calculate_rms(
+            samples[speech_start:speech_end]
+        )
+        after_ratio = calculate_rms(prepared[:speech_start]) / calculate_rms(
+            prepared[speech_start:speech_end]
+        )
+        self.assertLess(after_ratio, before_ratio * 0.85)
 
     def test_summarize_pitch_detects_sine_frequency(self):
         sample_rate = 16_000

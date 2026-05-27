@@ -31,6 +31,11 @@ def _bool_env(name: str, default: bool) -> bool:
     return value.strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _choice_env(name: str, default: str, choices: set[str]) -> str:
+    value = os.getenv(name, default).strip().lower()
+    return value if value in choices else default
+
+
 @dataclass(frozen=True)
 class Settings:
     host: str = "127.0.0.1"
@@ -39,6 +44,7 @@ class Settings:
     window_seconds: float = 2.0
     overlap_seconds: float = 0.5
     rms_threshold: float = 0.008
+    audio_preprocess: str = "natural"
     max_queue_windows: int = 4
     segmenter: str = "vad"
     vad_frame_ms: int = 100
@@ -65,6 +71,11 @@ def get_settings() -> Settings:
         window_seconds=_float_env("BREEZE_WINDOW_SECONDS", 2.0),
         overlap_seconds=_float_env("BREEZE_OVERLAP_SECONDS", 0.5),
         rms_threshold=_float_env("BREEZE_RMS_THRESHOLD", 0.008),
+        audio_preprocess=_choice_env(
+            "BREEZE_AUDIO_PREPROCESS",
+            "natural",
+            {"off", "natural", "speech"},
+        ),
         max_queue_windows=max(1, _int_env("BREEZE_MAX_QUEUE_WINDOWS", 4)),
         segmenter=os.getenv("BREEZE_SEGMENTER", "vad").strip().lower(),
         vad_frame_ms=max(1, _int_env("BREEZE_VAD_FRAME_MS", 100)),

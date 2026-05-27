@@ -9,7 +9,7 @@ from dataclasses import replace
 import numpy as np
 
 from .asr import build_asr_from_env
-from .audio import AudioUtteranceBuffer, AudioWindowBuffer
+from .audio import AudioUtteranceBuffer, AudioWindowBuffer, prepare_asr_audio
 from .config import get_settings
 
 
@@ -103,7 +103,12 @@ def main() -> None:
         transcribed = 0
         texts: list[str] = []
         for window in speech_windows[: max(0, args.max_asr_windows)]:
-            result = engine.transcribe(window.samples, settings.sample_rate, settings.language)
+            samples = prepare_asr_audio(
+                window.samples,
+                settings.sample_rate,
+                profile=settings.audio_preprocess,
+            )
+            result = engine.transcribe(samples, settings.sample_rate, settings.language)
             transcribed += 1
             if result.text:
                 texts.append(result.text)

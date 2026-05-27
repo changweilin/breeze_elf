@@ -22,6 +22,7 @@ from .audio import (
     AudioWindow,
     AudioWindowBuffer,
     PitchSummary,
+    prepare_asr_audio,
     summarize_pitch,
 )
 from .config import get_settings
@@ -117,6 +118,7 @@ async def health() -> JSONResponse:
             "ok": True,
             "sampleRate": settings.sample_rate,
             "segmenter": settings.segmenter,
+            "audioPreprocess": settings.audio_preprocess,
             "vadFrameMs": settings.vad_frame_ms,
             "vadEndSilenceMs": settings.vad_end_silence_ms,
             "asrBackend": asr_engine.backend,
@@ -352,8 +354,13 @@ async def _process_windows(
 
             asr_queue_wait_ms = 0
             try:
-                queued_result = await asr_queue.transcribe(
+                asr_samples = prepare_asr_audio(
                     window.samples,
+                    settings.sample_rate,
+                    profile=settings.audio_preprocess,
+                )
+                queued_result = await asr_queue.transcribe(
+                    asr_samples,
                     settings.sample_rate,
                     language,
                 )
