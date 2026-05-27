@@ -367,6 +367,28 @@
         content: " ";
       }
 
+      .recording {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 12px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        box-shadow: 0 1px 2px var(--shadow);
+      }
+
+      .recording[hidden] {
+        display: none;
+      }
+
+      .recording audio {
+        width: 100%;
+        min-width: 0;
+        height: 38px;
+      }
+
       footer {
         display: flex;
         align-items: center;
@@ -459,6 +481,14 @@
           grid-template-columns: minmax(0, 1fr);
         }
 
+        .recording {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        #audio-download {
+          width: 100%;
+        }
+
         .pitch-meta {
           justify-content: flex-start;
           white-space: normal;
@@ -521,6 +551,11 @@
         <div id="partial" class="partial"></div>
       </section>
 
+      <section id="audio-panel" class="recording" aria-label="錄音" hidden>
+        <audio id="recording" controls preload="metadata"></audio>
+        <button id="audio-download" class="mini" type="button" disabled aria-label="下載錄音音檔" title="下載錄音音檔">音檔</button>
+      </section>
+
       <footer>
         <div class="footer-meta">
           <span id="backend">ASR</span>
@@ -530,6 +565,6 @@
       </footer>
     </main>
 
-    <script src="./app.js?v=10" type="module"></script>
+    <script src="./app.js?v=11" type="module"></script>
   </body>
 </html>

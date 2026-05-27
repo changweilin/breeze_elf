@@ -6,6 +6,9 @@ const els = {
   copy: document.querySelector("#copy"),
   download: document.querySelector("#download"),
   save: document.querySelector("#save"),
+  audioPanel: document.querySelector("#audio-panel"),
+  audioPlayer: document.querySelector("#recording"),
+  audioDownload: document.querySelector("#audio-download"),
   theme: document.querySelector("#theme"),
   themeColor: document.querySelector("meta[name='theme-color']"),
   status: document.querySelector("#status"),
@@ -20,6 +23,16 @@ const els = {
 const AUDIO_CHUNK_MS = 250;
 const MAX_WS_BUFFERED_BYTES = 256 * 1024;
 const THEME_STORAGE_KEY = "breeze-elf-theme";
+const SETTINGS_STORAGE_KEY = "breeze-elf-settings-v1";
+const SESSION_STORAGE_KEY = "breeze-elf-session-v1";
+const AUDIO_DB_NAME = "breeze-elf-audio-v1";
+const AUDIO_STORE_NAME = "sessions";
+const AUDIO_RECORD_ID = "current";
+const AUDIO_SAMPLE_RATE = 16000;
+const AUDIO_CHANNEL_COUNT = 1;
+const AUDIO_BYTES_PER_SAMPLE = 2;
+const AUDIO_PERSIST_DELAY_MS = 1200;
+const AUDIO_PREVIEW_DELAY_MS = 900;
 const SYSTEM_DARK_QUERY = window.matchMedia("(prefers-color-scheme: dark)");
 const SEARCH_PARAMS = new URLSearchParams(location.search);
 const DEMO_MODE =
@@ -33,6 +46,7 @@ const THEME_COLORS = {
 };
 const PITCH_MIN_HZ = 70;
 const PITCH_MAX_HZ = 500;
+const INITIAL_SETTINGS = readStoredSettings();
 const DEMO_EVENTS = [
   {
     delay: 350,
@@ -77,15 +91,27 @@ const state = {
   clockTimer: 0,
   transcript: "",
   transcriptBlocks: [],
-  pitchMode: SEARCH_PARAMS.get("pitch") === "1",
+  pitchMode: SEARCH_PARAMS.has("pitch")
+    ? SEARCH_PARAMS.get("pitch") === "1"
+    : INITIAL_SETTINGS.pitchMode === true,
   droppedClientChunks: 0,
   statsTimer: 0,
+  sessionPersistTimer: 0,
+  audioChunks: [],
+  audioBytes: 0,
+  audioSampleRate: AUDIO_SAMPLE_RATE,
+  audioObjectUrl: "",
+  audioPersistTimer: 0,
+  audioPreviewTimer: 0,
+  audioDirty: false,
+  audioStorageFailed: false,
   savingRemote: false,
   demoRunning: false,
   demoTimers: [],
 };
 
 let lastPitchTouchToggleAt = 0;
+let audioDatabasePromise = null;
 
 function demoPitch(medianHz, values) {
   return {
@@ -99,6 +125,32 @@ function demoPitch(medianHz, values) {
       confidence: 0.82,
     })),
   };
+}
+
+function readStoredSettings() {
+  try {
+    const data = JSON.parse(localStorage.getItem(SETTINGS_STORAGE_KEY) || "{}");
+    return data && typeof data === "object" ? data : {};
+  } catch {
+    return {};
+  }
+}
+
+function persistSettings() {
+  if (DEMO_MODE) {
+    return;
+  }
+
+  try {
+    localStorage.setItem(
+      SETTINGS_STORAGE_KEY,
+      JSON.stringify({
+        pitchMode: state.pitchMode,
+      }),
+    );
+  } catch {
+    flashStats("設定儲存失敗");
+  }
 }
 
 function storedTheme() {
@@ -163,18 +215,21 @@ function setRunning(isRunning) {
   els.stop.disabled = !isRunning;
 }
 
-function renderTranscript(text) {
+function renderTranscript(text, { persist = true } = {}) {
   state.transcript = text;
   state.transcriptBlocks = [];
   renderTranscriptView();
   setTranscriptActions(Boolean(text.trim()));
+  if (persist) {
+    scheduleSessionPersist();
+  }
 }
 
 function appendTranscript(text) {
   appendTranscriptBlock({ text });
 }
 
-function appendTranscriptBlock(data) {
+function appendTranscriptBlock(data, { persist = true } = {}) {
   const text = typeof data?.text === "string" ? data.text : "";
   if (!text) {
     return;
@@ -195,6 +250,9 @@ function appendTranscriptBlock(data) {
   });
   renderTranscriptView();
   setTranscriptActions(Boolean(state.transcript.trim()));
+  if (persist) {
+    scheduleSessionPersist();
+  }
 }
 
 function renderTranscriptView() {
@@ -315,7 +373,7 @@ function formatClockTime(totalSeconds) {
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${fraction}`;
 }
 
-function setPitchMode(enabled) {
+function setPitchMode(enabled, { persist = true } = {}) {
   state.pitchMode = Boolean(enabled);
   els.pitch.classList.toggle("active", state.pitchMode);
   els.pitch.textContent = "音高";
@@ -323,6 +381,9 @@ function setPitchMode(enabled) {
   els.pitch.setAttribute("aria-label", state.pitchMode ? "隱藏音高模式" : "顯示音高模式");
   els.pitch.setAttribute("title", state.pitchMode ? "隱藏每段文字的音高" : "顯示每段文字的音高");
   renderTranscriptView();
+  if (persist) {
+    persistSettings();
+  }
 }
 
 function togglePitchModeFromEvent(event) {
@@ -426,6 +487,326 @@ function transcriptTitle(text) {
     .map((line) => line.trim())
     .find(Boolean)
     ?.slice(0, 80);
+}
+
+function readStoredSession() {
+  try {
+    const data = JSON.parse(localStorage.getItem(SESSION_STORAGE_KEY) || "null");
+    return data && typeof data === "object" ? data : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeTranscriptBlockForRestore(block) {
+  const text = typeof block?.text === "string" ? block.text : "";
+  if (!text) {
+    return null;
+  }
+
+  return {
+    text,
+    startSeconds: finiteNumber(block.startSeconds),
+    endSeconds: finiteNumber(block.endSeconds),
+    segmentKind: block.segmentKind || "",
+    windowIndex: Number.isInteger(block.windowIndex) ? block.windowIndex : null,
+    pitch: normalizePitch(block.pitch),
+  };
+}
+
+function restoreTranscriptSession() {
+  if (DEMO_MODE) {
+    return;
+  }
+
+  const session = readStoredSession();
+  if (!session) {
+    return;
+  }
+
+  const transcript = typeof session.transcript === "string" ? session.transcript : "";
+  const blocks = Array.isArray(session.transcriptBlocks)
+    ? session.transcriptBlocks.map(normalizeTranscriptBlockForRestore).filter(Boolean)
+    : [];
+  if (!transcript.trim() && blocks.length === 0) {
+    return;
+  }
+
+  state.transcript = transcript || blocks.map((block) => block.text).join("");
+  state.transcriptBlocks = blocks;
+  renderTranscriptView();
+  setTranscriptActions(Boolean(state.transcript.trim()));
+  flashStats("已恢復本機記憶");
+}
+
+function scheduleSessionPersist() {
+  if (DEMO_MODE) {
+    return;
+  }
+
+  window.clearTimeout(state.sessionPersistTimer);
+  state.sessionPersistTimer = window.setTimeout(persistSessionNow, 250);
+}
+
+function persistSessionNow() {
+  if (DEMO_MODE) {
+    return;
+  }
+
+  window.clearTimeout(state.sessionPersistTimer);
+  state.sessionPersistTimer = 0;
+
+  try {
+    if (!state.transcript.trim() && state.transcriptBlocks.length === 0) {
+      localStorage.removeItem(SESSION_STORAGE_KEY);
+      return;
+    }
+
+    localStorage.setItem(
+      SESSION_STORAGE_KEY,
+      JSON.stringify({
+        version: 1,
+        transcript: state.transcript,
+        transcriptBlocks: state.transcriptBlocks,
+        updatedAt: Date.now(),
+      }),
+    );
+  } catch {
+    flashStats("本機文字儲存失敗");
+  }
+}
+
+function writeAscii(view, offset, text) {
+  for (let index = 0; index < text.length; index += 1) {
+    view.setUint8(offset + index, text.charCodeAt(index));
+  }
+}
+
+function recordedAudioBlob() {
+  const dataSize = state.audioChunks.reduce((total, chunk) => total + chunk.byteLength, 0);
+  const header = new ArrayBuffer(44);
+  const view = new DataView(header);
+  const sampleRate = state.audioSampleRate || AUDIO_SAMPLE_RATE;
+  const blockAlign = AUDIO_CHANNEL_COUNT * AUDIO_BYTES_PER_SAMPLE;
+  const byteRate = sampleRate * blockAlign;
+
+  writeAscii(view, 0, "RIFF");
+  view.setUint32(4, 36 + dataSize, true);
+  writeAscii(view, 8, "WAVE");
+  writeAscii(view, 12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, AUDIO_CHANNEL_COUNT, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, AUDIO_BYTES_PER_SAMPLE * 8, true);
+  writeAscii(view, 36, "data");
+  view.setUint32(40, dataSize, true);
+
+  return new Blob([header, ...state.audioChunks], { type: "audio/wav" });
+}
+
+function refreshAudioPreview() {
+  window.clearTimeout(state.audioPreviewTimer);
+  state.audioPreviewTimer = 0;
+
+  if (state.audioObjectUrl) {
+    URL.revokeObjectURL(state.audioObjectUrl);
+    state.audioObjectUrl = "";
+  }
+
+  if (!state.audioBytes) {
+    els.audioPanel.hidden = true;
+    els.audioPlayer.removeAttribute("src");
+    els.audioPlayer.load();
+    els.audioDownload.disabled = true;
+    return;
+  }
+
+  state.audioObjectUrl = URL.createObjectURL(recordedAudioBlob());
+  els.audioPlayer.src = state.audioObjectUrl;
+  els.audioPanel.hidden = false;
+  els.audioDownload.disabled = false;
+}
+
+function scheduleAudioPreviewRefresh() {
+  if (state.audioPreviewTimer) {
+    return;
+  }
+  state.audioPreviewTimer = window.setTimeout(refreshAudioPreview, AUDIO_PREVIEW_DELAY_MS);
+}
+
+function appendRecordedAudioChunk(buffer) {
+  if (DEMO_MODE || !(buffer instanceof ArrayBuffer) || buffer.byteLength === 0) {
+    return;
+  }
+
+  const chunk = buffer.slice(0);
+  state.audioChunks.push(chunk);
+  state.audioBytes += chunk.byteLength;
+  state.audioDirty = true;
+  els.audioPanel.hidden = false;
+  els.audioDownload.disabled = false;
+  scheduleAudioPreviewRefresh();
+  scheduleAudioPersist();
+}
+
+function openAudioDatabase() {
+  if (!("indexedDB" in window)) {
+    return Promise.resolve(null);
+  }
+
+  if (!audioDatabasePromise) {
+    audioDatabasePromise = new Promise((resolve, reject) => {
+      const request = indexedDB.open(AUDIO_DB_NAME, 1);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(AUDIO_STORE_NAME)) {
+          db.createObjectStore(AUDIO_STORE_NAME, { keyPath: "id" });
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error("IndexedDB failed"));
+      request.onblocked = () => reject(new Error("IndexedDB blocked"));
+    });
+  }
+
+  return audioDatabasePromise;
+}
+
+async function runAudioStore(operation, mode = "readonly") {
+  const db = await openAudioDatabase();
+  if (!db) {
+    return null;
+  }
+
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(AUDIO_STORE_NAME, mode);
+    const store = transaction.objectStore(AUDIO_STORE_NAME);
+    const request = operation(store);
+    let result = null;
+
+    request.onsuccess = () => {
+      result = request.result;
+    };
+    request.onerror = () => reject(request.error || new Error("IndexedDB request failed"));
+    transaction.oncomplete = () => resolve(result);
+    transaction.onerror = () => reject(transaction.error || new Error("IndexedDB transaction failed"));
+    transaction.onabort = () => reject(transaction.error || new Error("IndexedDB transaction aborted"));
+  });
+}
+
+function scheduleAudioPersist() {
+  if (DEMO_MODE) {
+    return;
+  }
+
+  if (state.audioPersistTimer) {
+    return;
+  }
+  state.audioPersistTimer = window.setTimeout(() => {
+    void persistAudioSession();
+  }, AUDIO_PERSIST_DELAY_MS);
+}
+
+async function persistAudioSession({ force = false } = {}) {
+  if (DEMO_MODE || (!force && !state.audioDirty)) {
+    return;
+  }
+
+  window.clearTimeout(state.audioPersistTimer);
+  state.audioPersistTimer = 0;
+
+  try {
+    const persistedBytes = state.audioBytes;
+
+    if (!state.audioBytes) {
+      await runAudioStore((store) => store.delete(AUDIO_RECORD_ID), "readwrite");
+      state.audioDirty = state.audioBytes !== persistedBytes;
+      if (state.audioDirty) {
+        scheduleAudioPersist();
+      }
+      return;
+    }
+
+    await runAudioStore(
+      (store) =>
+        store.put({
+          id: AUDIO_RECORD_ID,
+          pcm: new Blob(state.audioChunks, { type: "application/octet-stream" }),
+          sampleRate: state.audioSampleRate,
+          bytes: state.audioBytes,
+          updatedAt: Date.now(),
+        }),
+      "readwrite",
+    );
+    state.audioDirty = state.audioBytes !== persistedBytes;
+    if (state.audioDirty) {
+      scheduleAudioPersist();
+    }
+    state.audioStorageFailed = false;
+  } catch {
+    if (!state.audioStorageFailed) {
+      flashStats("本機錄音儲存失敗");
+    }
+    state.audioStorageFailed = true;
+  }
+}
+
+async function restoreAudioSession() {
+  if (DEMO_MODE) {
+    return;
+  }
+
+  try {
+    const record = await runAudioStore((store) => store.get(AUDIO_RECORD_ID));
+    if (!record?.pcm || !record.bytes) {
+      refreshAudioPreview();
+      return;
+    }
+
+    const buffer = await record.pcm.arrayBuffer();
+    state.audioChunks = [buffer];
+    state.audioBytes = buffer.byteLength;
+    state.audioSampleRate = Number.isFinite(record.sampleRate) ? record.sampleRate : AUDIO_SAMPLE_RATE;
+    state.audioDirty = false;
+    refreshAudioPreview();
+  } catch {
+    flashStats("本機錄音讀取失敗");
+  }
+}
+
+async function clearRecordedAudio() {
+  window.clearTimeout(state.audioPersistTimer);
+  state.audioPersistTimer = 0;
+  state.audioChunks = [];
+  state.audioBytes = 0;
+  state.audioDirty = false;
+  state.audioStorageFailed = false;
+  refreshAudioPreview();
+
+  try {
+    await runAudioStore((store) => store.delete(AUDIO_RECORD_ID), "readwrite");
+  } catch {
+    flashStats("本機錄音清除失敗");
+  }
+}
+
+function downloadRecordedAudio() {
+  if (!state.audioBytes) {
+    return;
+  }
+
+  void persistAudioSession({ force: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const url = URL.createObjectURL(recordedAudioBlob());
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `breeze-elf-audio-${stamp}.wav`;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  flashStats("音檔已下載");
 }
 
 function stopClock() {
@@ -584,7 +965,7 @@ async function start() {
 
     state.source = state.audioContext.createMediaStreamSource(state.stream);
     state.worklet = new AudioWorkletNode(state.audioContext, "breeze-mic-processor", {
-      processorOptions: { targetSampleRate: 16000, chunkMs: AUDIO_CHUNK_MS },
+      processorOptions: { targetSampleRate: AUDIO_SAMPLE_RATE, chunkMs: AUDIO_CHUNK_MS },
     });
     state.silence = state.audioContext.createGain();
     state.silence.gain.value = 0;
@@ -594,6 +975,7 @@ async function start() {
         return;
       }
       renderLevel(event.data.rms || 0);
+      appendRecordedAudioChunk(event.data.buffer);
       if (state.ws?.readyState === WebSocket.OPEN) {
         if (state.ws.bufferedAmount > MAX_WS_BUFFERED_BYTES) {
           state.droppedClientChunks += 1;
@@ -607,7 +989,7 @@ async function start() {
     state.source.connect(state.worklet);
     state.worklet.connect(state.silence).connect(state.audioContext.destination);
 
-    ws.send(JSON.stringify({ type: "start", sampleRate: 16000, language: "zh", chunkMs: AUDIO_CHUNK_MS }));
+    ws.send(JSON.stringify({ type: "start", sampleRate: AUDIO_SAMPLE_RATE, language: "zh", chunkMs: AUDIO_CHUNK_MS }));
     setStatus("收音中", "live");
     startClock();
   } catch (error) {
@@ -694,7 +1076,9 @@ function handleServerMessage(event) {
 
 applyTheme(preferredTheme());
 applyRuntimeMode();
-setPitchMode(state.pitchMode);
+setPitchMode(state.pitchMode, { persist: false });
+restoreTranscriptSession();
+void restoreAudioSession();
 
 els.theme.addEventListener("click", toggleTheme);
 bindPitchToggle();
@@ -702,9 +1086,12 @@ SYSTEM_DARK_QUERY.addEventListener("change", syncSystemTheme);
 els.start.addEventListener("click", start);
 els.stop.addEventListener("click", stop);
 els.clear.addEventListener("click", () => {
-  renderTranscript("");
+  renderTranscript("", { persist: false });
   els.partial.textContent = "";
+  persistSessionNow();
+  void clearRecordedAudio();
 });
+els.audioDownload.addEventListener("click", downloadRecordedAudio);
 els.copy.addEventListener("click", async () => {
   if (!state.transcript.trim()) {
     return;
@@ -769,6 +1156,17 @@ els.save.addEventListener("click", async () => {
   } finally {
     state.savingRemote = false;
     setTranscriptActions(Boolean(state.transcript.trim()));
+  }
+});
+
+window.addEventListener("pagehide", () => {
+  persistSessionNow();
+  void persistAudioSession({ force: true });
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") {
+    persistSessionNow();
+    void persistAudioSession({ force: true });
   }
 });
 
