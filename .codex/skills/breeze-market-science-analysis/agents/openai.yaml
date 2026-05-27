@@ -1,0 +1,4 @@
+interface:
+  display_name: "Breeze Market Science Analysis"
+  short_description: "Design evidence-based market, adoption, and experiment analysis."
+  default_prompt: "Use $breeze-market-science-analysis to plan a market science analysis for Breeze Elf."

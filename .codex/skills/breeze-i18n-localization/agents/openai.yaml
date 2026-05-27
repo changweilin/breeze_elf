@@ -1,0 +1,4 @@
+interface:
+  display_name: "Breeze I18n Localization"
+  short_description: "Localize Breeze Elf UI, ASR, and transcript text safely."
+  default_prompt: "Use $breeze-i18n-localization to localize Breeze Elf UI and transcript handling."

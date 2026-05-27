@@ -1,0 +1,6 @@
+interface:
+  display_name: "Breeze Parameter Data Governance"
+  short_description: "Manage env, protocol, storage, and parameter data."
+  default_prompt: "Use $breeze-parameter-data-governance to change Breeze Elf settings, protocol data, or storage safely."
+policy:
+  allow_implicit_invocation: true

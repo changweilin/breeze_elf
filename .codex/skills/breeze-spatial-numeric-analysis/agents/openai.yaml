@@ -1,0 +1,6 @@
+interface:
+  display_name: "Breeze Spatial Numeric Analysis"
+  short_description: "Analyze audio windows, VAD, timing, and numeric behavior."
+  default_prompt: "Use $breeze-spatial-numeric-analysis to analyze Breeze Elf audio segmentation and numeric behavior."
+policy:
+  allow_implicit_invocation: true

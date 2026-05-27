@@ -1,0 +1,4 @@
+interface:
+  display_name: "Breeze UI Event Flow"
+  short_description: "Maintain microphone, WebSocket, demo, and PWA UI flows."
+  default_prompt: "Use $breeze-ui-event-flow to update Breeze Elf frontend events and UI state."
