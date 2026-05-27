@@ -30,6 +30,12 @@ after text appears, and the server writes a UTF-8 `.txt` file under
 
 Set `BREEZE_REMOTE_STORAGE_DIR` to choose another host-side directory.
 
+## Pitch Mode
+
+Tap `音高` to show each finalized transcript block with its matched audio time range and
+median pitch. Pitch is estimated locally from the same VAD/audio window that produced the
+text, so copied, downloaded, and remotely saved transcripts stay as plain text.
+
 ## GitHub Actions Web Demo
 
 The `Web Demo` workflow publishes the static `web/` folder to GitHub Pages. On

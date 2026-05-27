@@ -16,6 +16,22 @@ class AudioWindow:
     kind: str = "window"
 
 
+@dataclass(frozen=True)
+class PitchPoint:
+    offset_seconds: float
+    hz: float
+    confidence: float
+
+
+@dataclass(frozen=True)
+class PitchSummary:
+    median_hz: float | None
+    min_hz: float | None
+    max_hz: float | None
+    voiced_ratio: float
+    points: tuple[PitchPoint, ...]
+
+
 def calculate_rms(samples: np.ndarray) -> float:
     if samples.size == 0:
         return 0.0
@@ -30,6 +46,109 @@ def pcm16le_to_float32(payload: bytes) -> np.ndarray:
         payload = payload[:-1]
     pcm = np.frombuffer(payload, dtype="<i2")
     return (pcm.astype(np.float32) / 32768.0).clip(-1.0, 1.0)
+
+
+def summarize_pitch(
+    samples: np.ndarray,
+    sample_rate: int,
+    *,
+    frame_ms: int = 40,
+    hop_ms: int = 20,
+    min_hz: float = 70.0,
+    max_hz: float = 500.0,
+    rms_threshold: float = 0.01,
+    confidence_threshold: float = 0.35,
+    max_points: int = 80,
+) -> PitchSummary:
+    if sample_rate <= 0:
+        raise ValueError("sample_rate must be positive")
+    if frame_ms <= 0:
+        raise ValueError("frame_ms must be positive")
+    if hop_ms <= 0:
+        raise ValueError("hop_ms must be positive")
+    if min_hz <= 0 or max_hz <= min_hz:
+        raise ValueError("max_hz must be greater than min_hz")
+
+    frame_samples = max(1, round(sample_rate * frame_ms / 1000))
+    hop_samples = max(1, round(sample_rate * hop_ms / 1000))
+    min_lag = max(1, round(sample_rate / max_hz))
+    max_lag = max(min_lag + 1, round(sample_rate / min_hz))
+    if samples.size < frame_samples or frame_samples <= max_lag:
+        return PitchSummary(None, None, None, 0.0, ())
+
+    analysis_window = np.hanning(frame_samples)
+    points: list[PitchPoint] = []
+    hz_values: list[float] = []
+    frame_count = 0
+
+    for start in range(0, samples.size - frame_samples + 1, hop_samples):
+        frame_count += 1
+        frame = samples[start : start + frame_samples].astype(np.float64, copy=True)
+        frame -= np.mean(frame)
+        rms = calculate_rms(frame)
+        if rms < rms_threshold:
+            continue
+
+        autocorr = np.correlate(frame * analysis_window, frame * analysis_window, mode="full")
+        autocorr = autocorr[frame_samples - 1 :]
+        energy = float(autocorr[0])
+        search_end = min(max_lag, autocorr.size - 1)
+        if energy <= 0 or search_end <= min_lag:
+            continue
+
+        search = autocorr[min_lag : search_end + 1]
+        lag = min_lag + int(np.argmax(search))
+        confidence = float(autocorr[lag] / energy)
+        if confidence < confidence_threshold:
+            continue
+
+        refined_lag = _parabolic_lag(autocorr, lag)
+        if refined_lag <= 0:
+            continue
+
+        hz = sample_rate / refined_lag
+        hz_values.append(hz)
+        points.append(
+            PitchPoint(
+                offset_seconds=(start + frame_samples / 2) / sample_rate,
+                hz=hz,
+                confidence=confidence,
+            )
+        )
+
+    if not hz_values:
+        return PitchSummary(None, None, None, 0.0, ())
+
+    values = np.array(hz_values, dtype=np.float64)
+    voiced_ratio = len(hz_values) / frame_count if frame_count else 0.0
+    return PitchSummary(
+        median_hz=float(np.median(values)),
+        min_hz=float(np.percentile(values, 10)),
+        max_hz=float(np.percentile(values, 90)),
+        voiced_ratio=float(voiced_ratio),
+        points=tuple(_thin_pitch_points(points, max_points)),
+    )
+
+
+def _parabolic_lag(autocorr: np.ndarray, lag: int) -> float:
+    if lag <= 0 or lag >= autocorr.size - 1:
+        return float(lag)
+
+    left = float(autocorr[lag - 1])
+    center = float(autocorr[lag])
+    right = float(autocorr[lag + 1])
+    denominator = left - 2 * center + right
+    if abs(denominator) < 1e-12:
+        return float(lag)
+    return float(lag + 0.5 * (left - right) / denominator)
+
+
+def _thin_pitch_points(points: list[PitchPoint], max_points: int) -> list[PitchPoint]:
+    if max_points <= 0 or len(points) <= max_points:
+        return points
+
+    indices = np.linspace(0, len(points) - 1, max_points)
+    return [points[round(float(index))] for index in indices]
 
 
 class _SampleRingBuffer:

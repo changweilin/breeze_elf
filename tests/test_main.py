@@ -128,6 +128,10 @@ class MainTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertLess(final_index, stopped_index)
         self.assertEqual(events[final_index]["text"], "最後一句")
+        self.assertEqual(events[final_index]["startSeconds"], 0.0)
+        self.assertEqual(events[final_index]["endSeconds"], 0.3)
+        self.assertIsNone(events[final_index]["pitch"]["medianHz"])
+        self.assertEqual(events[final_index]["pitch"]["points"], [])
         self.assertEqual(events[stopped_index]["reason"], "test")
 
 

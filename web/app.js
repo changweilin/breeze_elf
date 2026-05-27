@@ -2,6 +2,7 @@ const els = {
   start: document.querySelector("#start"),
   stop: document.querySelector("#stop"),
   clear: document.querySelector("#clear"),
+  pitch: document.querySelector("#pitch"),
   copy: document.querySelector("#copy"),
   download: document.querySelector("#download"),
   save: document.querySelector("#save"),
@@ -30,6 +31,8 @@ const THEME_COLORS = {
   light: "#f6f7f8",
   dark: "#111614",
 };
+const PITCH_MIN_HZ = 70;
+const PITCH_MAX_HZ = 500;
 const DEMO_EVENTS = [
   {
     delay: 350,
@@ -40,6 +43,9 @@ const DEMO_EVENTS = [
   {
     delay: 1100,
     final: "今天先確認 GitHub Actions 的靜態展示。",
+    startSeconds: 0.35,
+    endSeconds: 1.1,
+    pitch: demoPitch(188, [176, 184, 194, 202, 190, 181]),
     rms: 0.02,
     stats: { asrMs: 18, segmentKind: "utterance" },
   },
@@ -52,6 +58,9 @@ const DEMO_EVENTS = [
   {
     delay: 2750,
     final: "\n麥克風、WebSocket 與遠端儲存都維持凍結，只呈現操作流程。",
+    startSeconds: 1.85,
+    endSeconds: 2.75,
+    pitch: demoPitch(162, [154, 158, 166, 172, 160, 150]),
     rms: 0.01,
     stats: { asrMs: 22, segmentKind: "utterance" },
   },
@@ -67,12 +76,28 @@ const state = {
   startedAt: 0,
   clockTimer: 0,
   transcript: "",
+  transcriptBlocks: [],
+  pitchMode: SEARCH_PARAMS.get("pitch") === "1",
   droppedClientChunks: 0,
   statsTimer: 0,
   savingRemote: false,
   demoRunning: false,
   demoTimers: [],
 };
+
+function demoPitch(medianHz, values) {
+  return {
+    medianHz,
+    minHz: Math.min(...values),
+    maxHz: Math.max(...values),
+    voicedRatio: 0.92,
+    points: values.map((hz, index) => ({
+      offsetSeconds: index * 0.14,
+      hz,
+      confidence: 0.82,
+    })),
+  };
+}
 
 function storedTheme() {
   try {
@@ -138,14 +163,163 @@ function setRunning(isRunning) {
 
 function renderTranscript(text) {
   state.transcript = text;
-  els.lines.textContent = text;
-  els.lines.scrollTop = els.lines.scrollHeight;
+  state.transcriptBlocks = [];
+  renderTranscriptView();
   setTranscriptActions(Boolean(text.trim()));
 }
 
 function appendTranscript(text) {
-  const next = state.transcript ? `${state.transcript}${text}` : text;
-  renderTranscript(next);
+  appendTranscriptBlock({ text });
+}
+
+function appendTranscriptBlock(data) {
+  const text = typeof data?.text === "string" ? data.text : "";
+  if (!text) {
+    return;
+  }
+
+  state.transcript = typeof data.transcript === "string"
+    ? data.transcript
+    : state.transcript
+      ? `${state.transcript}${text}`
+      : text;
+  state.transcriptBlocks.push({
+    text,
+    startSeconds: finiteNumber(data.startSeconds),
+    endSeconds: finiteNumber(data.endSeconds),
+    segmentKind: data.segmentKind || "",
+    windowIndex: Number.isInteger(data.windowIndex) ? data.windowIndex : null,
+    pitch: normalizePitch(data.pitch),
+  });
+  renderTranscriptView();
+  setTranscriptActions(Boolean(state.transcript.trim()));
+}
+
+function renderTranscriptView() {
+  els.lines.classList.toggle("pitch-mode", state.pitchMode && state.transcriptBlocks.length > 0);
+  els.lines.replaceChildren();
+
+  if (state.pitchMode && state.transcriptBlocks.length > 0) {
+    const fragment = document.createDocumentFragment();
+    state.transcriptBlocks.forEach((block) => {
+      fragment.append(renderTranscriptBlock(block));
+    });
+    els.lines.append(fragment);
+  } else {
+    els.lines.textContent = state.transcript;
+  }
+
+  els.lines.scrollTop = els.lines.scrollHeight;
+}
+
+function renderTranscriptBlock(block) {
+  const row = document.createElement("div");
+  row.className = "transcript-block";
+
+  const text = document.createElement("span");
+  text.className = "transcript-text";
+  text.textContent = block.text.trimStart();
+
+  const meta = document.createElement("span");
+  meta.className = "pitch-meta";
+
+  const range = document.createElement("span");
+  range.textContent = formatTimeRange(block.startSeconds, block.endSeconds);
+
+  const pitch = document.createElement("span");
+  pitch.className = "pitch-value";
+  pitch.textContent = formatPitch(block.pitch);
+
+  meta.append(range, pitch);
+  row.append(text, meta, renderPitchSpark(block.pitch));
+  return row;
+}
+
+function renderPitchSpark(pitch) {
+  const spark = document.createElement("span");
+  const points = Array.isArray(pitch?.points) ? pitch.points.filter((point) => point.hz) : [];
+  if (!points.length) {
+    spark.className = "pitch-spark empty";
+    return spark;
+  }
+
+  spark.className = "pitch-spark";
+  const stride = Math.max(1, Math.ceil(points.length / 36));
+  points.filter((_, index) => index % stride === 0).forEach((point) => {
+    const bar = document.createElement("span");
+    const normalized = (point.hz - PITCH_MIN_HZ) / (PITCH_MAX_HZ - PITCH_MIN_HZ);
+    const height = 18 + Math.min(1, Math.max(0, normalized)) * 82;
+    bar.style.setProperty("--pitch-height", `${height.toFixed(1)}%`);
+    spark.append(bar);
+  });
+  return spark;
+}
+
+function renderPartial(data) {
+  const text = data.text || "";
+  const pitch = normalizePitch(data.pitch);
+  if (state.pitchMode && pitch) {
+    els.partial.textContent = `${text}\n${formatPitch(pitch)}`;
+    return;
+  }
+  els.partial.textContent = text;
+}
+
+function finiteNumber(value) {
+  return Number.isFinite(value) ? Number(value) : null;
+}
+
+function normalizePitch(pitch) {
+  if (!pitch || typeof pitch !== "object") {
+    return null;
+  }
+
+  return {
+    medianHz: finiteNumber(pitch.medianHz),
+    minHz: finiteNumber(pitch.minHz),
+    maxHz: finiteNumber(pitch.maxHz),
+    voicedRatio: finiteNumber(pitch.voicedRatio),
+    points: Array.isArray(pitch.points)
+      ? pitch.points
+          .map((point) => ({
+            offsetSeconds: finiteNumber(point.offsetSeconds),
+            hz: finiteNumber(point.hz),
+            confidence: finiteNumber(point.confidence),
+          }))
+          .filter((point) => point.hz)
+      : [],
+  };
+}
+
+function formatPitch(pitch) {
+  if (!Number.isFinite(pitch?.medianHz)) {
+    return "音高未偵測";
+  }
+  return `音高 ${Math.round(pitch.medianHz)} Hz`;
+}
+
+function formatTimeRange(startSeconds, endSeconds) {
+  if (!Number.isFinite(startSeconds) || !Number.isFinite(endSeconds)) {
+    return "段落";
+  }
+  return `${formatClockTime(startSeconds)}-${formatClockTime(endSeconds)}`;
+}
+
+function formatClockTime(totalSeconds) {
+  const safeSeconds = Math.max(0, totalSeconds);
+  const minutes = Math.floor(safeSeconds / 60);
+  const seconds = Math.floor(safeSeconds % 60);
+  const fraction = Math.floor((safeSeconds % 1) * 10);
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${fraction}`;
+}
+
+function setPitchMode(enabled) {
+  state.pitchMode = Boolean(enabled);
+  els.pitch.classList.toggle("active", state.pitchMode);
+  els.pitch.setAttribute("aria-pressed", String(state.pitchMode));
+  els.pitch.setAttribute("aria-label", state.pitchMode ? "隱藏音高模式" : "顯示音高模式");
+  els.pitch.setAttribute("title", state.pitchMode ? "隱藏每段文字的音高" : "顯示每段文字的音高");
+  renderTranscriptView();
 }
 
 function startClock() {
@@ -279,7 +453,7 @@ function startDemo() {
       }
       if (entry.final) {
         els.partial.textContent = "";
-        appendTranscript(entry.final);
+        appendTranscriptBlock({ ...entry, text: entry.final });
       }
       renderLevel(entry.rms || 0);
       renderStats(entry.stats);
@@ -463,16 +637,14 @@ function handleServerMessage(event) {
   }
 
   if (data.type === "partial") {
-    els.partial.textContent = data.text || "";
+    renderPartial(data);
     return;
   }
 
   if (data.type === "final") {
     els.partial.textContent = "";
-    if (data.transcript) {
-      renderTranscript(data.transcript);
-    } else if (data.text) {
-      appendTranscript(data.text);
+    if (data.text) {
+      appendTranscriptBlock(data);
     }
     return;
   }
@@ -492,8 +664,10 @@ function handleServerMessage(event) {
 
 applyTheme(preferredTheme());
 applyRuntimeMode();
+setPitchMode(state.pitchMode);
 
 els.theme.addEventListener("click", toggleTheme);
+els.pitch.addEventListener("click", () => setPitchMode(!state.pitchMode));
 SYSTEM_DARK_QUERY.addEventListener("change", syncSystemTheme);
 els.start.addEventListener("click", start);
 els.stop.addEventListener("click", stop);

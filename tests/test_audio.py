@@ -7,6 +7,7 @@ from breeze_elf.audio import (
     AudioWindowBuffer,
     calculate_rms,
     pcm16le_to_float32,
+    summarize_pitch,
 )
 
 
@@ -18,6 +19,27 @@ class AudioTests(unittest.TestCase):
         self.assertAlmostEqual(float(samples[0]), -1.0, places=5)
         self.assertAlmostEqual(float(samples[1]), 0.0, places=5)
         self.assertAlmostEqual(float(samples[2]), 32767 / 32768, places=5)
+
+    def test_summarize_pitch_detects_sine_frequency(self):
+        sample_rate = 16_000
+        seconds = 0.6
+        frequency = 220.0
+        time_axis = np.arange(round(sample_rate * seconds), dtype=np.float32) / sample_rate
+        samples = (np.sin(2 * np.pi * frequency * time_axis) * 0.4).astype(np.float32)
+
+        summary = summarize_pitch(samples, sample_rate)
+
+        self.assertIsNotNone(summary.median_hz)
+        self.assertAlmostEqual(summary.median_hz, frequency, delta=4.0)
+        self.assertGreater(summary.voiced_ratio, 0.9)
+        self.assertGreater(len(summary.points), 0)
+
+    def test_summarize_pitch_returns_empty_for_silence(self):
+        summary = summarize_pitch(np.zeros(16_000, dtype=np.float32), 16_000)
+
+        self.assertIsNone(summary.median_hz)
+        self.assertEqual(summary.voiced_ratio, 0.0)
+        self.assertEqual(summary.points, ())
 
     def test_silence_gate(self):
         buffer = AudioWindowBuffer(

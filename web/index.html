@@ -252,6 +252,12 @@
         font-weight: 720;
       }
 
+      .mini.active {
+        border-color: var(--warn);
+        color: var(--warn);
+        background: var(--panel-subtle);
+      }
+
       #lines {
         min-height: 260px;
         overflow: auto;
@@ -263,6 +269,73 @@
 
       #lines:empty::before {
         content: " ";
+      }
+
+      #lines.pitch-mode {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        white-space: normal;
+      }
+
+      .transcript-block {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 8px 12px;
+        padding: 10px 0 12px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .transcript-block:last-child {
+        border-bottom: 0;
+      }
+
+      .transcript-text {
+        min-width: 0;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
+      .pitch-meta {
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 8px;
+        color: var(--muted);
+        font-size: 0.78rem;
+        line-height: 1.3;
+        white-space: nowrap;
+      }
+
+      .pitch-value {
+        color: var(--warn);
+        font-weight: 780;
+      }
+
+      .pitch-spark {
+        grid-column: 1 / -1;
+        height: 28px;
+        display: flex;
+        align-items: end;
+        gap: 2px;
+        overflow: hidden;
+      }
+
+      .pitch-spark > span {
+        width: 4px;
+        min-width: 2px;
+        max-width: 8px;
+        height: var(--pitch-height);
+        border-radius: 2px 2px 0 0;
+        background: var(--warn);
+        opacity: 0.72;
+      }
+
+      .pitch-spark.empty {
+        height: 4px;
+        align-self: center;
+        border-radius: 999px;
+        background: var(--panel-subtle);
       }
 
       .partial {
@@ -347,7 +420,7 @@
 
         .bar-actions {
           display: grid;
-          grid-template-columns: repeat(3, minmax(0, 1fr));
+          grid-template-columns: repeat(4, minmax(0, 1fr));
           width: 100%;
         }
 
@@ -360,6 +433,15 @@
         .mini {
           width: 100%;
           min-width: 0;
+        }
+
+        .transcript-block {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        .pitch-meta {
+          justify-content: flex-start;
+          white-space: normal;
         }
       }
 
@@ -409,6 +491,7 @@
           <span>即時</span>
           <div class="bar-actions">
             <span id="stats">0 ms</span>
+            <button id="pitch" class="mini" type="button" aria-pressed="false" aria-label="顯示音高模式" title="顯示每段文字的音高">音高</button>
             <button id="copy" class="mini" type="button" disabled>複製</button>
             <button id="download" class="mini" type="button" disabled>下載</button>
             <button id="save" class="mini" type="button" disabled>遠端儲存</button>

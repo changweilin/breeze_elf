@@ -17,7 +17,13 @@ from starlette.websockets import WebSocketState
 
 from .asr import ASRResult, build_asr_from_env
 from .asr_queue import ASRQueue
-from .audio import AudioUtteranceBuffer, AudioWindow, AudioWindowBuffer
+from .audio import (
+    AudioUtteranceBuffer,
+    AudioWindow,
+    AudioWindowBuffer,
+    PitchSummary,
+    summarize_pitch,
+)
 from .config import get_settings
 from .protocol import (
     PingMessage,
@@ -369,6 +375,7 @@ async def _process_windows(
 
             filtered_as_silence = bool(result.text and _should_drop_asr_result(window, result))
             if result.text and not filtered_as_silence:
+                pitch = _pitch_payload(window)
                 await send_json(
                     server_event(
                         "partial",
@@ -378,6 +385,7 @@ async def _process_windows(
                         segmentKind=window.kind,
                         startSeconds=round(window.start_seconds, 2),
                         endSeconds=round(window.end_seconds, 2),
+                        pitch=pitch,
                     )
                 )
                 novel_text = _novel_text(state.transcript, result.text)
@@ -391,6 +399,9 @@ async def _process_windows(
                             language=result.language,
                             windowIndex=window.index,
                             segmentKind=window.kind,
+                            startSeconds=round(window.start_seconds, 2),
+                            endSeconds=round(window.end_seconds, 2),
+                            pitch=pitch,
                         )
                     )
 
@@ -464,6 +475,41 @@ def _should_drop_asr_result(window: AudioWindow, result: ASRResult) -> bool:
     return (likely_no_speech and low_energy) or (
         common_hallucination and (likely_no_speech or low_energy)
     )
+
+
+def _pitch_payload(window: AudioWindow) -> dict[str, Any]:
+    summary = summarize_pitch(window.samples, _window_sample_rate(window))
+    return _pitch_summary_payload(summary)
+
+
+def _window_sample_rate(window: AudioWindow) -> int:
+    duration = window.end_seconds - window.start_seconds
+    if duration <= 0:
+        return settings.sample_rate
+    return max(1, round(window.samples.size / duration))
+
+
+def _pitch_summary_payload(summary: PitchSummary) -> dict[str, Any]:
+    return {
+        "medianHz": _round_pitch(summary.median_hz),
+        "minHz": _round_pitch(summary.min_hz),
+        "maxHz": _round_pitch(summary.max_hz),
+        "voicedRatio": round(summary.voiced_ratio, 3),
+        "points": [
+            {
+                "offsetSeconds": round(point.offset_seconds, 3),
+                "hz": _round_pitch(point.hz),
+                "confidence": round(point.confidence, 3),
+            }
+            for point in summary.points
+        ],
+    }
+
+
+def _round_pitch(value: float | None) -> float | None:
+    if value is None:
+        return None
+    return round(value, 1)
 
 
 def _is_common_silence_hallucination(text: str) -> bool:
