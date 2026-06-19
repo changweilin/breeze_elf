@@ -104,7 +104,7 @@
         min-height: 0;
         margin: 0 auto;
         display: grid;
-        grid-template-rows: auto auto auto minmax(0, 1fr) auto auto;
+        grid-template-rows: auto auto minmax(0, 1fr) auto auto auto;
         gap: 14px;
         padding: max(18px, env(safe-area-inset-top)) 16px max(18px, env(safe-area-inset-bottom));
       }
@@ -137,64 +137,32 @@
         font-weight: 760;
       }
 
-      .statusbar {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 10px;
-      }
-
-      .status-cell {
-        display: flex;
-        flex-direction: column;
-        gap: 6px;
-        min-width: 0;
-        padding: 9px 12px;
-        border: 1px solid var(--line);
-        border-radius: 8px;
-        background: var(--panel);
-        box-shadow: 0 1px 2px var(--shadow);
-      }
-
-      .status-cell-label {
-        color: var(--muted);
-        font-size: 0.72rem;
-        font-weight: 720;
-        letter-spacing: 0.04em;
-      }
-
-      .status-cell-body {
+      .stt-status {
         display: flex;
         align-items: center;
+        justify-content: space-between;
         gap: 10px;
         min-width: 0;
-      }
-
-      .status-cell.stt .status-cell-body {
-        justify-content: space-between;
+        padding: 0 4px;
       }
 
       .status {
         min-width: 0;
-        padding: 5px 10px;
-        border: 1px solid var(--line);
-        border-radius: 7px;
-        background: var(--panel-subtle);
+        padding: 0;
+        border: 0;
+        background: none;
         color: var(--muted);
-        text-align: center;
-        font-size: 0.88rem;
-        font-weight: 680;
-        flex: 0 0 auto;
+        font-size: 0.92rem;
+        font-weight: 700;
         white-space: nowrap;
       }
 
       .status.live {
         color: var(--live);
-        border-color: var(--live-soft);
       }
 
       .status.error {
         color: var(--danger);
-        border-color: var(--danger-soft);
       }
 
       .stats {
@@ -206,14 +174,6 @@
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
-      }
-
-      .capture-clock {
-        flex: 0 0 auto;
-        color: var(--ink);
-        font-size: 0.95rem;
-        font-weight: 720;
-        font-variant-numeric: tabular-nums;
       }
 
       .visually-hidden {
@@ -604,7 +564,6 @@
       }
 
       .partial {
-        min-height: 54px;
         max-height: 22svh;
         overflow: auto;
         padding: 12px 16px;
@@ -614,13 +573,13 @@
         line-height: 1.45;
       }
 
-      .partial:empty::before {
-        content: " ";
+      .partial:empty {
+        display: none;
       }
 
       .recording {
         display: grid;
-        grid-template-columns: minmax(0, 1fr) auto;
+        grid-template-columns: minmax(0, 1fr);
         align-items: center;
         gap: 10px;
         padding: 10px 12px;
@@ -651,30 +610,105 @@
       #backend {
         min-width: 0;
         flex: 1;
+        appearance: none;
+        border: 0;
+        border-radius: 0;
+        background: none;
+        padding: 0;
+        min-height: 0;
+        font: inherit;
+        font-weight: 600;
+        color: var(--muted);
+        text-align: left;
+        cursor: pointer;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+        text-decoration: underline;
+        text-decoration-style: dotted;
+        text-underline-offset: 3px;
       }
 
-      .meter {
-        flex: 1 1 auto;
-        width: auto;
-        min-width: 40px;
-        height: 8px;
-        overflow: hidden;
+      #backend:hover {
+        background: none;
+        color: var(--ink);
+      }
+
+      dialog.about {
+        width: min(560px, 92vw);
+        max-height: 84svh;
+        padding: 0;
         border: 1px solid var(--line);
-        border-radius: 999px;
-        background: var(--panel-subtle);
+        border-radius: 12px;
+        background: var(--panel);
+        color: var(--ink);
+        box-shadow: 0 18px 48px var(--shadow);
+        overflow: hidden;
       }
 
-      .meter > span {
-        display: block;
-        width: 100%;
-        height: 100%;
-        transform: scaleX(0);
-        transform-origin: left center;
-        background: var(--live);
-        transition: transform 120ms ease;
+      dialog.about::backdrop {
+        background: rgba(0, 0, 0, 0.45);
+      }
+
+      .about-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin: 0;
+        padding: 14px 16px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .about-head h2 {
+        margin: 0;
+        font-size: 1.05rem;
+        font-weight: 760;
+      }
+
+      .about-close {
+        width: 38px;
+        min-width: 38px;
+        min-height: 38px;
+        padding: 0;
+        display: inline-grid;
+        place-items: center;
+        font-size: 1rem;
+      }
+
+      .about-body {
+        padding: 4px 18px 20px;
+        overflow: auto;
+        max-height: calc(84svh - 62px);
+      }
+
+      .about-section {
+        padding: 12px 0;
+        border-bottom: 1px solid var(--panel-subtle);
+      }
+
+      .about-section:last-child {
+        border-bottom: 0;
+      }
+
+      .about-section h3 {
+        margin: 0 0 4px;
+        font-size: 0.92rem;
+        font-weight: 740;
+        color: var(--accent);
+      }
+
+      .about-section p {
+        margin: 0;
+        font-size: 0.86rem;
+        line-height: 1.55;
+        color: var(--ink);
+      }
+
+      .about-backend {
+        font-variant-numeric: tabular-nums;
+        color: var(--muted);
+        overflow-wrap: anywhere;
       }
 
       @media (max-width: 520px) {
@@ -719,10 +753,6 @@
           grid-template-columns: minmax(0, 1fr);
         }
 
-        #audio-download {
-          width: 100%;
-        }
-
         .entry-meta {
           justify-content: flex-start;
           white-space: normal;
@@ -761,23 +791,6 @@
         <button id="theme" class="theme-toggle" type="button" aria-label="切換深色模式" aria-pressed="false" title="切換深色模式">☾</button>
       </header>
 
-      <section class="statusbar" aria-label="狀態" aria-live="polite">
-        <div class="status-cell capture">
-          <span class="status-cell-label">收音狀態</span>
-          <div class="status-cell-body">
-            <span class="meter" aria-label="麥克風音量"><span id="level"></span></span>
-            <span id="clock" class="capture-clock">00:00</span>
-          </div>
-        </div>
-        <div class="status-cell stt">
-          <span class="status-cell-label">語音轉文字</span>
-          <div class="status-cell-body">
-            <span id="status" class="status">待命</span>
-            <span id="stats" class="stats">0 ms</span>
-          </div>
-        </div>
-      </section>
-
       <section class="controls" aria-label="controls">
         <input id="file" class="visually-hidden" type="file" accept="audio/*" />
         <button id="load" type="button" aria-label="載入音檔分析" title="載入音檔進行辨識">⤵ 載入音檔</button>
@@ -800,14 +813,57 @@
 
       <section id="audio-panel" class="recording" aria-label="錄音" hidden>
         <audio id="recording" controls preload="metadata"></audio>
-        <button id="audio-download" class="mini" type="button" disabled aria-label="下載錄音音檔" title="下載錄音音檔">音檔</button>
+      </section>
+
+      <section class="stt-status" aria-label="語音轉文字狀態" aria-live="polite">
+        <span id="status" class="status">待命</span>
+        <span id="stats" class="stats">0 ms</span>
       </section>
 
       <footer>
-        <span id="backend">ASR</span>
+        <button id="backend" type="button" aria-haspopup="dialog" aria-controls="about" title="查看模型與演算法說明">ASR</button>
       </footer>
     </main>
 
-    <script src="./app.js?v=15" type="module"></script>
+    <dialog id="about" class="about" aria-labelledby="about-title">
+      <form method="dialog" class="about-head">
+        <h2 id="about-title">模型與演算法</h2>
+        <button class="about-close" type="submit" value="close" aria-label="關閉">✕</button>
+      </form>
+      <div class="about-body">
+        <div class="about-section">
+          <h3>語音辨識</h3>
+          <p>
+            以 faster-whisper（Whisper 系列模型）在本機運算,不上傳雲端。即時收音固定辨識繁體中文並加上台灣用語提示詞;載入音檔時改為自動偵測語言,避免把音樂或外語辨成中文亂碼。目前後端:<span class="about-backend" id="about-backend">—</span>
+          </p>
+        </div>
+        <div class="about-section">
+          <h3>音訊預處理</h3>
+          <p>送入辨識前做高通濾波去除低頻噪音、柔性雜訊地板抑制,以及 RMS 音量正規化(natural／speech 兩種強度),讓收音忽大忽小的語音較穩定。</p>
+        </div>
+        <div class="about-section">
+          <h3>語音分段(VAD)</h3>
+          <p>用 RMS 門檻偵測語句的起點與結束,語句前保留一段 pre-roll、尾端靜音達門檻才收尾,單段最長 12 秒就強制切段,避免延遲累積。</p>
+        </div>
+        <div class="about-section">
+          <h3>音高偵測</h3>
+          <p>對每個音框做自相關(autocorrelation)並以拋物線內插細化基頻,取中位數與第 10／90 百分位當音高與範圍;靜音或濁音不足的片段不計入。</p>
+        </div>
+        <div class="about-section">
+          <h3>簡譜與滑音</h3>
+          <p>以每段濁音的中位音高當「1(do)」,換算半音對應到 1–7(#升記號、高低八度以點標示)。同一個字若前後段落在不同音級,判定為滑音並以 ↗／↘ 表示(如 3↗5)。</p>
+        </div>
+        <div class="about-section">
+          <h3>音階誤差與強度</h3>
+          <p>音階誤差是該字音高與最接近音級的距離(cents);強度變化比較字的前半段與後半段 RMS,標示漸強、漸弱或持平。</p>
+        </div>
+        <div class="about-section">
+          <h3>幻覺過濾</h3>
+          <p>結合 Whisper 的 no-speech 機率、低能量門檻,以及常見的贊助／字幕幻覺片語,過濾在靜音時冒出的假文字。</p>
+        </div>
+      </div>
+    </dialog>
+
+    <script src="./app.js?v=16" type="module"></script>
   </body>
 </html>

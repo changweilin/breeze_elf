@@ -9,7 +9,6 @@ const els = {
   save: document.querySelector("#save"),
   audioPanel: document.querySelector("#audio-panel"),
   audioPlayer: document.querySelector("#recording"),
-  audioDownload: document.querySelector("#audio-download"),
   theme: document.querySelector("#theme"),
   themeColor: document.querySelector("meta[name='theme-color']"),
   status: document.querySelector("#status"),
@@ -17,8 +16,8 @@ const els = {
   lines: document.querySelector("#lines"),
   partial: document.querySelector("#partial"),
   backend: document.querySelector("#backend"),
-  clock: document.querySelector("#clock"),
-  level: document.querySelector("#level"),
+  about: document.querySelector("#about"),
+  aboutBackend: document.querySelector("#about-backend"),
 };
 
 const AUDIO_CHUNK_MS = 250;
@@ -267,6 +266,23 @@ function websocketUrl() {
 function setStatus(text, mode = "") {
   els.status.textContent = text;
   els.status.className = `status ${mode}`.trim();
+}
+
+function openAbout() {
+  if (!els.about) {
+    return;
+  }
+  if (els.aboutBackend) {
+    const label = els.backend.textContent?.trim();
+    els.aboutBackend.textContent = label && label !== "ASR" ? label : "尚未連線";
+  }
+  if (typeof els.about.showModal === "function") {
+    if (!els.about.open) {
+      els.about.showModal();
+    }
+  } else {
+    els.about.setAttribute("open", "");
+  }
 }
 
 function setRunning(isRunning) {
@@ -789,6 +805,9 @@ function bindEntryToggle() {
 }
 
 function startClock() {
+  if (!els.clock) {
+    return;
+  }
   state.startedAt = Date.now();
   window.clearInterval(state.clockTimer);
   state.clockTimer = window.setInterval(() => {
@@ -846,6 +865,9 @@ function flashStats(text, restoreText = els.stats.textContent) {
 }
 
 function renderLevel(rms = 0) {
+  if (!els.level) {
+    return;
+  }
   const scaled = Math.min(1, Math.max(0, rms / 0.12));
   els.level.style.transform = `scaleX(${scaled.toFixed(3)})`;
 }
@@ -997,14 +1019,12 @@ function refreshAudioPreview() {
     els.audioPanel.hidden = true;
     els.audioPlayer.removeAttribute("src");
     els.audioPlayer.load();
-    els.audioDownload.disabled = true;
     return;
   }
 
   state.audioObjectUrl = URL.createObjectURL(recordedAudioBlob());
   els.audioPlayer.src = state.audioObjectUrl;
   els.audioPanel.hidden = false;
-  els.audioDownload.disabled = false;
 }
 
 function scheduleAudioPreviewRefresh() {
@@ -1024,7 +1044,6 @@ function appendRecordedAudioChunk(buffer) {
   state.audioBytes += chunk.byteLength;
   state.audioDirty = true;
   els.audioPanel.hidden = false;
-  els.audioDownload.disabled = false;
   scheduleAudioPreviewRefresh();
   scheduleAudioPersist();
 }
@@ -1168,22 +1187,6 @@ async function clearRecordedAudio() {
   } catch {
     flashStats("本機錄音清除失敗");
   }
-}
-
-function downloadRecordedAudio() {
-  if (!state.audioBytes) {
-    return;
-  }
-
-  void persistAudioSession({ force: true });
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const url = URL.createObjectURL(recordedAudioBlob());
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = `breeze-elf-audio-${stamp}.wav`;
-  link.click();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-  flashStats("音檔已下載");
 }
 
 function stopClock() {
@@ -1663,6 +1666,12 @@ restoreTranscriptSession();
 void restoreAudioSession();
 
 els.theme.addEventListener("click", toggleTheme);
+els.backend.addEventListener("click", openAbout);
+els.about?.addEventListener("click", (event) => {
+  if (event.target === els.about) {
+    els.about.close();
+  }
+});
 bindPitchToggle();
 bindEntryToggle();
 SYSTEM_DARK_QUERY.addEventListener("change", syncSystemTheme);
@@ -1685,7 +1694,6 @@ els.clear.addEventListener("click", () => {
   persistSessionNow();
   void clearRecordedAudio();
 });
-els.audioDownload.addEventListener("click", downloadRecordedAudio);
 els.copy.addEventListener("click", async () => {
   if (!state.transcript.trim()) {
     return;
