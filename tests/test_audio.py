@@ -5,12 +5,23 @@ import numpy as np
 from breeze_elf.audio import (
     AudioUtteranceBuffer,
     AudioWindowBuffer,
+    analyze_segment,
     calculate_rms,
     hz_to_jianpu,
+    jianpu_glide,
     pcm16le_to_float32,
+    pitch_cents_off,
     prepare_asr_audio,
     summarize_pitch,
 )
+
+
+def _chirp(sample_rate, seconds, f0, f1, amplitude=0.4):
+    """A linear frequency sweep, used to model a 滑音 (portamento)."""
+    time_axis = np.arange(round(sample_rate * seconds), dtype=np.float64) / sample_rate
+    rate = (f1 - f0) / seconds
+    phase = 2 * np.pi * (f0 * time_axis + 0.5 * rate * time_axis * time_axis)
+    return (amplitude * np.sin(phase)).astype(np.float32)
 
 
 class AudioTests(unittest.TestCase):
@@ -94,6 +105,44 @@ class AudioTests(unittest.TestCase):
         self.assertEqual(hz_to_jianpu(None, 220.0), "")
         self.assertEqual(hz_to_jianpu(220.0, None), "")
         self.assertEqual(hz_to_jianpu(220.0, 0.0), "")
+
+    def test_jianpu_glide_collapses_steady_note_to_single_degree(self):
+        tonic = 220.0
+        # a small wobble still lands on the same degree -> not a glide
+        self.assertEqual(jianpu_glide(220.0, 223.0, tonic), "1")
+        self.assertEqual(jianpu_glide(220.0, 220.0, tonic), "1")
+
+    def test_jianpu_glide_marks_rising_and_falling_slides(self):
+        tonic = 220.0
+        rising = jianpu_glide(tonic, tonic * 2 ** (7 / 12), tonic)
+        falling = jianpu_glide(tonic * 2 ** (7 / 12), tonic, tonic)
+        self.assertEqual(rising, "1↗5")
+        self.assertEqual(falling, "5↘1")
+
+    def test_pitch_cents_off_measures_distance_from_scale_degree(self):
+        tonic = 220.0
+        self.assertAlmostEqual(pitch_cents_off(tonic, tonic), 0.0, delta=0.01)
+        self.assertAlmostEqual(pitch_cents_off(tonic * 2 ** (0.25 / 12), tonic), 25.0, delta=1.0)
+        self.assertAlmostEqual(pitch_cents_off(tonic * 2 ** (-0.3 / 12), tonic), -30.0, delta=1.0)
+        self.assertIsNone(pitch_cents_off(None, tonic))
+        self.assertIsNone(pitch_cents_off(220.0, 0.0))
+
+    def test_analyze_segment_tracks_slide_edges_and_intensity(self):
+        sample_rate = 16_000
+        samples = _chirp(sample_rate, 0.5, 200.0, 300.0)
+
+        analysis = analyze_segment(samples, sample_rate)
+
+        self.assertIsNotNone(analysis.start_hz)
+        self.assertIsNotNone(analysis.end_hz)
+        self.assertLess(analysis.start_hz, analysis.end_hz)
+        self.assertGreater(analysis.end_hz - analysis.start_hz, 40.0)
+        self.assertGreater(analysis.intensity, 0.0)
+
+    def test_analyze_segment_handles_empty_segment(self):
+        analysis = analyze_segment(np.empty(0, dtype=np.float32), 16_000)
+        self.assertIsNone(analysis.median_hz)
+        self.assertEqual(analysis.intensity, 0.0)
 
     def test_summarize_pitch_returns_empty_for_silence(self):
         summary = summarize_pitch(np.zeros(16_000, dtype=np.float32), 16_000)

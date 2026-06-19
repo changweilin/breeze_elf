@@ -23,6 +23,8 @@ _JIANPU_DEGREES = {
 }
 _JIANPU_DOT_ABOVE = "̇"  # combining dot above (higher octave)
 _JIANPU_DOT_BELOW = "̣"  # combining dot below (lower octave)
+_JIANPU_GLIDE_UP = "↗"  # rising portamento between two degrees
+_JIANPU_GLIDE_DOWN = "↘"  # falling portamento between two degrees
 
 
 @dataclass(frozen=True)
@@ -50,6 +52,26 @@ class PitchSummary:
     max_hz: float | None
     voiced_ratio: float
     points: tuple[PitchPoint, ...]
+
+
+@dataclass(frozen=True)
+class SegmentAnalysis:
+    """Pitch and loudness behaviour measured over a single short segment.
+
+    ``start_hz`` / ``end_hz`` are the median pitch of the leading and trailing
+    edges of the segment so a portamento (slide) can be told apart from a
+    steady note. ``intensity_start`` / ``intensity_end`` are the RMS of the two
+    halves so a crescendo or decay is visible.
+    """
+
+    median_hz: float | None
+    min_hz: float | None
+    max_hz: float | None
+    start_hz: float | None
+    end_hz: float | None
+    intensity: float
+    intensity_start: float
+    intensity_end: float
 
 
 @dataclass(frozen=True)
@@ -314,6 +336,69 @@ def hz_to_jianpu(hz: float | None, tonic_hz: float | None) -> str:
     if octave < 0:
         return digit + _JIANPU_DOT_BELOW * (-octave)
     return digit
+
+
+def jianpu_glide(start_hz: float | None, end_hz: float | None, tonic_hz: float | None) -> str:
+    """Render a 簡譜 glide between two pitches.
+
+    When the leading and trailing pitch of a segment land on the same scale
+    degree the note is steady and the single degree is returned. When they
+    differ (a portamento / 滑音) the two degrees are joined with an arrow that
+    shows the slide direction, e.g. ``3↗5`` or ``5↘1``.
+    """
+    start = hz_to_jianpu(start_hz, tonic_hz)
+    end = hz_to_jianpu(end_hz, tonic_hz)
+    if not start:
+        return end
+    if not end or start == end:
+        return start
+    arrow = _JIANPU_GLIDE_UP if (end_hz or 0.0) >= (start_hz or 0.0) else _JIANPU_GLIDE_DOWN
+    return f"{start}{arrow}{end}"
+
+
+def pitch_cents_off(hz: float | None, tonic_hz: float | None) -> float | None:
+    """Signed distance, in cents, from the nearest scale degree of the tonic.
+
+    ``0`` means perfectly in tune with the tonic's equal-tempered grid; the
+    value approaches ±50 cents at the midpoint between two degrees. Returns
+    ``None`` when the pitch or tonic is missing.
+    """
+    if not hz or not tonic_hz or hz <= 0 or tonic_hz <= 0:
+        return None
+    semitones = 12.0 * math.log2(hz / tonic_hz)
+    return (semitones - round(semitones)) * 100.0
+
+
+def analyze_segment(
+    samples: np.ndarray,
+    sample_rate: int,
+    *,
+    edge_fraction: float = 0.34,
+) -> SegmentAnalysis:
+    """Measure pitch range, slide edges, and loudness envelope of a segment."""
+    if samples.size < 2:
+        return SegmentAnalysis(None, None, None, None, None, 0.0, 0.0, 0.0)
+
+    summary = summarize_pitch(samples, sample_rate)
+    hz_points = [point.hz for point in summary.points if point.hz]
+    start_hz: float | None = None
+    end_hz: float | None = None
+    if hz_points:
+        edge = max(1, round(len(hz_points) * edge_fraction))
+        start_hz = float(np.median(hz_points[:edge]))
+        end_hz = float(np.median(hz_points[-edge:]))
+
+    half = max(1, samples.size // 2)
+    return SegmentAnalysis(
+        median_hz=summary.median_hz,
+        min_hz=summary.min_hz,
+        max_hz=summary.max_hz,
+        start_hz=start_hz,
+        end_hz=end_hz,
+        intensity=calculate_rms(samples),
+        intensity_start=calculate_rms(samples[:half]),
+        intensity_end=calculate_rms(samples[half:]),
+    )
 
 
 def _parabolic_lag(autocorr: np.ndarray, lag: int) -> float:

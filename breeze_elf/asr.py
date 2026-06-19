@@ -122,21 +122,30 @@ class FasterWhisperASR:
         self.load()
         assert self._model is not None
 
+        # Loaded files (e.g. music or non-Chinese audio) ask for "auto" so the
+        # model detects the language itself; forcing Traditional Chinese on a
+        # melody produces hallucinated gibberish. In auto mode we also drop the
+        # Chinese prompt so it cannot bias the detection back toward zh.
+        requested = (language or "").strip().lower()
+        auto_detect = requested in {"", "auto"}
+        whisper_language = None if auto_detect else language
+        initial_prompt = None if auto_detect else TRADITIONAL_CHINESE_PROMPT
+
         started = time.perf_counter()
         segments, info = self._model.transcribe(
             samples.astype(np.float32, copy=False),
-            language=language,
+            language=whisper_language,
             task="transcribe",
             beam_size=1,
             vad_filter=False,
             condition_on_previous_text=False,
-            initial_prompt=TRADITIONAL_CHINESE_PROMPT,
+            initial_prompt=initial_prompt,
             word_timestamps=True,
         )
         segment_list = list(segments)
         text = " ".join(segment.text.strip() for segment in segment_list).strip()
         text = _to_traditional(text, self._converter)
-        detected_language = getattr(info, "language", language) or language
+        detected_language = getattr(info, "language", None) or (language or "auto")
         return ASRResult(
             text=text,
             language=detected_language,

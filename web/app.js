@@ -126,6 +126,8 @@ const state = {
   audioDirty: false,
   audioStorageFailed: false,
   savingRemote: false,
+  fileLanguageShown: false,
+  openBlocks: new Set(),
   demoRunning: false,
   demoTimers: [],
 };
@@ -155,13 +157,31 @@ function demoCharacters(text, startSeconds, endSeconds, jianpu) {
   const step = (endSeconds - startSeconds) / chars.length;
   return chars.map((char, index) => {
     const charStart = startSeconds + index * step;
+    const baseHz = 180 + ((index * 17) % 90);
+    const isGlide = index % 4 === 3;
+    const endHz = isGlide ? baseHz + 28 : baseHz + ((index % 3) - 1) * 4;
+    const degree = jianpu[index % jianpu.length];
+    const glideDegree = jianpu[(index + 2) % jianpu.length];
+    const intensityStart = 0.05 + ((index * 7) % 30) / 1000;
+    const intensityEnd = intensityStart * (isGlide ? 1.4 : index % 2 ? 0.72 : 1.05);
     return {
       char,
       startSeconds: Number(charStart.toFixed(3)),
       endSeconds: Number((charStart + step).toFixed(3)),
       durationSeconds: Number(step.toFixed(3)),
-      hz: null,
-      jianpu: jianpu[index % jianpu.length],
+      hz: Number(baseHz.toFixed(1)),
+      minHz: Number(Math.min(baseHz, endHz).toFixed(1)),
+      maxHz: Number(Math.max(baseHz, endHz).toFixed(1)),
+      startHz: Number(baseHz.toFixed(1)),
+      endHz: Number(endHz.toFixed(1)),
+      jianpu: isGlide ? `${degree}↗${glideDegree}` : degree,
+      jianpuStart: degree,
+      jianpuEnd: isGlide ? glideDegree : degree,
+      isGlide,
+      centsOff: ((index * 13) % 70) - 35,
+      intensity: Number(((intensityStart + intensityEnd) / 2).toFixed(4)),
+      intensityStart: Number(intensityStart.toFixed(4)),
+      intensityEnd: Number(intensityEnd.toFixed(4)),
     };
   });
 }
@@ -270,7 +290,8 @@ function handleToggle() {
 function renderTranscript(text, { persist = true } = {}) {
   state.transcript = text;
   state.transcriptBlocks = [];
-  renderTranscriptView();
+  state.openBlocks.clear();
+  renderTranscriptView({ scrollToEnd: true });
   setTranscriptActions(Boolean(text.trim()));
   if (persist) {
     scheduleSessionPersist();
@@ -301,57 +322,272 @@ function appendTranscriptBlock(data, { persist = true } = {}) {
     pitch: normalizePitch(data.pitch),
     characters: normalizeCharacters(data.characters),
   });
-  renderTranscriptView();
+  renderTranscriptView({ scrollToEnd: true });
   setTranscriptActions(Boolean(state.transcript.trim()));
   if (persist) {
     scheduleSessionPersist();
   }
 }
 
-function renderTranscriptView() {
+function renderTranscriptView({ scrollToEnd = false } = {}) {
+  const hasBlocks = state.transcriptBlocks.length > 0;
+  const previousScroll = els.lines.scrollTop;
+  const wasAtBottom = els.lines.scrollHeight - previousScroll - els.lines.clientHeight < 48;
+
   els.lines.classList.toggle("pitch-mode", state.pitchMode);
+  els.lines.classList.toggle("block-mode", hasBlocks);
   els.lines.replaceChildren();
 
-  if (state.pitchMode && state.transcriptBlocks.length > 0) {
+  if (hasBlocks) {
     const fragment = document.createDocumentFragment();
-    state.transcriptBlocks.forEach((block) => {
-      fragment.append(renderTranscriptBlock(block));
+    state.transcriptBlocks.forEach((block, index) => {
+      fragment.append(renderTranscriptEntry(block, index));
     });
     els.lines.append(fragment);
   } else {
     els.lines.textContent = state.transcript;
   }
 
-  els.lines.scrollTop = els.lines.scrollHeight;
+  if (scrollToEnd || wasAtBottom) {
+    els.lines.scrollTop = els.lines.scrollHeight;
+  } else {
+    els.lines.scrollTop = previousScroll;
+  }
 }
 
-function renderTranscriptBlock(block) {
-  const row = document.createElement("div");
-  row.className = "transcript-block";
+function renderTranscriptEntry(block, index) {
+  const entry = document.createElement("div");
+  entry.className = "transcript-entry";
+
+  const characters = Array.isArray(block.characters) ? block.characters : [];
+  const jianpuMode = state.pitchMode && characters.length > 0;
+  const hasDetails = characters.length > 0 || Boolean(block.pitch);
+  const open = hasDetails && state.openBlocks.has(index);
+
+  const main = document.createElement("div");
+  main.className = "entry-main";
 
   const meta = document.createElement("span");
-  meta.className = "pitch-meta";
+  meta.className = "entry-meta";
   const range = document.createElement("span");
   range.textContent = formatTimeRange(block.startSeconds, block.endSeconds);
   meta.append(range);
-
-  if (Array.isArray(block.characters) && block.characters.length > 0) {
-    row.classList.add("has-jianpu");
-    row.append(meta, renderJianpuLine(block.characters));
-    return row;
+  if (state.pitchMode && block.pitch) {
+    const pitch = document.createElement("span");
+    pitch.className = "pitch-value";
+    pitch.textContent = formatPitch(block.pitch);
+    meta.append(pitch);
+  }
+  if (hasDetails) {
+    const chevron = document.createElement("span");
+    chevron.className = "entry-chevron";
+    chevron.setAttribute("aria-hidden", "true");
+    chevron.textContent = "▸";
+    meta.append(chevron);
   }
 
-  const text = document.createElement("span");
-  text.className = "transcript-text";
-  text.textContent = block.text.trimStart();
+  if (jianpuMode) {
+    entry.classList.add("jianpu");
+    main.append(meta, renderJianpuLine(characters));
+  } else {
+    const text = document.createElement("span");
+    text.className = "transcript-text";
+    text.textContent = block.text.trimStart();
+    const body = document.createElement("span");
+    body.className = "entry-body";
+    body.append(text);
+    main.append(body, meta);
+  }
 
-  const pitch = document.createElement("span");
-  pitch.className = "pitch-value";
-  pitch.textContent = formatPitch(block.pitch);
+  if (hasDetails) {
+    entry.classList.add("expandable");
+    main.setAttribute("role", "button");
+    main.setAttribute("tabindex", "0");
+    main.setAttribute("aria-expanded", String(open));
+    main.dataset.index = String(index);
+    main.setAttribute("aria-label", `${block.text.trim().slice(0, 24) || "段落"} 詳細資訊`);
+  }
+  entry.append(main);
 
-  meta.append(pitch);
-  row.append(text, meta, renderPitchSpark(block.pitch));
+  if (hasDetails) {
+    const details = renderEntryDetails(block);
+    details.hidden = !open;
+    entry.classList.toggle("open", open);
+    entry.append(details);
+  }
+  return entry;
+}
+
+function toggleEntryDetails(index) {
+  if (!Number.isInteger(index)) {
+    return;
+  }
+  if (state.openBlocks.has(index)) {
+    state.openBlocks.delete(index);
+  } else {
+    state.openBlocks.add(index);
+  }
+  renderTranscriptView();
+}
+
+function renderEntryDetails(block) {
+  const details = document.createElement("div");
+  details.className = "entry-details";
+  const characters = Array.isArray(block.characters) ? block.characters : [];
+  if (characters.length > 0) {
+    details.append(renderCharacterTable(characters));
+  } else if (block.pitch) {
+    details.append(renderPitchSummaryDetail(block.pitch));
+  }
+  return details;
+}
+
+function renderCharacterTable(characters) {
+  const table = document.createElement("table");
+  table.className = "char-table";
+
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  ["字", "時間", "頻率", "音階", "強度"].forEach((label) => {
+    const th = document.createElement("th");
+    th.scope = "col";
+    th.textContent = label;
+    headRow.append(th);
+  });
+  head.append(headRow);
+
+  const tbody = document.createElement("tbody");
+  characters.forEach((character) => tbody.append(renderCharacterRow(character)));
+
+  table.append(head, tbody);
+  return table;
+}
+
+function renderCharacterRow(character) {
+  const row = document.createElement("tr");
+
+  const charCell = document.createElement("td");
+  charCell.className = "char-cell";
+  const glyph = document.createElement("span");
+  glyph.className = "char-glyph";
+  glyph.textContent = character.char;
+  charCell.append(glyph);
+  if (character.jianpu) {
+    const jp = document.createElement("span");
+    jp.className = "char-jianpu";
+    jp.textContent = character.jianpu;
+    charCell.append(jp);
+  }
+
+  const timeCell = document.createElement("td");
+  timeCell.textContent = formatCharTime(character);
+
+  const freqCell = document.createElement("td");
+  freqCell.textContent = formatCharFrequency(character);
+
+  const scaleCell = document.createElement("td");
+  renderScaleCell(character).forEach((node) => scaleCell.append(node));
+
+  const intensityCell = document.createElement("td");
+  intensityCell.append(renderIntensityCell(character));
+
+  row.append(charCell, timeCell, freqCell, scaleCell, intensityCell);
   return row;
+}
+
+function formatCharTime(character) {
+  if (!Number.isFinite(character.startSeconds) || !Number.isFinite(character.endSeconds)) {
+    return "—";
+  }
+  const ms = Number.isFinite(character.durationSeconds)
+    ? Math.round(character.durationSeconds * 1000)
+    : Math.round((character.endSeconds - character.startSeconds) * 1000);
+  return `${formatClockTime(character.startSeconds)}–${formatClockTime(character.endSeconds)} · ${ms}ms`;
+}
+
+function formatCharFrequency(character) {
+  if (character.isGlide && Number.isFinite(character.startHz) && Number.isFinite(character.endHz)) {
+    return `${Math.round(character.startHz)}→${Math.round(character.endHz)} Hz`;
+  }
+  if (Number.isFinite(character.hz)) {
+    return `${Math.round(character.hz)} Hz`;
+  }
+  return "—";
+}
+
+function renderScaleCell(character) {
+  const nodes = [];
+  const degree = document.createElement("span");
+  degree.className = "scale-degree";
+  degree.textContent = character.jianpu || "—";
+  nodes.push(degree);
+  if (Number.isFinite(character.centsOff) && Number.isFinite(character.hz)) {
+    const cents = document.createElement("span");
+    cents.className = "scale-cents";
+    const sign = character.centsOff > 0 ? "+" : "";
+    cents.textContent = `${sign}${Math.round(character.centsOff)}¢`;
+    if (Math.abs(character.centsOff) > 35) {
+      cents.classList.add("off");
+    }
+    nodes.push(cents);
+  }
+  return nodes;
+}
+
+function renderIntensityCell(character) {
+  const wrap = document.createElement("span");
+  wrap.className = "intensity-cell";
+  const trend = intensityTrend(character.intensityStart, character.intensityEnd);
+  const arrow = document.createElement("span");
+  arrow.className = `intensity-arrow ${trend.tone}`.trim();
+  arrow.textContent = trend.arrow;
+  const label = document.createElement("span");
+  label.textContent =
+    trend.db === null ? trend.label : `${trend.label} ${trend.db > 0 ? "+" : ""}${trend.db.toFixed(1)}dB`;
+  wrap.append(arrow, label);
+  return wrap;
+}
+
+function intensityTrend(start, end) {
+  if (!(start > 0) || !(end > 0)) {
+    return { label: "—", arrow: "·", db: null, tone: "" };
+  }
+  const db = 20 * Math.log10(end / start);
+  if (db >= 1.5) {
+    return { label: "漸強", arrow: "↗", db, tone: "up" };
+  }
+  if (db <= -1.5) {
+    return { label: "漸弱", arrow: "↘", db, tone: "down" };
+  }
+  return { label: "持平", arrow: "→", db, tone: "flat" };
+}
+
+function renderPitchSummaryDetail(pitch) {
+  const wrap = document.createElement("div");
+  wrap.className = "pitch-summary-detail";
+  const rows = [
+    ["中位音高", Number.isFinite(pitch.medianHz) ? `${Math.round(pitch.medianHz)} Hz` : "未偵測"],
+    [
+      "音高範圍",
+      Number.isFinite(pitch.minHz) && Number.isFinite(pitch.maxHz)
+        ? `${Math.round(pitch.minHz)}–${Math.round(pitch.maxHz)} Hz`
+        : "—",
+    ],
+    ["濁音比例", Number.isFinite(pitch.voicedRatio) ? `${Math.round(pitch.voicedRatio * 100)}%` : "—"],
+  ];
+  rows.forEach(([label, value]) => {
+    const line = document.createElement("div");
+    line.className = "summary-line";
+    const key = document.createElement("span");
+    key.className = "summary-key";
+    key.textContent = label;
+    const val = document.createElement("span");
+    val.textContent = value;
+    line.append(key, val);
+    wrap.append(line);
+  });
+  wrap.append(renderPitchSpark(pitch));
+  return wrap;
 }
 
 function renderJianpuLine(characters) {
@@ -446,7 +682,18 @@ function normalizeCharacters(characters) {
       endSeconds: finiteNumber(character?.endSeconds),
       durationSeconds: finiteNumber(character?.durationSeconds),
       hz: finiteNumber(character?.hz),
+      minHz: finiteNumber(character?.minHz),
+      maxHz: finiteNumber(character?.maxHz),
+      startHz: finiteNumber(character?.startHz),
+      endHz: finiteNumber(character?.endHz),
       jianpu: typeof character?.jianpu === "string" ? character.jianpu : "",
+      jianpuStart: typeof character?.jianpuStart === "string" ? character.jianpuStart : "",
+      jianpuEnd: typeof character?.jianpuEnd === "string" ? character.jianpuEnd : "",
+      isGlide: Boolean(character?.isGlide),
+      centsOff: finiteNumber(character?.centsOff),
+      intensity: finiteNumber(character?.intensity),
+      intensityStart: finiteNumber(character?.intensityStart),
+      intensityEnd: finiteNumber(character?.intensityEnd),
     }))
     .filter((character) => character.char);
 }
@@ -480,7 +727,7 @@ function setPitchMode(enabled, { persist = true } = {}) {
   els.pitch.setAttribute("aria-pressed", String(state.pitchMode));
   els.pitch.setAttribute("aria-label", state.pitchMode ? "隱藏音高模式" : "顯示音高模式");
   els.pitch.setAttribute("title", state.pitchMode ? "隱藏每段文字的音高" : "顯示每段文字的音高");
-  renderTranscriptView();
+  renderTranscriptView({ scrollToEnd: true });
   if (persist) {
     persistSettings();
   }
@@ -511,6 +758,34 @@ function bindPitchToggle() {
     els.pitch.addEventListener("touchend", togglePitchModeFromEvent, { passive: false });
   }
   els.pitch.addEventListener("click", togglePitchModeFromEvent);
+}
+
+function entryIndexFromEvent(event) {
+  const main = event.target.closest?.(".entry-main[role='button']");
+  if (!main || !els.lines.contains(main)) {
+    return null;
+  }
+  const index = Number(main.dataset.index);
+  return Number.isInteger(index) ? index : null;
+}
+
+function bindEntryToggle() {
+  els.lines.addEventListener("click", (event) => {
+    const index = entryIndexFromEvent(event);
+    if (index !== null) {
+      toggleEntryDetails(index);
+    }
+  });
+  els.lines.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " " && event.key !== "Spacebar") {
+      return;
+    }
+    const index = entryIndexFromEvent(event);
+    if (index !== null) {
+      event.preventDefault();
+      toggleEntryDetails(index);
+    }
+  });
 }
 
 function startClock() {
@@ -635,7 +910,8 @@ function restoreTranscriptSession() {
 
   state.transcript = transcript || blocks.map((block) => block.text).join("");
   state.transcriptBlocks = blocks;
-  renderTranscriptView();
+  state.openBlocks.clear();
+  renderTranscriptView({ scrollToEnd: true });
   setTranscriptActions(Boolean(state.transcript.trim()));
   flashStats("已恢復本機記憶");
 }
@@ -1152,6 +1428,7 @@ async function analyzeFile(file) {
   ingestLoadedAudio(decoded);
 
   state.analyzing = true;
+  state.fileLanguageShown = false;
   state.stopping = false;
   state.droppedClientChunks = 0;
   setRunning(true);
@@ -1166,7 +1443,9 @@ async function analyzeFile(file) {
       JSON.stringify({
         type: "start",
         sampleRate: AUDIO_SAMPLE_RATE,
-        language: "zh",
+        // Loaded files may be music or non-Chinese audio; let the model detect
+        // the language instead of forcing zh, which garbles melodies.
+        language: "auto",
         chunkMs: AUDIO_CHUNK_MS,
         mode: "file",
       }),
@@ -1356,6 +1635,10 @@ function handleServerMessage(event) {
     if (data.text) {
       appendTranscriptBlock(data);
     }
+    if (state.analyzing && data.language && !state.fileLanguageShown) {
+      state.fileLanguageShown = true;
+      flashStats(`偵測語言 ${data.language}`);
+    }
     return;
   }
 
@@ -1381,6 +1664,7 @@ void restoreAudioSession();
 
 els.theme.addEventListener("click", toggleTheme);
 bindPitchToggle();
+bindEntryToggle();
 SYSTEM_DARK_QUERY.addEventListener("change", syncSystemTheme);
 els.toggle.addEventListener("click", handleToggle);
 els.load.addEventListener("click", () => {

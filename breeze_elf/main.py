@@ -26,7 +26,11 @@ from .audio import (
     AudioWindow,
     AudioWindowBuffer,
     PitchSummary,
+    SegmentAnalysis,
+    analyze_segment,
     hz_to_jianpu,
+    jianpu_glide,
+    pitch_cents_off,
     prepare_asr_audio,
     summarize_pitch,
 )
@@ -64,6 +68,8 @@ COMMON_SILENCE_HALLUCINATION_FRAGMENTS = (
     "歡迎訂閱按讚分享",
 )
 HALLUCINATION_TEXT_TRANSLATION = str.maketrans({"讚": "贊", "赞": "贊"})
+_JIANPU_GLIDE_UP = "↗"
+_JIANPU_GLIDE_DOWN = "↘"
 
 
 class TranscriptCharacter(BaseModel):
@@ -73,6 +79,17 @@ class TranscriptCharacter(BaseModel):
     durationSeconds: float | None = None
     hz: float | None = None
     jianpu: str | None = None
+    jianpuStart: str | None = None
+    jianpuEnd: str | None = None
+    minHz: float | None = None
+    maxHz: float | None = None
+    startHz: float | None = None
+    endHz: float | None = None
+    isGlide: bool | None = None
+    centsOff: float | None = None
+    intensity: float | None = None
+    intensityStart: float | None = None
+    intensityEnd: float | None = None
 
 
 class TranscriptBlock(BaseModel):
@@ -555,31 +572,57 @@ def _character_payloads(
     sample_rate: int,
     summary: PitchSummary,
 ) -> list[dict[str, Any]]:
-    """Per-character timing, pitch, and 簡譜 (jianpu) for a recognised window."""
+    """Per-character timing, pitch, slide, tuning, and intensity analysis."""
     segments = _split_words_to_chars(words)
     if not segments:
         return []
 
-    measured = [
-        (char, start, end, _char_pitch_hz(window.samples, sample_rate, start, end))
+    analyzed = [
+        (char, start, end, _segment_pitch(window.samples, sample_rate, start, end))
         for char, start, end in segments
     ]
-    voiced = [hz for *_, hz in measured if hz]
+    voiced = [seg.median_hz for *_, seg in analyzed if seg.median_hz]
     tonic = float(np.median(voiced)) if voiced else (summary.median_hz or 0.0)
 
-    payloads: list[dict[str, Any]] = []
-    for char, start, end, hz in measured:
-        payloads.append(
-            {
-                "char": char,
-                "startSeconds": round(window.start_seconds + start, 3),
-                "endSeconds": round(window.start_seconds + end, 3),
-                "durationSeconds": round(max(0.0, end - start), 3),
-                "hz": _round_pitch(hz),
-                "jianpu": hz_to_jianpu(hz, tonic),
-            }
-        )
-    return payloads
+    return [
+        _character_payload(window, char, start, end, seg, tonic)
+        for char, start, end, seg in analyzed
+    ]
+
+
+def _character_payload(
+    window: AudioWindow,
+    char: str,
+    start: float,
+    end: float,
+    seg: SegmentAnalysis,
+    tonic: float,
+) -> dict[str, Any]:
+    median = seg.median_hz
+    start_hz = seg.start_hz or median
+    end_hz = seg.end_hz or median
+    single = hz_to_jianpu(median, tonic)
+    glide = jianpu_glide(start_hz, end_hz, tonic) if (start_hz and end_hz) else single
+    is_glide = glide != single and (_JIANPU_GLIDE_UP in glide or _JIANPU_GLIDE_DOWN in glide)
+    return {
+        "char": char,
+        "startSeconds": round(window.start_seconds + start, 3),
+        "endSeconds": round(window.start_seconds + end, 3),
+        "durationSeconds": round(max(0.0, end - start), 3),
+        "hz": _round_pitch(median),
+        "minHz": _round_pitch(seg.min_hz),
+        "maxHz": _round_pitch(seg.max_hz),
+        "startHz": _round_pitch(start_hz),
+        "endHz": _round_pitch(end_hz),
+        "jianpu": glide if is_glide else single,
+        "jianpuStart": hz_to_jianpu(start_hz, tonic),
+        "jianpuEnd": hz_to_jianpu(end_hz, tonic),
+        "isGlide": is_glide,
+        "centsOff": _round_cents(pitch_cents_off(median, tonic)),
+        "intensity": _round_intensity(seg.intensity),
+        "intensityStart": _round_intensity(seg.intensity_start),
+        "intensityEnd": _round_intensity(seg.intensity_end),
+    }
 
 
 def _split_words_to_chars(
@@ -600,17 +643,15 @@ def _split_words_to_chars(
     return segments
 
 
-def _char_pitch_hz(
+def _segment_pitch(
     samples: np.ndarray,
     sample_rate: int,
     start_seconds: float,
     end_seconds: float,
-) -> float | None:
+) -> SegmentAnalysis:
     begin = max(0, int(start_seconds * sample_rate))
     finish = min(samples.size, int(math.ceil(end_seconds * sample_rate)))
-    if finish - begin < 2:
-        return None
-    return summarize_pitch(samples[begin:finish], sample_rate).median_hz
+    return analyze_segment(samples[begin:finish], sample_rate)
 
 
 def _window_sample_rate(window: AudioWindow) -> int:
@@ -641,6 +682,18 @@ def _round_pitch(value: float | None) -> float | None:
     if value is None:
         return None
     return round(value, 1)
+
+
+def _round_cents(value: float | None) -> float | None:
+    if value is None:
+        return None
+    return round(value)
+
+
+def _round_intensity(value: float | None) -> float:
+    if value is None:
+        return 0.0
+    return round(float(value), 4)
 
 
 def _is_common_silence_hallucination(text: str) -> bool:

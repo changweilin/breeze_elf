@@ -32,9 +32,23 @@ Set `BREEZE_REMOTE_STORAGE_DIR` to choose another host-side directory.
 
 ## Pitch Mode
 
-Tap `音高` to show each finalized transcript block with its matched audio time range and
-median pitch. Pitch is estimated locally from the same VAD/audio window that produced the
-text, so copied, downloaded, and remotely saved transcripts stay as plain text.
+Tap `音高` to show each finalized transcript block with its matched audio time range and a
+per-character 簡譜 (jianpu) line. Pitch is estimated locally from the same VAD/audio window
+that produced the text, so copied, downloaded, and remotely saved transcripts stay as plain
+text. A character whose pitch slides within its duration (滑音 / portamento) is shown as a
+glide, e.g. `3↗5` (rising) or `5↘1` (falling), instead of a single number.
+
+Click any finalized sentence to expand a detail panel listing each character's time range,
+frequency (or the slide's start→end), scale tuning error in cents, and intensity trend
+(漸強 / 漸弱 / 持平). This works in both plain and pitch modes.
+
+## Loading Audio Files
+
+Tap `載入音檔` to analyze a recording instead of the live microphone. Loaded files request
+automatic language detection rather than forcing Traditional Chinese, so music or
+non-Chinese audio is no longer transcribed as Chinese gibberish. Note that a speech model
+still hallucinates lyrics on purely instrumental tracks — for melodies the pitch / 簡譜
+output is the meaningful result.
 
 ## GitHub Actions Web Demo
 

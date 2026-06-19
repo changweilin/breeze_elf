@@ -10,7 +10,7 @@ from unittest.mock import patch
 import numpy as np
 
 from breeze_elf import main
-from breeze_elf.asr import ASRResult, MockASR
+from breeze_elf.asr import ASRResult, MockASR, WordTiming
 from breeze_elf.asr_queue import QueuedASRResult
 from breeze_elf.audio import (
     AudioUtteranceBuffer,
@@ -265,6 +265,45 @@ class CharacterPayloadTests(unittest.TestCase):
         voiced = [c["jianpu"] for c in characters if c["hz"]]
         self.assertTrue(voiced)
         self.assertTrue(all(jianpu == "1" for jianpu in voiced))
+
+    def test_character_payloads_mark_glide_and_attach_analysis_fields(self):
+        sample_rate = 16_000
+        seconds = 0.5
+        time_axis = np.arange(round(sample_rate * seconds), dtype=np.float64) / sample_rate
+        rate = (300.0 - 200.0) / seconds
+        phase = 2 * np.pi * (200.0 * time_axis + 0.5 * rate * time_axis * time_axis)
+        samples = (0.4 * np.sin(phase)).astype(np.float32)
+        window = AudioWindow(
+            index=0,
+            start_seconds=0.0,
+            end_seconds=seconds,
+            samples=samples,
+            rms=calculate_rms(samples),
+            is_speech=True,
+            kind="utterance",
+        )
+        words = (WordTiming(word="滑", start=0.0, end=seconds),)
+        summary = summarize_pitch(samples, sample_rate)
+
+        characters = _character_payloads(window, words, sample_rate, summary)
+
+        self.assertEqual(len(characters), 1)
+        character = characters[0]
+        self.assertTrue(character["isGlide"])
+        self.assertIn("↗", character["jianpu"])
+        self.assertLess(character["startHz"], character["endHz"])
+        self.assertIn("centsOff", character)
+        self.assertGreater(character["intensity"], 0.0)
+        expected_fields = {
+            "char",
+            "startSeconds",
+            "jianpu",
+            "hz",
+            "centsOff",
+            "intensityStart",
+            "intensityEnd",
+        }
+        self.assertTrue(set(character) >= expected_fields)
 
     def test_character_payloads_empty_without_words(self):
         window = AudioWindow(
