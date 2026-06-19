@@ -1,8 +1,28 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
+
+# 簡譜 (jianpu) maps each scale degree, measured in semitones above the tonic,
+# to a number 1-7. Chromatic degrees borrow the lower number with a sharp.
+_JIANPU_DEGREES = {
+    0: "1",
+    1: "#1",
+    2: "2",
+    3: "#2",
+    4: "3",
+    5: "4",
+    6: "#4",
+    7: "5",
+    8: "#5",
+    9: "6",
+    10: "#6",
+    11: "7",
+}
+_JIANPU_DOT_ABOVE = "̇"  # combining dot above (higher octave)
+_JIANPU_DOT_BELOW = "̣"  # combining dot below (lower octave)
 
 
 @dataclass(frozen=True)
@@ -274,6 +294,26 @@ def summarize_pitch(
         voiced_ratio=float(voiced_ratio),
         points=tuple(_thin_pitch_points(points, max_points)),
     )
+
+
+def hz_to_jianpu(hz: float | None, tonic_hz: float | None) -> str:
+    """Convert a pitch in Hz to a 簡譜 (jianpu) number relative to a tonic.
+
+    The tonic maps to ``1`` (do). Pitches above the tonic octave gain a
+    combining dot above, pitches below gain a dot below. Returns an empty
+    string when the pitch or tonic is missing or non-positive.
+    """
+    if not hz or not tonic_hz or hz <= 0 or tonic_hz <= 0:
+        return ""
+
+    semitones = round(12.0 * math.log2(hz / tonic_hz))
+    octave, degree = divmod(semitones, 12)
+    digit = _JIANPU_DEGREES[degree]
+    if octave > 0:
+        return digit + _JIANPU_DOT_ABOVE * octave
+    if octave < 0:
+        return digit + _JIANPU_DOT_BELOW * (-octave)
+    return digit
 
 
 def _parabolic_lag(autocorr: np.ndarray, lag: int) -> float:

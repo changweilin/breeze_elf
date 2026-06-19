@@ -16,6 +16,13 @@ TRADITIONAL_CHINESE_PROMPT = (
 
 
 @dataclass(frozen=True)
+class WordTiming:
+    word: str
+    start: float
+    end: float
+
+
+@dataclass(frozen=True)
 class ASRResult:
     text: str
     language: str
@@ -23,11 +30,14 @@ class ASRResult:
     backend: str
     device: str
     no_speech_prob: float | None = None
+    words: tuple[WordTiming, ...] = ()
 
 
 class ASREngine(Protocol):
     backend: str
     device: str
+    model_name: str
+    compute_type: str
 
     def load(self) -> None:
         ...
@@ -39,6 +49,8 @@ class ASREngine(Protocol):
 class MockASR:
     backend = "mock"
     device = "none"
+    model_name = "mock"
+    compute_type = "none"
 
     def __init__(self) -> None:
         self._count = 0
@@ -49,12 +61,14 @@ class MockASR:
     def transcribe(self, samples: np.ndarray, sample_rate: int, language: str) -> ASRResult:
         self._count += 1
         seconds = samples.size / sample_rate if sample_rate else 0
+        text = f"測試字幕 {self._count} ({seconds:.1f}s)"
         return ASRResult(
-            text=f"測試字幕 {self._count} ({seconds:.1f}s)",
+            text=text,
             language=language,
             duration_ms=0,
             backend=self.backend,
             device=self.device,
+            words=_even_word_timings(text, float(seconds)),
         )
 
 
@@ -117,6 +131,7 @@ class FasterWhisperASR:
             vad_filter=False,
             condition_on_previous_text=False,
             initial_prompt=TRADITIONAL_CHINESE_PROMPT,
+            word_timestamps=True,
         )
         segment_list = list(segments)
         text = " ".join(segment.text.strip() for segment in segment_list).strip()
@@ -129,7 +144,23 @@ class FasterWhisperASR:
             backend=self.backend,
             device=f"{self.device}/{self.compute_type}",
             no_speech_prob=_max_segment_float(segment_list, "no_speech_prob"),
+            words=self._collect_words(segment_list),
         )
+
+    def _collect_words(self, segments) -> tuple[WordTiming, ...]:
+        words: list[WordTiming] = []
+        for segment in segments:
+            for word in getattr(segment, "words", None) or []:
+                text = _to_traditional((getattr(word, "word", "") or "").strip(), self._converter)
+                if not text:
+                    continue
+                try:
+                    start = float(word.start)
+                    end = float(word.end)
+                except (TypeError, ValueError):
+                    continue
+                words.append(WordTiming(word=text, start=start, end=max(start, end)))
+        return tuple(words)
 
     def _device_candidates(self) -> list[tuple[str, str]]:
         preference = self.device_preference.strip().lower()
@@ -170,6 +201,21 @@ def _to_traditional(text: str, converter) -> str:
         return converter.convert(text)
     except Exception:
         return text
+
+
+def _even_word_timings(text: str, seconds: float) -> tuple[WordTiming, ...]:
+    chars = [char for char in text if not char.isspace()]
+    if not chars or seconds <= 0:
+        return ()
+    step = seconds / len(chars)
+    return tuple(
+        WordTiming(
+            word=char,
+            start=round(index * step, 3),
+            end=round((index + 1) * step, 3),
+        )
+        for index, char in enumerate(chars)
+    )
 
 
 def _max_segment_float(segments, attr: str) -> float | None:

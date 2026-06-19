@@ -41,6 +41,7 @@
         --warn: #b7791f;
         --warn-contrast: #ffffff;
         --danger: #b42318;
+        --danger-contrast: #ffffff;
         --danger-soft: #e7b2ad;
         --accent: #2454a6;
         --button-hover: #eef3f1;
@@ -62,6 +63,7 @@
         --warn: #e2b45e;
         --warn-contrast: #1d1304;
         --danger: #ff8a80;
+        --danger-contrast: #1d0a08;
         --danger-soft: #6f3732;
         --accent: #91b8ff;
         --button-hover: #24312d;
@@ -164,6 +166,38 @@
         border-color: var(--danger-soft);
       }
 
+      .status-group {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 3px;
+        min-width: 0;
+      }
+
+      .stats {
+        max-width: 12rem;
+        color: var(--muted);
+        font-size: 0.78rem;
+        font-weight: 600;
+        text-align: right;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .visually-hidden {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        margin: -1px;
+        padding: 0;
+        border: 0;
+        clip: rect(0 0 0 0);
+        clip-path: inset(50%);
+        overflow: hidden;
+        white-space: nowrap;
+      }
+
       .controls {
         display: grid;
         grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -205,6 +239,16 @@
       button.danger {
         border-color: var(--danger-soft);
         color: var(--danger);
+      }
+
+      #toggle.recording {
+        border-color: var(--danger);
+        background: var(--danger);
+        color: var(--danger-contrast);
+      }
+
+      #toggle.recording:hover:not(:disabled) {
+        background: var(--danger);
       }
 
       button:disabled {
@@ -336,6 +380,47 @@
         font-weight: 780;
       }
 
+      .transcript-block.has-jianpu {
+        display: block;
+      }
+
+      .transcript-block.has-jianpu .pitch-meta {
+        justify-content: flex-start;
+        margin-bottom: 6px;
+      }
+
+      .jianpu-line {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: flex-end;
+        gap: 4px 8px;
+      }
+
+      .jianpu-char {
+        display: inline-flex;
+        flex-direction: column;
+        align-items: center;
+        min-width: 1em;
+        line-height: 1.2;
+      }
+
+      .jianpu-char .ch {
+        font-size: 1.18rem;
+      }
+
+      .jianpu-char .jp {
+        min-height: 1.2em;
+        color: var(--warn);
+        font-size: 0.92rem;
+        font-weight: 760;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .jianpu-char.rest .jp {
+        color: var(--muted);
+        opacity: 0.55;
+      }
+
       .pitch-spark {
         grid-column: 1 / -1;
         height: 28px;
@@ -458,11 +543,6 @@
           font-size: 1.12rem;
         }
 
-        .bar {
-          align-items: flex-start;
-          flex-direction: column;
-        }
-
         .bar-actions {
           display: grid;
           grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -473,10 +553,8 @@
           min-width: 0;
         }
 
-        #stats {
-          grid-column: 1 / -1;
-          min-width: 0;
-          overflow-wrap: anywhere;
+        .stats {
+          max-width: 8.5rem;
         }
 
         .mini {
@@ -533,22 +611,24 @@
         </div>
         <div class="header-actions">
           <button id="theme" class="theme-toggle" type="button" aria-label="切換深色模式" aria-pressed="false" title="切換深色模式">☾</button>
-          <div id="status" class="status">待命</div>
+          <div class="status-group" aria-live="polite">
+            <div id="status" class="status">待命</div>
+            <span id="stats" class="stats">0 ms</span>
+          </div>
         </div>
       </header>
 
       <section class="controls" aria-label="controls">
-        <button id="start" class="primary" type="button">▶ 開始</button>
-        <button id="stop" class="danger" type="button" disabled>■ 停止</button>
+        <input id="file" class="visually-hidden" type="file" accept="audio/*" />
+        <button id="load" type="button" aria-label="載入音檔分析" title="載入音檔進行辨識">⤵ 載入音檔</button>
+        <button id="toggle" class="primary" type="button" aria-pressed="false">▶ 開始</button>
         <button id="clear" type="button">清除</button>
       </section>
 
       <section class="transcript" aria-label="transcript">
         <div class="bar">
-          <span>即時</span>
           <div class="bar-actions">
-            <span id="stats">0 ms</span>
-            <button id="pitch" class="mini" type="button" aria-pressed="false" aria-label="顯示音高模式" title="顯示每段文字的音高">音高</button>
+            <button id="pitch" class="mini" type="button" aria-pressed="false" aria-label="顯示音高模式" title="顯示每段文字的音高與簡譜">音高</button>
             <button id="copy" class="mini" type="button" disabled>複製</button>
             <button id="download" class="mini" type="button" disabled>下載</button>
             <button id="save" class="mini" type="button" disabled>遠端儲存</button>
@@ -572,6 +652,6 @@
       </footer>
     </main>
 
-    <script src="./app.js?v=11" type="module"></script>
+    <script src="./app.js?v=14" type="module"></script>
   </body>
 </html>

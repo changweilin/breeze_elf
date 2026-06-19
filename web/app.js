@@ -1,6 +1,7 @@
 const els = {
-  start: document.querySelector("#start"),
-  stop: document.querySelector("#stop"),
+  toggle: document.querySelector("#toggle"),
+  load: document.querySelector("#load"),
+  fileInput: document.querySelector("#file"),
   clear: document.querySelector("#clear"),
   pitch: document.querySelector("#pitch"),
   copy: document.querySelector("#copy"),
@@ -60,6 +61,16 @@ const DEMO_EVENTS = [
     startSeconds: 0.35,
     endSeconds: 1.1,
     pitch: demoPitch(188, [176, 184, 194, 202, 190, 181]),
+    characters: demoCharacters("今天先確認 GitHub Actions 的靜態展示。", 0.35, 1.1, [
+      "1",
+      "2",
+      "3",
+      "5",
+      "6̇",
+      "5",
+      "3",
+      "2",
+    ]),
     rms: 0.02,
     stats: { asrMs: 18, segmentKind: "utterance" },
   },
@@ -75,6 +86,12 @@ const DEMO_EVENTS = [
     startSeconds: 1.85,
     endSeconds: 2.75,
     pitch: demoPitch(162, [154, 158, 166, 172, 160, 150]),
+    characters: demoCharacters(
+      "麥克風、WebSocket 與遠端儲存都維持凍結，只呈現操作流程。",
+      1.85,
+      2.75,
+      ["5̣", "6̣", "1", "2", "3", "2", "1", "6̣"],
+    ),
     rms: 0.01,
     stats: { asrMs: 22, segmentKind: "utterance" },
   },
@@ -89,6 +106,9 @@ const state = {
   silence: null,
   startedAt: 0,
   clockTimer: 0,
+  stopping: false,
+  running: false,
+  analyzing: false,
   transcript: "",
   transcriptBlocks: [],
   pitchMode: SEARCH_PARAMS.has("pitch")
@@ -125,6 +145,25 @@ function demoPitch(medianHz, values) {
       confidence: 0.82,
     })),
   };
+}
+
+function demoCharacters(text, startSeconds, endSeconds, jianpu) {
+  const chars = [...text].filter((char) => char.trim());
+  if (chars.length === 0) {
+    return [];
+  }
+  const step = (endSeconds - startSeconds) / chars.length;
+  return chars.map((char, index) => {
+    const charStart = startSeconds + index * step;
+    return {
+      char,
+      startSeconds: Number(charStart.toFixed(3)),
+      endSeconds: Number((charStart + step).toFixed(3)),
+      durationSeconds: Number(step.toFixed(3)),
+      hz: null,
+      jianpu: jianpu[index % jianpu.length],
+    };
+  });
 }
 
 function readStoredSettings() {
@@ -211,8 +250,21 @@ function setStatus(text, mode = "") {
 }
 
 function setRunning(isRunning) {
-  els.start.disabled = isRunning;
-  els.stop.disabled = !isRunning;
+  state.running = isRunning;
+  els.toggle.disabled = false;
+  els.toggle.classList.toggle("primary", !isRunning);
+  els.toggle.classList.toggle("recording", isRunning);
+  els.toggle.textContent = isRunning ? "■ 停止" : "▶ 開始";
+  els.toggle.setAttribute("aria-pressed", String(isRunning));
+  els.load.disabled = DEMO_MODE || isRunning;
+}
+
+function handleToggle() {
+  if (state.running) {
+    stop();
+  } else {
+    void start();
+  }
 }
 
 function renderTranscript(text, { persist = true } = {}) {
@@ -247,6 +299,7 @@ function appendTranscriptBlock(data, { persist = true } = {}) {
     segmentKind: data.segmentKind || "",
     windowIndex: Number.isInteger(data.windowIndex) ? data.windowIndex : null,
     pitch: normalizePitch(data.pitch),
+    characters: normalizeCharacters(data.characters),
   });
   renderTranscriptView();
   setTranscriptActions(Boolean(state.transcript.trim()));
@@ -276,23 +329,53 @@ function renderTranscriptBlock(block) {
   const row = document.createElement("div");
   row.className = "transcript-block";
 
+  const meta = document.createElement("span");
+  meta.className = "pitch-meta";
+  const range = document.createElement("span");
+  range.textContent = formatTimeRange(block.startSeconds, block.endSeconds);
+  meta.append(range);
+
+  if (Array.isArray(block.characters) && block.characters.length > 0) {
+    row.classList.add("has-jianpu");
+    row.append(meta, renderJianpuLine(block.characters));
+    return row;
+  }
+
   const text = document.createElement("span");
   text.className = "transcript-text";
   text.textContent = block.text.trimStart();
-
-  const meta = document.createElement("span");
-  meta.className = "pitch-meta";
-
-  const range = document.createElement("span");
-  range.textContent = formatTimeRange(block.startSeconds, block.endSeconds);
 
   const pitch = document.createElement("span");
   pitch.className = "pitch-value";
   pitch.textContent = formatPitch(block.pitch);
 
-  meta.append(range, pitch);
+  meta.append(pitch);
   row.append(text, meta, renderPitchSpark(block.pitch));
   return row;
+}
+
+function renderJianpuLine(characters) {
+  const line = document.createElement("div");
+  line.className = "jianpu-line";
+  characters.forEach((character) => {
+    const cell = document.createElement("span");
+    cell.className = character.jianpu ? "jianpu-char" : "jianpu-char rest";
+
+    const jp = document.createElement("span");
+    jp.className = "jp";
+    jp.textContent = character.jianpu || "·";
+
+    const ch = document.createElement("span");
+    ch.className = "ch";
+    ch.textContent = character.char;
+
+    cell.append(jp, ch);
+    if (Number.isFinite(character.hz)) {
+      cell.title = `${character.char} · ${Math.round(character.hz)} Hz`;
+    }
+    line.append(cell);
+  });
+  return line;
 }
 
 function renderPitchSpark(pitch) {
@@ -349,6 +432,23 @@ function normalizePitch(pitch) {
           .filter((point) => point.hz)
       : [],
   };
+}
+
+function normalizeCharacters(characters) {
+  if (!Array.isArray(characters)) {
+    return [];
+  }
+
+  return characters
+    .map((character) => ({
+      char: typeof character?.char === "string" ? character.char : "",
+      startSeconds: finiteNumber(character?.startSeconds),
+      endSeconds: finiteNumber(character?.endSeconds),
+      durationSeconds: finiteNumber(character?.durationSeconds),
+      hz: finiteNumber(character?.hz),
+      jianpu: typeof character?.jianpu === "string" ? character.jianpu : "",
+    }))
+    .filter((character) => character.char);
 }
 
 function formatPitch(pitch) {
@@ -511,6 +611,7 @@ function normalizeTranscriptBlockForRestore(block) {
     segmentKind: block.segmentKind || "",
     windowIndex: Number.isInteger(block.windowIndex) ? block.windowIndex : null,
     pitch: normalizePitch(block.pitch),
+    characters: normalizeCharacters(block.characters),
   };
 }
 
@@ -912,6 +1013,31 @@ function applyRuntimeMode() {
   setTranscriptActions(false);
 }
 
+function connectSocket() {
+  const ws = new WebSocket(websocketUrl());
+  ws.binaryType = "arraybuffer";
+  ws.addEventListener("message", handleServerMessage);
+  ws.addEventListener("close", handleSocketClose);
+  state.ws = ws;
+  return ws;
+}
+
+function handleSocketClose() {
+  cleanupAudio();
+  state.analyzing = false;
+  setRunning(false);
+  if (els.status.classList.contains("error")) {
+    // 保留啟動失敗的錯誤訊息,別被「待命」蓋掉
+  } else if (state.stopping) {
+    setStatus("待命");
+  } else {
+    setStatus("連線中斷", "error");
+  }
+  state.stopping = false;
+  stopClock();
+  state.ws = null;
+}
+
 async function start() {
   if (DEMO_MODE) {
     startDemo();
@@ -930,22 +1056,13 @@ async function start() {
 
   setRunning(true);
   setStatus("連線中");
+  state.stopping = false;
   state.droppedClientChunks = 0;
   els.stats.textContent = "0 ms";
   renderLevel(0);
 
   try {
-    const ws = new WebSocket(websocketUrl());
-    ws.binaryType = "arraybuffer";
-    ws.addEventListener("message", handleServerMessage);
-    ws.addEventListener("close", () => {
-      cleanupAudio();
-      setRunning(false);
-      setStatus("待命");
-      stopClock();
-      state.ws = null;
-    });
-    state.ws = ws;
+    const ws = connectSocket();
     await waitForOpen(ws);
 
     state.stream = await navigator.mediaDevices.getUserMedia({
@@ -993,9 +1110,186 @@ async function start() {
     setStatus("收音中", "live");
     startClock();
   } catch (error) {
-    setStatus(error.message || "啟動失敗", "error");
-    stop();
+    console.error("startStreaming failed", error);
+    state.stopping = true;
+    cleanupAudio();
+    stopClock();
+    setRunning(false);
+    state.ws?.close();
+    const name = error?.name ? `${error.name}: ` : "";
+    setStatus(`${name}${error?.message || "啟動失敗"}`, "error");
   }
+}
+
+async function analyzeFile(file) {
+  if (DEMO_MODE) {
+    flashStats("示意模式無法分析音檔");
+    return;
+  }
+  if (state.running || !file) {
+    return;
+  }
+
+  setStatus("解碼音檔");
+  let decoded;
+  try {
+    decoded = await decodeAudioFile(file);
+  } catch (error) {
+    console.error("decodeAudioFile failed", error);
+    setStatus("音檔解碼失敗", "error");
+    flashStats(error?.message || "音檔解碼失敗");
+    return;
+  }
+
+  if (!decoded.pcm.length) {
+    setStatus("音檔無聲音", "error");
+    return;
+  }
+
+  renderTranscript("", { persist: false });
+  els.partial.textContent = "";
+  await clearRecordedAudio();
+  ingestLoadedAudio(decoded);
+
+  state.analyzing = true;
+  state.stopping = false;
+  state.droppedClientChunks = 0;
+  setRunning(true);
+  setStatus("分析音檔", "live");
+  els.stats.textContent = "0 ms";
+  renderLevel(0);
+
+  try {
+    const ws = connectSocket();
+    await waitForOpen(ws);
+    ws.send(
+      JSON.stringify({
+        type: "start",
+        sampleRate: AUDIO_SAMPLE_RATE,
+        language: "zh",
+        chunkMs: AUDIO_CHUNK_MS,
+        mode: "file",
+      }),
+    );
+    startClock();
+    await streamPcmToSocket(ws, decoded.pcm);
+    if (!state.stopping && ws.readyState === WebSocket.OPEN) {
+      state.stopping = true;
+      setStatus("辨識中", "live");
+      ws.send(JSON.stringify({ type: "stop", reason: "file" }));
+    }
+  } catch (error) {
+    console.error("analyzeFile failed", error);
+    state.stopping = true;
+    stopClock();
+    setRunning(false);
+    state.ws?.close();
+    setStatus(error?.message || "分析失敗", "error");
+  }
+}
+
+async function streamPcmToSocket(ws, pcm) {
+  const chunkSamples = Math.max(1, Math.round((AUDIO_SAMPLE_RATE * AUDIO_CHUNK_MS) / 1000));
+  for (let offset = 0; offset < pcm.length; offset += chunkSamples) {
+    if (state.stopping || ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    const slice = pcm.subarray(offset, offset + chunkSamples);
+    ws.send(slice.slice().buffer);
+    renderLevel(chunkRms(slice));
+    while (ws.bufferedAmount > MAX_WS_BUFFERED_BYTES && ws.readyState === WebSocket.OPEN) {
+      await delay(15);
+    }
+    await delay(0);
+  }
+}
+
+function chunkRms(int16) {
+  if (!int16.length) {
+    return 0;
+  }
+  let sum = 0;
+  for (let index = 0; index < int16.length; index += 1) {
+    const value = int16[index] / 0x8000;
+    sum += value * value;
+  }
+  return Math.sqrt(sum / int16.length);
+}
+
+function delay(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+async function decodeAudioFile(file) {
+  const arrayBuffer = await file.arrayBuffer();
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  const context = new AudioContextClass();
+  let audioBuffer;
+  try {
+    audioBuffer = await context.decodeAudioData(arrayBuffer.slice(0));
+  } finally {
+    void context.close();
+  }
+
+  const mono = downmixToMono(audioBuffer);
+  const resampled = await resampleMono(mono, audioBuffer.sampleRate, AUDIO_SAMPLE_RATE);
+  return { pcm: floatToInt16(resampled), sampleRate: AUDIO_SAMPLE_RATE };
+}
+
+function downmixToMono(audioBuffer) {
+  const channels = audioBuffer.numberOfChannels;
+  if (channels === 1) {
+    return audioBuffer.getChannelData(0).slice();
+  }
+
+  const length = audioBuffer.length;
+  const mono = new Float32Array(length);
+  for (let channel = 0; channel < channels; channel += 1) {
+    const data = audioBuffer.getChannelData(channel);
+    for (let index = 0; index < length; index += 1) {
+      mono[index] += data[index];
+    }
+  }
+  for (let index = 0; index < length; index += 1) {
+    mono[index] /= channels;
+  }
+  return mono;
+}
+
+async function resampleMono(channelData, inputRate, targetRate) {
+  if (inputRate === targetRate || channelData.length === 0) {
+    return channelData;
+  }
+
+  const length = Math.max(1, Math.ceil((channelData.length * targetRate) / inputRate));
+  const offline = new OfflineAudioContext(1, length, targetRate);
+  const buffer = offline.createBuffer(1, channelData.length, inputRate);
+  buffer.copyToChannel(channelData, 0);
+  const source = offline.createBufferSource();
+  source.buffer = buffer;
+  source.connect(offline.destination);
+  source.start();
+  const rendered = await offline.startRendering();
+  return rendered.getChannelData(0);
+}
+
+function floatToInt16(floatData) {
+  const out = new Int16Array(floatData.length);
+  for (let index = 0; index < floatData.length; index += 1) {
+    const clamped = Math.max(-1, Math.min(1, floatData[index]));
+    out[index] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
+  }
+  return out;
+}
+
+function ingestLoadedAudio(decoded) {
+  const buffer = decoded.pcm.buffer.slice(0);
+  state.audioChunks = [buffer];
+  state.audioBytes = buffer.byteLength;
+  state.audioSampleRate = decoded.sampleRate;
+  state.audioDirty = true;
+  refreshAudioPreview();
+  scheduleAudioPersist();
 }
 
 function stop() {
@@ -1004,12 +1298,12 @@ function stop() {
     return;
   }
 
+  state.stopping = true;
   cleanupAudio();
   stopClock();
 
   if (state.ws?.readyState === WebSocket.OPEN) {
-    els.start.disabled = true;
-    els.stop.disabled = true;
+    els.toggle.disabled = true;
     setStatus("收尾中");
     state.ws.send(JSON.stringify({ type: "stop" }));
     return;
@@ -1043,8 +1337,12 @@ function handleServerMessage(event) {
   }
 
   if (data.type === "ready") {
-    els.backend.textContent = `${data.backend} · ${data.device} · ${data.segmenter || "audio"}`;
-    setStatus("收音中", "live");
+    const deviceLabel = data.computeType ? `${data.device}/${data.computeType}` : data.device;
+    const modelLabel = data.model ? ` · ${data.model}` : "";
+    els.backend.textContent = `${data.backend}${modelLabel} · ${deviceLabel} · ${data.segmenter || "audio"}`;
+    if (!state.analyzing) {
+      setStatus("收音中", "live");
+    }
     return;
   }
 
@@ -1076,6 +1374,7 @@ function handleServerMessage(event) {
 
 applyTheme(preferredTheme());
 applyRuntimeMode();
+setRunning(false);
 setPitchMode(state.pitchMode, { persist: false });
 restoreTranscriptSession();
 void restoreAudioSession();
@@ -1083,8 +1382,19 @@ void restoreAudioSession();
 els.theme.addEventListener("click", toggleTheme);
 bindPitchToggle();
 SYSTEM_DARK_QUERY.addEventListener("change", syncSystemTheme);
-els.start.addEventListener("click", start);
-els.stop.addEventListener("click", stop);
+els.toggle.addEventListener("click", handleToggle);
+els.load.addEventListener("click", () => {
+  if (!els.load.disabled) {
+    els.fileInput.click();
+  }
+});
+els.fileInput.addEventListener("change", (event) => {
+  const file = event.target.files?.[0];
+  event.target.value = "";
+  if (file) {
+    void analyzeFile(file);
+  }
+});
 els.clear.addEventListener("click", () => {
   renderTranscript("", { persist: false });
   els.partial.textContent = "";
@@ -1135,20 +1445,32 @@ els.save.addEventListener("click", async () => {
   els.stats.textContent = "遠端儲存中";
 
   try {
+    const payload = {
+      text,
+      title: transcriptTitle(text),
+      sampleRate: state.audioSampleRate,
+      blocks: serializeBlocksForSave(),
+    };
+    const audioBase64 = await encodeRecordedAudioBase64();
+    if (audioBase64) {
+      payload.audioBase64 = audioBase64;
+    }
+
     const response = await fetch("/api/transcripts", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        text,
-        title: transcriptTitle(text),
-      }),
+      body: JSON.stringify(payload),
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok || !data.ok) {
       throw new Error(data.detail || "遠端儲存失敗");
     }
+    const extras = [data.audioFilename ? "音檔" : "", data.jsonFilename ? "簡譜" : ""]
+      .filter(Boolean)
+      .join("+");
+    const suffix = extras ? `(含${extras})` : "";
     flashStats(
-      data.filename ? `已遠端儲存 ${data.filename}` : "已遠端儲存",
+      data.filename ? `已遠端儲存 ${data.filename}${suffix}` : "已遠端儲存",
       previousStats,
     );
   } catch (error) {
@@ -1158,6 +1480,31 @@ els.save.addEventListener("click", async () => {
     setTranscriptActions(Boolean(state.transcript.trim()));
   }
 });
+
+function serializeBlocksForSave() {
+  return state.transcriptBlocks.map((block) => ({
+    text: block.text,
+    startSeconds: block.startSeconds,
+    endSeconds: block.endSeconds,
+    segmentKind: block.segmentKind || "",
+    pitch: block.pitch || null,
+    characters: Array.isArray(block.characters) ? block.characters : [],
+  }));
+}
+
+async function encodeRecordedAudioBase64() {
+  if (!state.audioBytes) {
+    return "";
+  }
+  const buffer = await recordedAudioBlob().arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
 
 window.addEventListener("pagehide", () => {
   persistSessionNow();

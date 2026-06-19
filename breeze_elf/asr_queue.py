@@ -42,6 +42,14 @@ class ASRQueue:
         return self.asr.device
 
     @property
+    def model(self) -> str:
+        return getattr(self.asr, "model_name", "unknown")
+
+    @property
+    def compute_type(self) -> str:
+        return getattr(self.asr, "compute_type", "unknown")
+
+    @property
     def queue_depth(self) -> int:
         return self._queue.qsize()
 

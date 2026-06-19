@@ -15,6 +15,19 @@ class ProtocolTests(unittest.TestCase):
             '{"type":"start","sampleRate":16000,"language":"zh","chunkMs":1000}'
         )
         self.assertEqual(message, StartMessage(sample_rate=16000, language="zh", chunk_ms=1000))
+        self.assertEqual(message.mode, "live")
+
+    def test_parse_start_file_mode(self):
+        message = parse_client_text(
+            '{"type":"start","sampleRate":16000,"language":"zh","chunkMs":250,"mode":"file"}'
+        )
+        self.assertEqual(message.mode, "file")
+
+    def test_parse_start_unknown_mode_falls_back_to_live(self):
+        message = parse_client_text(
+            '{"type":"start","sampleRate":16000,"language":"zh","chunkMs":250,"mode":"bogus"}'
+        )
+        self.assertEqual(message.mode, "live")
 
     def test_rejects_wrong_sample_rate(self):
         with self.assertRaises(ProtocolError):

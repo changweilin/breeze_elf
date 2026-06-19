@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import tempfile
 import unittest
@@ -9,11 +10,18 @@ from unittest.mock import patch
 import numpy as np
 
 from breeze_elf import main
-from breeze_elf.asr import ASRResult
+from breeze_elf.asr import ASRResult, MockASR
 from breeze_elf.asr_queue import QueuedASRResult
-from breeze_elf.audio import AudioUtteranceBuffer, AudioWindow, AudioWindowBuffer, calculate_rms
+from breeze_elf.audio import (
+    AudioUtteranceBuffer,
+    AudioWindow,
+    AudioWindowBuffer,
+    calculate_rms,
+    summarize_pitch,
+)
 from breeze_elf.main import (
     StreamState,
+    _character_payloads,
     _handle_audio_payload,
     _handle_text_message,
     _novel_text,
@@ -81,6 +89,43 @@ class MainTests(unittest.IsolatedAsyncioTestCase):
                 (Path(tmp) / data["filename"]).read_text(encoding="utf-8"),
                 "遠端儲存測試\n",
             )
+
+    async def test_remote_transcript_endpoint_bundles_jianpu_and_audio(self):
+        audio = b"RIFFfake-wav-payload"
+        payload = main.TranscriptSaveRequest(
+            text="天氣很好",
+            title="note",
+            sampleRate=16000,
+            blocks=[
+                {
+                    "text": "天氣很好",
+                    "startSeconds": 0.0,
+                    "endSeconds": 0.6,
+                    "characters": [
+                        {"char": "天", "startSeconds": 0.0, "hz": 200.0, "jianpu": "3"},
+                        {"char": "氣", "startSeconds": 0.2, "hz": 260.0, "jianpu": "5"},
+                    ],
+                }
+            ],
+            audioBase64=base64.b64encode(audio).decode("ascii"),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(main, "settings", replace(main.settings, remote_storage_dir=tmp)):
+                response = await main.create_remote_transcript(payload)
+
+            data = json.loads(response.body)
+            directory = Path(tmp)
+
+            self.assertTrue(data["ok"])
+            self.assertTrue(data["filename"].endswith(".txt"))
+            self.assertTrue(data["jsonFilename"].endswith(".json"))
+            self.assertTrue(data["audioFilename"].endswith(".wav"))
+            self.assertEqual((directory / data["audioFilename"]).read_bytes(), audio)
+
+            document = json.loads((directory / data["jsonFilename"]).read_text(encoding="utf-8"))
+            self.assertEqual(document["blocks"][0]["characters"][1]["jianpu"], "5")
+            self.assertEqual(document["sampleRate"], 16000)
 
     async def test_audio_payload_reports_backpressure_when_queue_drops_window(self):
         state = StreamState(
@@ -189,6 +234,49 @@ class MainTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertGreater(asr_queue.received_rms, window.rms)
         self.assertTrue(any(event.get("rms") == round(window.rms, 5) for event in events))
+
+
+class CharacterPayloadTests(unittest.TestCase):
+    def test_character_payloads_attach_jianpu_and_absolute_timing(self):
+        sample_rate = 16_000
+        seconds = 0.6
+        time_axis = np.arange(round(sample_rate * seconds), dtype=np.float32) / sample_rate
+        samples = (0.4 * np.sin(2 * np.pi * 220.0 * time_axis)).astype(np.float32)
+        window = AudioWindow(
+            index=0,
+            start_seconds=2.0,
+            end_seconds=2.0 + seconds,
+            samples=samples,
+            rms=calculate_rms(samples),
+            is_speech=True,
+            kind="utterance",
+        )
+        words = MockASR().transcribe(samples, sample_rate, "zh").words
+        summary = summarize_pitch(samples, sample_rate)
+
+        characters = _character_payloads(window, words, sample_rate, summary)
+
+        self.assertEqual(len(characters), len(words))
+        self.assertTrue(all(set(c) >= {"char", "startSeconds", "jianpu", "hz"} for c in characters))
+        # absolute timing is offset by the window start
+        self.assertGreaterEqual(characters[0]["startSeconds"], 2.0)
+        self.assertLessEqual(characters[-1]["endSeconds"], 2.0 + seconds + 1e-6)
+        # a steady tone resolves to the tonic (1) for every voiced character
+        voiced = [c["jianpu"] for c in characters if c["hz"]]
+        self.assertTrue(voiced)
+        self.assertTrue(all(jianpu == "1" for jianpu in voiced))
+
+    def test_character_payloads_empty_without_words(self):
+        window = AudioWindow(
+            index=0,
+            start_seconds=0.0,
+            end_seconds=1.0,
+            samples=np.zeros(16_000, dtype=np.float32),
+            rms=0.0,
+            is_speech=True,
+        )
+        summary = summarize_pitch(window.samples, 16_000)
+        self.assertEqual(_character_payloads(window, (), 16_000, summary), [])
 
 
 class NovelTextTests(unittest.TestCase):

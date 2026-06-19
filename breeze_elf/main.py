@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import logging
+import math
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -9,19 +12,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.websockets import WebSocketState
 
-from .asr import ASRResult, build_asr_from_env
+from .asr import ASRResult, WordTiming, build_asr_from_env
 from .asr_queue import ASRQueue
 from .audio import (
     AudioUtteranceBuffer,
     AudioWindow,
     AudioWindowBuffer,
     PitchSummary,
+    hz_to_jianpu,
     prepare_asr_audio,
     summarize_pitch,
 )
@@ -61,9 +66,30 @@ COMMON_SILENCE_HALLUCINATION_FRAGMENTS = (
 HALLUCINATION_TEXT_TRANSLATION = str.maketrans({"讚": "贊", "赞": "贊"})
 
 
+class TranscriptCharacter(BaseModel):
+    char: str
+    startSeconds: float | None = None
+    endSeconds: float | None = None
+    durationSeconds: float | None = None
+    hz: float | None = None
+    jianpu: str | None = None
+
+
+class TranscriptBlock(BaseModel):
+    text: str
+    startSeconds: float | None = None
+    endSeconds: float | None = None
+    segmentKind: str | None = None
+    pitch: dict[str, Any] | None = None
+    characters: list[TranscriptCharacter] = Field(default_factory=list)
+
+
 class TranscriptSaveRequest(BaseModel):
     text: str = Field(min_length=1)
     title: str | None = None
+    blocks: list[TranscriptBlock] | None = None
+    sampleRate: int | None = None
+    audioBase64: str | None = None
 
 
 settings = get_settings()
@@ -123,6 +149,8 @@ async def health() -> JSONResponse:
             "vadEndSilenceMs": settings.vad_end_silence_ms,
             "asrBackend": asr_engine.backend,
             "asrDevice": asr_engine.device,
+            "asrModel": getattr(asr_engine, "model_name", "unknown"),
+            "asrComputeType": getattr(asr_engine, "compute_type", "unknown"),
             "asrConcurrency": settings.asr_concurrency,
             "asrQueueDepth": app.state.asr_queue.queue_depth,
             "asrError": app.state.asr_error,
@@ -140,11 +168,16 @@ async def root_static_asset(asset_name: str) -> FileResponse:
 
 @app.post("/api/transcripts")
 async def create_remote_transcript(payload: TranscriptSaveRequest) -> JSONResponse:
+    structured = _structured_payload(payload)
+    audio = _decode_audio(payload.audioBase64)
+
     try:
         stored = save_transcript(
             payload.text,
             _remote_storage_dir(),
             title=payload.title,
+            structured=structured,
+            audio=audio,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -157,10 +190,32 @@ async def create_remote_transcript(payload: TranscriptSaveRequest) -> JSONRespon
             "ok": True,
             "id": stored.id,
             "filename": stored.filename,
+            "jsonFilename": stored.json_filename,
+            "audioFilename": stored.audio_filename,
             "createdAt": stored.created_at,
             "sizeBytes": stored.size_bytes,
         }
     )
+
+
+def _structured_payload(payload: TranscriptSaveRequest) -> dict[str, Any] | None:
+    if payload.blocks is None and not payload.audioBase64:
+        return None
+    return {
+        "text": payload.text,
+        "title": payload.title,
+        "sampleRate": payload.sampleRate,
+        "blocks": [block.model_dump() for block in (payload.blocks or [])],
+    }
+
+
+def _decode_audio(audio_base64: str | None) -> bytes | None:
+    if not audio_base64:
+        return None
+    try:
+        return base64.b64decode(audio_base64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="invalid audio encoding") from exc
 
 
 def _remote_storage_dir() -> Path:
@@ -254,7 +309,11 @@ async def _handle_text_message(
             return False
 
         state.segmenter = _build_segmenter(message.sample_rate)
-        state.queue = asyncio.Queue(maxsize=settings.max_queue_windows)
+        # File analysis streams a whole recording at once; an unbounded queue
+        # keeps every window so nothing is dropped to backpressure. Live mic
+        # streaming stays bounded so latency cannot snowball.
+        queue_size = 0 if message.mode == "file" else settings.max_queue_windows
+        state.queue = asyncio.Queue(maxsize=queue_size)
         state.stop_event.clear()
         state.processor_task = asyncio.create_task(
             _process_windows(state, send_json, asr_queue, message.language)
@@ -270,6 +329,8 @@ async def _handle_text_message(
                 segmenter=settings.segmenter,
                 backend=asr_queue.backend,
                 device=asr_queue.device,
+                model=asr_queue.model,
+                computeType=asr_queue.compute_type,
             )
         )
         return False
@@ -382,7 +443,10 @@ async def _process_windows(
 
             filtered_as_silence = bool(result.text and _should_drop_asr_result(window, result))
             if result.text and not filtered_as_silence:
-                pitch = _pitch_payload(window)
+                sample_rate = _window_sample_rate(window)
+                summary = summarize_pitch(window.samples, sample_rate)
+                pitch = _pitch_summary_payload(summary)
+                characters = _character_payloads(window, result.words, sample_rate, summary)
                 await send_json(
                     server_event(
                         "partial",
@@ -409,6 +473,7 @@ async def _process_windows(
                             startSeconds=round(window.start_seconds, 2),
                             endSeconds=round(window.end_seconds, 2),
                             pitch=pitch,
+                            characters=characters,
                         )
                     )
 
@@ -484,9 +549,68 @@ def _should_drop_asr_result(window: AudioWindow, result: ASRResult) -> bool:
     )
 
 
-def _pitch_payload(window: AudioWindow) -> dict[str, Any]:
-    summary = summarize_pitch(window.samples, _window_sample_rate(window))
-    return _pitch_summary_payload(summary)
+def _character_payloads(
+    window: AudioWindow,
+    words: tuple[WordTiming, ...],
+    sample_rate: int,
+    summary: PitchSummary,
+) -> list[dict[str, Any]]:
+    """Per-character timing, pitch, and 簡譜 (jianpu) for a recognised window."""
+    segments = _split_words_to_chars(words)
+    if not segments:
+        return []
+
+    measured = [
+        (char, start, end, _char_pitch_hz(window.samples, sample_rate, start, end))
+        for char, start, end in segments
+    ]
+    voiced = [hz for *_, hz in measured if hz]
+    tonic = float(np.median(voiced)) if voiced else (summary.median_hz or 0.0)
+
+    payloads: list[dict[str, Any]] = []
+    for char, start, end, hz in measured:
+        payloads.append(
+            {
+                "char": char,
+                "startSeconds": round(window.start_seconds + start, 3),
+                "endSeconds": round(window.start_seconds + end, 3),
+                "durationSeconds": round(max(0.0, end - start), 3),
+                "hz": _round_pitch(hz),
+                "jianpu": hz_to_jianpu(hz, tonic),
+            }
+        )
+    return payloads
+
+
+def _split_words_to_chars(
+    words: tuple[WordTiming, ...],
+) -> list[tuple[str, float, float]]:
+    segments: list[tuple[str, float, float]] = []
+    for word in words:
+        chars = [char for char in word.word if not char.isspace()]
+        if not chars:
+            continue
+        start = max(0.0, word.start)
+        end = max(start, word.end)
+        step = (end - start) / len(chars)
+        for index, char in enumerate(chars):
+            char_start = start + index * step
+            char_end = end if index == len(chars) - 1 else start + (index + 1) * step
+            segments.append((char, char_start, char_end))
+    return segments
+
+
+def _char_pitch_hz(
+    samples: np.ndarray,
+    sample_rate: int,
+    start_seconds: float,
+    end_seconds: float,
+) -> float | None:
+    begin = max(0, int(start_seconds * sample_rate))
+    finish = min(samples.size, int(math.ceil(end_seconds * sample_rate)))
+    if finish - begin < 2:
+        return None
+    return summarize_pitch(samples[begin:finish], sample_rate).median_hz
 
 
 def _window_sample_rate(window: AudioWindow) -> int:

@@ -6,6 +6,7 @@ from breeze_elf.audio import (
     AudioUtteranceBuffer,
     AudioWindowBuffer,
     calculate_rms,
+    hz_to_jianpu,
     pcm16le_to_float32,
     prepare_asr_audio,
     summarize_pitch,
@@ -74,6 +75,25 @@ class AudioTests(unittest.TestCase):
         self.assertAlmostEqual(summary.median_hz, frequency, delta=4.0)
         self.assertGreater(summary.voiced_ratio, 0.9)
         self.assertGreater(len(summary.points), 0)
+
+    def test_hz_to_jianpu_maps_scale_degrees_relative_to_tonic(self):
+        tonic = 220.0
+        self.assertEqual(hz_to_jianpu(tonic, tonic), "1")
+        self.assertEqual(hz_to_jianpu(tonic * 2 ** (2 / 12), tonic), "2")
+        self.assertEqual(hz_to_jianpu(tonic * 2 ** (4 / 12), tonic), "3")
+        self.assertEqual(hz_to_jianpu(tonic * 2 ** (7 / 12), tonic), "5")
+        self.assertEqual(hz_to_jianpu(tonic * 2 ** (1 / 12), tonic), "#1")
+
+    def test_hz_to_jianpu_marks_octaves_with_combining_dots(self):
+        tonic = 220.0
+        self.assertEqual(hz_to_jianpu(tonic * 2, tonic), "1̇")
+        self.assertEqual(hz_to_jianpu(tonic / 2, tonic), "1̣")
+        self.assertEqual(hz_to_jianpu(tonic * 4, tonic), "1̇̇")
+
+    def test_hz_to_jianpu_returns_empty_without_pitch_or_tonic(self):
+        self.assertEqual(hz_to_jianpu(None, 220.0), "")
+        self.assertEqual(hz_to_jianpu(220.0, None), "")
+        self.assertEqual(hz_to_jianpu(220.0, 0.0), "")
 
     def test_summarize_pitch_returns_empty_for_silence(self):
         summary = summarize_pitch(np.zeros(16_000, dtype=np.float32), 16_000)

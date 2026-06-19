@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -43,6 +44,58 @@ class StorageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(ValueError):
                 save_transcript(" \n\t ", tmp)
+
+    def test_save_transcript_bundles_structured_metadata_and_audio(self):
+        created_at = datetime(2026, 5, 26, 15, 30, 45, tzinfo=timezone.utc)
+        structured = {
+            "title": "note",
+            "sampleRate": 16000,
+            "blocks": [
+                {
+                    "text": "天氣",
+                    "characters": [
+                        {"char": "天", "startSeconds": 0.0, "jianpu": "3"},
+                        {"char": "氣", "startSeconds": 0.2, "jianpu": "5"},
+                    ],
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            stored = save_transcript(
+                "天氣很好",
+                tmp,
+                title="note",
+                now=created_at,
+                structured=structured,
+                audio=b"RIFFfake-wav-bytes",
+            )
+
+            directory = Path(tmp)
+            self.assertTrue(stored.filename.endswith(".txt"))
+            self.assertEqual(stored.json_filename, f"{stored.id}.json")
+            self.assertEqual(stored.audio_filename, f"{stored.id}.wav")
+
+            self.assertEqual(
+                (directory / stored.filename).read_text(encoding="utf-8"),
+                "天氣很好\n",
+            )
+            self.assertEqual(
+                (directory / stored.audio_filename).read_bytes(),
+                b"RIFFfake-wav-bytes",
+            )
+
+            document = json.loads((directory / stored.json_filename).read_text(encoding="utf-8"))
+            self.assertEqual(document["createdAt"], "2026-05-26T15:30:45+00:00")
+            self.assertEqual(document["blocks"][0]["characters"][0]["jianpu"], "3")
+            self.assertEqual(document["sampleRate"], 16000)
+
+    def test_save_transcript_without_extras_writes_only_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stored = save_transcript("只有文字", tmp)
+            self.assertIsNone(stored.json_filename)
+            self.assertIsNone(stored.audio_filename)
+            self.assertEqual(list(Path(tmp).glob("*")), [Path(tmp) / stored.filename])
 
 
 if __name__ == "__main__":

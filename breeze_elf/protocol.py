@@ -14,6 +14,7 @@ class StartMessage:
     sample_rate: int
     language: str
     chunk_ms: int
+    mode: str = "live"
 
 
 @dataclass(frozen=True)
@@ -49,7 +50,15 @@ def parse_client_text(raw: str) -> ClientMessage:
             raise ProtocolError("chunkMs must be positive")
         if not language:
             raise ProtocolError("language must not be empty")
-        return StartMessage(sample_rate=sample_rate, language=language, chunk_ms=chunk_ms)
+        mode = str(payload.get("mode", "live")).strip().lower()
+        if mode not in {"live", "file"}:
+            mode = "live"
+        return StartMessage(
+            sample_rate=sample_rate,
+            language=language,
+            chunk_ms=chunk_ms,
+            mode=mode,
+        )
 
     if message_type == "stop":
         return StopMessage(reason=str(payload.get("reason", "client")))
