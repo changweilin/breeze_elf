@@ -13,3 +13,6 @@ dist/
 build/
 *.egg-info/
 remote_transcripts/
+voices/
+checkpoints_v2/
+.smoke_voices*/

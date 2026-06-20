@@ -230,10 +230,12 @@ function applyTheme(theme, { persist = false } = {}) {
   els.themeColor.content = THEME_COLORS[nextTheme];
 
   const switchLabel = nextTheme === "dark" ? "切換淺色模式" : "切換深色模式";
-  els.theme.textContent = nextTheme === "dark" ? "☀" : "☾";
-  els.theme.setAttribute("aria-label", switchLabel);
-  els.theme.setAttribute("title", switchLabel);
-  els.theme.setAttribute("aria-pressed", String(nextTheme === "dark"));
+  document.querySelectorAll(".theme-toggle").forEach((button) => {
+    button.textContent = nextTheme === "dark" ? "☀" : "☾";
+    button.setAttribute("aria-label", switchLabel);
+    button.setAttribute("title", switchLabel);
+    button.setAttribute("aria-pressed", String(nextTheme === "dark"));
+  });
 
   if (persist) {
     try {
@@ -1665,8 +1667,15 @@ setPitchMode(state.pitchMode, { persist: false });
 restoreTranscriptSession();
 void restoreAudioSession();
 
-els.theme.addEventListener("click", toggleTheme);
+document.querySelectorAll(".theme-toggle").forEach((button) => {
+  button.addEventListener("click", toggleTheme);
+});
 els.backend.addEventListener("click", openAbout);
+document.addEventListener("breeze:page", (event) => {
+  if (event.detail?.page !== "transcribe" && (state.running || state.analyzing)) {
+    stop();
+  }
+});
 els.about?.addEventListener("click", (event) => {
   if (event.target === els.about) {
     els.about.close();

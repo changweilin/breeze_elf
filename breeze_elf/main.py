@@ -5,6 +5,7 @@ import base64
 import binascii
 import logging
 import math
+import threading
 import time
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -44,6 +45,17 @@ from .protocol import (
     server_event,
 )
 from .storage import save_transcript
+from .voice import build_voice_from_env
+from .voice_storage import (
+    decode_wav,
+    delete_voice,
+    encode_wav,
+    list_voices,
+    load_embedding,
+    save_voice,
+    update_voice,
+    voice_sample_path,
+)
 
 LOGGER = logging.getLogger("breeze_elf")
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -52,6 +64,8 @@ PROJECT_WEB_DIR = ROOT_DIR / "web"
 WEB_DIR = PACKAGE_WEB_DIR if PACKAGE_WEB_DIR.exists() else PROJECT_WEB_DIR
 ROOT_STATIC_MEDIA_TYPES = {
     "app.js": "application/javascript",
+    "voice.js": "application/javascript",
+    "audio-utils.js": "application/javascript",
     "audio-worklet.js": "application/javascript",
     "favicon.svg": "image/svg+xml",
     "logo.svg": "image/svg+xml",
@@ -109,8 +123,83 @@ class TranscriptSaveRequest(BaseModel):
     audioBase64: str | None = None
 
 
+class VoiceCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    audioBase64: str = Field(min_length=1)
+    favorite: bool = False
+
+
+class VoiceUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, max_length=120)
+    favorite: bool | None = None
+
+
+class VoiceConvertRequest(BaseModel):
+    voiceId: str = Field(min_length=1)
+    audioBase64: str = Field(min_length=1)
+
+
+class VoiceTtsRequest(BaseModel):
+    voiceId: str = Field(min_length=1)
+    text: str = Field(min_length=1, max_length=2000)
+    language: str | None = None
+
+
+@dataclass
+class VoiceLoadState:
+    """Thread-safe snapshot of voice-model loading for the progress bar.
+
+    The engine loads in an executor thread while the status is polled from the
+    async request handlers, so every field is guarded by a lock.
+    """
+
+    status: str = "idle"  # idle | loading | ready | error
+    progress: float = 0.0
+    stage: str = ""
+    error: str | None = None
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def begin(self) -> bool:
+        with self.lock:
+            if self.status in {"loading", "ready"}:
+                return False
+            self.status = "loading"
+            self.progress = 0.0
+            self.stage = "準備中"
+            self.error = None
+            return True
+
+    def report(self, fraction: float, stage: str) -> None:
+        with self.lock:
+            self.progress = max(0.0, min(1.0, float(fraction)))
+            self.stage = stage
+
+    def finish(self) -> None:
+        with self.lock:
+            self.status = "ready"
+            self.progress = 1.0
+            self.stage = "完成"
+            self.error = None
+
+    def fail(self, message: str) -> None:
+        with self.lock:
+            self.status = "error"
+            self.error = message
+
+    def snapshot(self) -> dict[str, Any]:
+        with self.lock:
+            return {
+                "status": self.status,
+                "progress": round(self.progress, 3),
+                "stage": self.stage,
+                "error": self.error,
+            }
+
+
 settings = get_settings()
 asr_engine = build_asr_from_env(settings)
+voice_engine = build_voice_from_env(settings)
+voice_load_state = VoiceLoadState()
 
 
 @asynccontextmanager
@@ -118,6 +207,9 @@ async def lifespan(app: FastAPI):
     app.state.settings = settings
     app.state.asr = asr_engine
     app.state.asr_error = None
+    app.state.voice = voice_engine
+    app.state.voice_load = voice_load_state
+    app.state.voice_load_task = None
     app.state.asr_queue = ASRQueue(asr_engine, settings.asr_concurrency)
     await app.state.asr_queue.start()
 
@@ -171,6 +263,10 @@ async def health() -> JSONResponse:
             "asrConcurrency": settings.asr_concurrency,
             "asrQueueDepth": app.state.asr_queue.queue_depth,
             "asrError": app.state.asr_error,
+            "voiceProvider": settings.voice_provider,
+            "voiceBackend": voice_engine.backend,
+            "voiceModel": getattr(voice_engine, "model_name", "unknown"),
+            "voiceLoadStatus": voice_load_state.snapshot()["status"],
         }
     )
 
@@ -240,6 +336,191 @@ def _remote_storage_dir() -> Path:
     if configured.is_absolute():
         return configured
     return ROOT_DIR / configured
+
+
+def _voice_storage_dir() -> Path:
+    configured = Path(settings.voice_storage_dir).expanduser()
+    if configured.is_absolute():
+        return configured
+    return ROOT_DIR / configured
+
+
+def _voice_meta(extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    meta = {
+        "provider": settings.voice_provider,
+        "backend": voice_engine.backend,
+        "device": getattr(voice_engine, "device", "unknown"),
+        "model": getattr(voice_engine, "model_name", "unknown"),
+        "sampleRate": settings.voice_sample_rate,
+        "language": settings.voice_language,
+    }
+    if extra:
+        meta.update(extra)
+    return meta
+
+
+def _run_voice_load() -> None:
+    try:
+        voice_engine.load(progress=voice_load_state.report)
+    except Exception as exc:  # pragma: no cover - depends on optional engine
+        LOGGER.exception("Voice model load failed")
+        voice_load_state.fail(str(exc))
+    else:
+        voice_load_state.finish()
+
+
+@app.post("/api/voice/load")
+async def load_voice_model() -> JSONResponse:
+    if voice_load_state.begin():
+        loop = asyncio.get_running_loop()
+        app.state.voice_load_task = loop.run_in_executor(None, _run_voice_load)
+    snapshot = voice_load_state.snapshot()
+    return JSONResponse({"ok": True, **snapshot, **_voice_meta()})
+
+
+@app.get("/api/voice/status")
+async def voice_status() -> JSONResponse:
+    snapshot = voice_load_state.snapshot()
+    meta = _voice_meta({"voiceCount": len(list_voices(_voice_storage_dir()))})
+    return JSONResponse({"ok": True, **snapshot, **meta})
+
+
+@app.get("/api/voices")
+async def list_saved_voices() -> JSONResponse:
+    voices = [voice.to_public() for voice in list_voices(_voice_storage_dir())]
+    return JSONResponse({"ok": True, "voices": voices})
+
+
+@app.post("/api/voices")
+async def create_saved_voice(payload: VoiceCreateRequest) -> JSONResponse:
+    samples, sample_rate = _decode_wav_payload(payload.audioBase64)
+    audio_bytes = _decode_audio(payload.audioBase64)
+    loop = asyncio.get_running_loop()
+    try:
+        embedding = await loop.run_in_executor(
+            None, voice_engine.extract_embedding, samples, sample_rate
+        )
+    except Exception as exc:
+        LOGGER.exception("Voice embedding extraction failed")
+        raise HTTPException(status_code=500, detail=f"voice extraction failed: {exc}") from exc
+
+    duration = samples.size / sample_rate if sample_rate else 0.0
+    try:
+        stored = save_voice(
+            payload.name,
+            embedding,
+            _voice_storage_dir(),
+            sample_audio=audio_bytes,
+            sample_rate=sample_rate,
+            duration_seconds=duration,
+            favorite=payload.favorite,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        LOGGER.exception("Voice storage failed")
+        raise HTTPException(status_code=500, detail="voice storage failed") from exc
+
+    return JSONResponse({"ok": True, "voice": stored.to_public()})
+
+
+@app.patch("/api/voices/{voice_id}")
+async def patch_saved_voice(voice_id: str, payload: VoiceUpdateRequest) -> JSONResponse:
+    try:
+        stored = update_voice(
+            voice_id,
+            _voice_storage_dir(),
+            name=payload.name,
+            favorite=payload.favorite,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="voice not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse({"ok": True, "voice": stored.to_public()})
+
+
+@app.delete("/api/voices/{voice_id}")
+async def delete_saved_voice(voice_id: str) -> JSONResponse:
+    try:
+        removed = delete_voice(voice_id, _voice_storage_dir())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not removed:
+        raise HTTPException(status_code=404, detail="voice not found")
+    return JSONResponse({"ok": True, "id": voice_id})
+
+
+@app.get("/api/voices/{voice_id}/sample")
+async def get_voice_sample(voice_id: str) -> FileResponse:
+    try:
+        path = voice_sample_path(voice_id, _voice_storage_dir())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if path is None:
+        raise HTTPException(status_code=404, detail="voice sample not found")
+    return FileResponse(path, media_type="audio/wav")
+
+
+@app.post("/api/voice/convert")
+async def convert_voice(payload: VoiceConvertRequest) -> JSONResponse:
+    samples, sample_rate = _decode_wav_payload(payload.audioBase64)
+    embedding = _require_embedding(payload.voiceId)
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(
+            None, voice_engine.convert, samples, sample_rate, embedding
+        )
+    except Exception as exc:
+        LOGGER.exception("Voice conversion failed")
+        raise HTTPException(status_code=500, detail=f"voice conversion failed: {exc}") from exc
+    return JSONResponse({"ok": True, **_audio_response(result)})
+
+
+@app.post("/api/voice/tts")
+async def voice_tts(payload: VoiceTtsRequest) -> JSONResponse:
+    embedding = _require_embedding(payload.voiceId)
+    language = (payload.language or settings.voice_language).strip() or settings.voice_language
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(
+            None, voice_engine.synthesize, payload.text, language, embedding
+        )
+    except Exception as exc:
+        LOGGER.exception("Voice synthesis failed")
+        raise HTTPException(status_code=500, detail=f"voice synthesis failed: {exc}") from exc
+    return JSONResponse({"ok": True, **_audio_response(result)})
+
+
+def _decode_wav_payload(audio_base64: str):
+    audio = _decode_audio(audio_base64)
+    if not audio:
+        raise HTTPException(status_code=400, detail="audio payload is empty")
+    try:
+        return decode_wav(audio)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - any decode failure maps to a 400
+        raise HTTPException(status_code=400, detail=f"invalid WAV audio: {exc}") from exc
+
+
+def _require_embedding(voice_id: str) -> bytes:
+    try:
+        return load_embedding(voice_id, _voice_storage_dir())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="voice not found") from exc
+
+
+def _audio_response(result) -> dict[str, Any]:
+    wav_bytes = encode_wav(result.samples, result.sample_rate)
+    duration = result.samples.size / result.sample_rate if result.sample_rate else 0.0
+    return {
+        "audioBase64": base64.b64encode(wav_bytes).decode("ascii"),
+        "sampleRate": result.sample_rate,
+        "durationSeconds": round(duration, 3),
+    }
 
 
 @dataclass

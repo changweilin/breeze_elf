@@ -50,6 +50,36 @@ non-Chinese audio is no longer transcribed as Chinese gibberish. Note that a spe
 still hallucinates lyrics on purely instrumental tracks — for melodies the pitch / 簡譜
 output is the meaningful result.
 
+## 變聲工作室 (Voice Studio)
+
+The bottom icon tabs switch between the transcribe page (`逐字稿`) and a voice page
+(`變聲`). The voice page does three things against the local server:
+
+- **Save a voice A** — record or upload a clip of speaker A, name it, and store its
+  voice features server-side under `voices/`. Toggle the ★ to keep it in 我的最愛;
+  rename by tapping the name; delete with 🗑.
+- **B → A** — record or upload speaker B, pick a saved A, and re-voice B as A.
+- **文字 → A** — type text and synthesize it in A's voice.
+
+A progress bar tracks the voice model warming up when you open the page (and again
+if you retry after an error), so the model-switch wait is visible rather than a
+silent hang.
+
+By default `BREEZE_VOICE_PROVIDER=mock` runs a dependency-free DSP transform
+(phase-vocoder pitch shift toward A's pitch, plus a simple text-to-buzz) so the whole
+flow works without any downloads. For real speaker cloning set
+`BREEZE_VOICE_PROVIDER=openvoice` and install OpenVoice v2 + MeloTTS:
+
+```powershell
+uv pip install git+https://github.com/myshell-ai/OpenVoice.git git+https://github.com/myshell-ai/MeloTTS.git
+# download the OpenVoice v2 checkpoints into checkpoints_v2/ (see the OpenVoice repo),
+# i.e. checkpoints_v2/converter/{config.json,checkpoint.pth} and base_speakers/ses/*.pth
+```
+
+Saved voices store an engine-defined embedding blob, the reference `.wav`, and a JSON
+metadata sidecar. The mock and OpenVoice embeddings are not interchangeable, so a voice
+saved under one provider is only usable by that provider.
+
 ## GitHub Actions Web Demo
 
 The `Web Demo` workflow publishes the static `web/` folder to GitHub Pages. On
@@ -86,6 +116,12 @@ Environment variables:
 | `BREEZE_STOP_DRAIN_TIMEOUT_SECONDS` | `60.0` | Time allowed to transcribe the final flushed utterance after stop. |
 | `BREEZE_RMS_THRESHOLD` | `0.008` | Silence gate threshold. |
 | `BREEZE_REMOTE_STORAGE_DIR` | `remote_transcripts` | Host-side directory for remotely saved transcript `.txt` files. |
+| `BREEZE_VOICE_PROVIDER` | `mock` | Voice studio engine: `mock` (DSP, no downloads) or `openvoice` (OpenVoice v2 + MeloTTS). |
+| `BREEZE_VOICE_STORAGE_DIR` | `voices` | Host-side directory for saved voice profiles (embedding + reference `.wav` + metadata). |
+| `BREEZE_VOICE_SAMPLE_RATE` | `16000` | Sample rate used for voice capture and mock synthesis. |
+| `BREEZE_VOICE_LANGUAGE` | `zh` | Default language for text-to-speech synthesis. |
+| `BREEZE_VOICE_CHECKPOINTS_DIR` | `checkpoints_v2` | Location of the OpenVoice v2 checkpoints. |
+| `BREEZE_VOICE_MOCK_WARMUP_SECONDS` | `0.9` | Simulated mock model-load time so the progress bar is visible. |
 
 On an RTX 3060, `auto` tries CUDA with `float16`, then CUDA with `int8_float16`, then CPU with `int8`.
 
