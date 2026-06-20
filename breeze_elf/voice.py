@@ -19,6 +19,11 @@ from __future__ import annotations
 import io
 import json
 import math
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -86,9 +91,15 @@ class MockVoiceEngine:
     device = "cpu"
     model_name = "dsp-mock"
 
-    def __init__(self, sample_rate: int = 16_000, warmup_seconds: float = 0.0) -> None:
+    def __init__(
+        self,
+        sample_rate: int = 16_000,
+        warmup_seconds: float = 0.0,
+        use_os_tts: bool = True,
+    ) -> None:
         self.sample_rate = sample_rate
         self.warmup_seconds = max(0.0, warmup_seconds)
+        self.use_os_tts = use_os_tts
         self._loaded = False
 
     def load(self, progress: ProgressCallback | None = None) -> None:
@@ -137,11 +148,23 @@ class MockVoiceEngine:
         return VoiceAudio(samples=shifted.astype(np.float32, copy=False), sample_rate=sample_rate)
 
     def synthesize(self, text: str, language: str, embedding: bytes) -> VoiceAudio:
-        del language  # the mock voices every language as the same buzz
+        del language  # the OS voice picks its own language; the fallback is fixed
         profile = _load_mock_embedding(embedding)
         base_hz = float(profile.get("medianHz") or _DEFAULT_VOICE_HZ)
-        samples = _synthesize_buzz(text, self.sample_rate, base_hz)
-        samples = _match_loudness(samples, float(profile.get("rms") or 0.0), default_peak=0.6)
+        target_rms = float(profile.get("rms") or 0.0)
+
+        # Prefer the real OS text-to-speech voice (e.g. Microsoft Hanhan, zh-TW)
+        # so the result is actual words, then nudge its pitch toward the target.
+        spoken = _system_tts(text) if self.use_os_tts else None
+        if spoken is not None:
+            samples, rate = spoken
+            samples = _retune_to_target(samples, rate, base_hz)
+            samples = _match_loudness(samples, target_rms, default_peak=0.92)
+            return VoiceAudio(samples=samples, sample_rate=rate)
+
+        # Fallback: a synthetic vowel voice (no OS TTS available).
+        samples = _synthesize_voice(text, self.sample_rate, base_hz)
+        samples = _match_loudness(samples, target_rms, default_peak=0.6)
         return VoiceAudio(samples=samples, sample_rate=self.sample_rate)
 
 
@@ -169,10 +192,12 @@ class OpenVoiceEngine:
         checkpoints_dir: str | Path,
         language: str = "zh",
         device_preference: str = "auto",
+        use_os_tts: bool = True,
     ) -> None:
         self.checkpoints_dir = Path(checkpoints_dir)
         self.language = language
         self.device_preference = device_preference
+        self.use_os_tts = use_os_tts
         self.device = "unloaded"
         self.model_name = "openvoice-v2"
         self._converter = None
@@ -262,8 +287,28 @@ class OpenVoiceEngine:
 
     def synthesize(self, text: str, language: str, embedding: bytes) -> VoiceAudio:
         self.load()
-        self._load_tts()
         target_se = self._torch.load(io.BytesIO(embedding), map_location=self.device)
+
+        # Preferred path: render real speech with the OS voice (Microsoft Hanhan,
+        # zh-TW) and clone it to the target with the tone-color converter. This
+        # needs no MeloTTS — only the converter checkpoint that B→A already uses.
+        spoken = _system_tts(text) if self.use_os_tts else None
+        if spoken is not None:
+            base_samples, base_rate = spoken
+            with _temp_wav(base_samples, base_rate) as base_path, _temp_wav_path() as out_path:
+                source_se = self._converter.extract_se([str(base_path)])
+                self._converter.convert(
+                    audio_src_path=str(base_path),
+                    src_se=source_se,
+                    tgt_se=target_se,
+                    output_path=str(out_path),
+                    message="@BreezeElf",
+                )
+                data, out_rate = self._sf.read(str(out_path), dtype="float32", always_2d=False)
+            return VoiceAudio(samples=_as_float32_mono(data), sample_rate=int(out_rate))
+
+        # Fallback (e.g. non-Windows host): MeloTTS base speaker + convert.
+        self._load_tts()
         with _temp_wav_path() as base_path, _temp_wav_path() as out_path:
             self._tts.tts_to_file(text, self._speaker_id, str(base_path), speed=1.0)
             self._converter.convert(
@@ -323,10 +368,12 @@ def build_voice_from_env(settings: Settings | None = None) -> VoiceEngine:
             checkpoints_dir=settings.voice_checkpoints_dir,
             language=settings.voice_language,
             device_preference=settings.asr_device,
+            use_os_tts=settings.voice_os_tts,
         )
     return MockVoiceEngine(
         sample_rate=settings.voice_sample_rate,
         warmup_seconds=settings.voice_mock_warmup_seconds,
+        use_os_tts=settings.voice_os_tts,
     )
 
 
@@ -505,28 +552,151 @@ def _resample_to_length(samples: np.ndarray, target_length: int) -> np.ndarray:
     return resampled.astype(np.float32, copy=False)
 
 
-def _synthesize_buzz(text: str, sample_rate: int, base_hz: float) -> np.ndarray:
+# A few canonical vowel formants (F1, F2, F3 in Hz). They drive a simple
+# source-filter voice: a glottal-ish harmonic source shaped by these resonances.
+# It is not real speech, but it sings vowels at A's pitch instead of beeping like
+# a dial tone — a much better fallback when no real TTS model is installed.
+_VOWEL_FORMANTS = (
+    (730.0, 1090.0, 2440.0),  # "a"
+    (530.0, 1840.0, 2480.0),  # "e"
+    (270.0, 2290.0, 3010.0),  # "i"
+    (570.0, 840.0, 2410.0),  # "o"
+    (300.0, 870.0, 2240.0),  # "u"
+)
+_FORMANT_GAINS = (1.0, 0.55, 0.28)
+_PAUSE_CHARS = set("，,。.!?！？、；;：:…—")
+
+
+def _formant_response(freqs: np.ndarray, formants: tuple[float, float, float]) -> np.ndarray:
+    """Lorentzian magnitude response of the three formant resonators."""
+    response = np.full(freqs.shape, 0.04, dtype=np.float64)
+    for center, gain in zip(formants, _FORMANT_GAINS):
+        bandwidth = 0.10 * center + 60.0
+        response += gain / (1.0 + ((freqs - center) / (bandwidth * 0.5)) ** 2)
+    return response
+
+
+def _syllable_envelope(count: int, sample_rate: int) -> np.ndarray:
+    """Fast attack, slower release — voiced, not a symmetric "wah"."""
+    env = np.ones(count, dtype=np.float32)
+    attack = min(count, max(1, int(sample_rate * 0.02)))
+    release = min(max(0, count - attack), max(1, int(sample_rate * 0.06)))
+    env[:attack] = np.linspace(0.0, 1.0, attack, dtype=np.float32)
+    if release:
+        env[count - release :] = np.linspace(1.0, 0.0, release, dtype=np.float32)
+    return env
+
+
+def _synthesize_voice(text: str, sample_rate: int, base_hz: float) -> np.ndarray:
     chars = [char for char in text if not char.isspace()] or [" "]
     chars = chars[:200]
-    seconds_per_char = 0.18
-    gap_seconds = 0.05
     base_hz = float(min(_MAX_VOICE_HZ, max(_MIN_VOICE_HZ, base_hz)))
+    seconds_per_char = 0.22
+    gap = np.zeros(max(1, int(sample_rate * 0.04)), dtype=np.float32)
+    nyquist = sample_rate / 2.0
+    max_harmonic = max(1, min(48, int((nyquist * 0.92) / base_hz)))
+    harmonics = np.arange(1, max_harmonic + 1, dtype=np.float64)
+
     pieces: list[np.ndarray] = []
-    gap = np.zeros(max(1, int(sample_rate * gap_seconds)), dtype=np.float32)
     for position, char in enumerate(chars):
+        if char in _PAUSE_CHARS:
+            pieces.append(np.zeros(max(1, int(sample_rate * 0.14)), dtype=np.float32))
+            continue
+
         count = max(1, int(sample_rate * seconds_per_char))
-        axis = np.arange(count, dtype=np.float32) / sample_rate
-        # A gentle, character-dependent pitch contour keeps it from sounding
-        # like a flat dial tone without pretending to be real speech.
-        contour = 1.0 + 0.04 * np.sin(2 * np.pi * (0.6 + (ord(char) % 5) * 0.12) * axis)
-        f0 = base_hz * contour
+        axis = np.arange(count, dtype=np.float64) / sample_rate
+        # A gentle, character-keyed pitch contour (vibrato + slight declination)
+        # so consecutive syllables differ instead of droning on one note.
+        wobble = 0.045 * np.sin(2 * np.pi * (0.7 + (ord(char) % 5) * 0.18) * axis)
+        decline = -0.03 * (axis / seconds_per_char)
+        f0 = base_hz * (1.0 + wobble + decline)
         phase = 2 * np.pi * np.cumsum(f0) / sample_rate
-        tone = np.sin(phase) + 0.5 * np.sin(2 * phase) + 0.25 * np.sin(3 * phase)
-        envelope = np.hanning(count).astype(np.float32)
-        pieces.append((tone * envelope).astype(np.float32))
+
+        formants = _VOWEL_FORMANTS[ord(char) % len(_VOWEL_FORMANTS)]
+        amplitudes = _formant_response(harmonics * base_hz, formants) / harmonics
+        tone = np.zeros(count, dtype=np.float64)
+        for harmonic, amplitude in zip(harmonics, amplitudes):
+            tone += amplitude * np.sin(harmonic * phase)
+
+        peak = float(np.max(np.abs(tone)))
+        if peak > 1e-9:
+            tone /= peak
+        pieces.append((tone * _syllable_envelope(count, sample_rate)).astype(np.float32))
         if position != len(chars) - 1:
             pieces.append(gap)
+
     return np.concatenate(pieces).astype(np.float32)
+
+
+_OS_TTS_SCRIPT = (
+    "Add-Type -AssemblyName System.Speech;"
+    "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer;"
+    "$zh = $s.GetInstalledVoices() | ForEach-Object { $_.VoiceInfo } |"
+    " Where-Object { $_.Culture.Name -like 'zh*' } | Select-Object -First 1;"
+    "if ($zh) { $s.SelectVoice($zh.Name) };"
+    "$s.SetOutputToWaveFile($env:BREEZE_TTS_OUT);"
+    "$s.Speak($env:BREEZE_TTS_TEXT);"
+    "$s.Dispose()"
+)
+
+
+def _system_tts(text: str) -> tuple[np.ndarray, int] | None:
+    """Render real speech with the OS text-to-speech voice.
+
+    On Windows this drives the built-in SAPI5 synthesizer (e.g. Microsoft
+    Hanhan, zh-TW) through PowerShell and returns mono ``float32`` samples plus
+    their sample rate. The text travels via environment variables and is never
+    interpolated into the command, so arbitrary input cannot break out of the
+    script. Returns ``None`` whenever no OS voice is usable (non-Windows host,
+    missing PowerShell, empty text, or a failed render) so callers can fall back
+    to the synthetic voice.
+    """
+    clean = (text or "").strip()
+    if not clean or sys.platform != "win32":
+        return None
+    powershell = shutil.which("powershell") or shutil.which("pwsh")
+    if not powershell:
+        return None
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
+        out_path = Path(handle.name)
+    env = dict(os.environ)
+    env["BREEZE_TTS_TEXT"] = clean[:2000]
+    env["BREEZE_TTS_OUT"] = str(out_path)
+    try:
+        result = subprocess.run(
+            [powershell, "-NoProfile", "-NonInteractive", "-Command", _OS_TTS_SCRIPT],
+            env=env,
+            capture_output=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            return None
+        data = out_path.read_bytes()
+        if len(data) <= 44:
+            return None
+        from .voice_storage import decode_wav
+
+        samples, rate = decode_wav(data)
+        if samples.size == 0:
+            return None
+        return _as_float32_mono(samples), int(rate)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    finally:
+        out_path.unlink(missing_ok=True)
+
+
+def _retune_to_target(samples: np.ndarray, sample_rate: int, target_hz: float) -> np.ndarray:
+    """Shift real speech toward the target voice's pitch (kept modest/natural)."""
+    if samples.size < _STFT_SIZE:
+        return samples
+    source_hz = _estimate_median_hz(samples, sample_rate)
+    semitones = _shift_semitones(source_hz, target_hz)
+    semitones = float(max(-7.0, min(7.0, semitones)))
+    if abs(semitones) < 0.5:
+        return samples
+    return _pitch_shift(samples, semitones)
 
 
 def _melo_language(language: str) -> str:

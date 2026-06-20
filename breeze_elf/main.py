@@ -53,6 +53,7 @@ from .voice_storage import (
     list_voices,
     load_embedding,
     save_voice,
+    save_voice_output,
     update_voice,
     voice_sample_path,
 )
@@ -143,6 +144,13 @@ class VoiceTtsRequest(BaseModel):
     voiceId: str = Field(min_length=1)
     text: str = Field(min_length=1, max_length=2000)
     language: str | None = None
+
+
+class VoiceOutputSaveRequest(BaseModel):
+    audioBase64: str = Field(min_length=1)
+    kind: str = Field(default="convert", max_length=24)
+    voiceId: str | None = None
+    text: str | None = Field(default=None, max_length=2000)
 
 
 @dataclass
@@ -345,6 +353,13 @@ def _voice_storage_dir() -> Path:
     return ROOT_DIR / configured
 
 
+def _voice_output_dir() -> Path:
+    configured = Path(settings.voice_output_dir).expanduser()
+    if configured.is_absolute():
+        return configured
+    return ROOT_DIR / configured
+
+
 def _voice_meta(extra: dict[str, Any] | None = None) -> dict[str, Any]:
     meta = {
         "provider": settings.voice_provider,
@@ -475,6 +490,36 @@ async def convert_voice(payload: VoiceConvertRequest) -> JSONResponse:
         LOGGER.exception("Voice conversion failed")
         raise HTTPException(status_code=500, detail=f"voice conversion failed: {exc}") from exc
     return JSONResponse({"ok": True, **_audio_response(result)})
+
+
+@app.post("/api/voice/outputs")
+async def save_voice_output_endpoint(payload: VoiceOutputSaveRequest) -> JSONResponse:
+    audio = _decode_audio(payload.audioBase64)
+    if not audio:
+        raise HTTPException(status_code=400, detail="audio payload is empty")
+    try:
+        stored = save_voice_output(
+            audio,
+            _voice_output_dir(),
+            kind=payload.kind,
+            voice_id=payload.voiceId,
+            text=payload.text,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        LOGGER.exception("Voice output storage failed")
+        raise HTTPException(status_code=500, detail="voice output storage failed") from exc
+    return JSONResponse(
+        {
+            "ok": True,
+            "id": stored.id,
+            "filename": stored.filename,
+            "kind": stored.kind,
+            "createdAt": stored.created_at,
+            "sizeBytes": stored.size_bytes,
+        }
+    )
 
 
 @app.post("/api/voice/tts")

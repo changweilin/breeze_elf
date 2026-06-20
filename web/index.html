@@ -942,7 +942,7 @@
 
       .voice-result {
         display: flex;
-        align-items: center;
+        flex-direction: column;
         gap: 8px;
         padding-top: 4px;
       }
@@ -952,7 +952,19 @@
       }
 
       .voice-result .voice-audio {
-        flex: 1;
+        width: 100%;
+        min-width: 0;
+      }
+
+      .voice-result-actions {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+
+      .voice-result-actions .mini {
+        width: 100%;
+        min-width: 0;
       }
 
       .voice-list {
@@ -1023,6 +1035,52 @@
       .voice-pick {
         width: 20px;
         height: 20px;
+      }
+
+      .voice-hint-sub {
+        font-size: 0.78rem;
+        opacity: 0.9;
+      }
+
+      .voice-busy {
+        position: fixed;
+        inset: 0;
+        z-index: 50;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        background: color-mix(in srgb, var(--bg) 70%, transparent);
+        -webkit-backdrop-filter: blur(2px);
+        backdrop-filter: blur(2px);
+      }
+
+      .voice-busy[hidden] {
+        display: none;
+      }
+
+      .voice-busy-card {
+        width: min(360px, 100%);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--panel);
+        padding: 18px;
+        display: grid;
+        gap: 12px;
+        box-shadow: 0 18px 48px var(--shadow);
+      }
+
+      .voice-busy-card .vp-head {
+        font-size: 0.92rem;
+        color: var(--ink);
+      }
+
+      #voice-busy-pct {
+        font-variant-numeric: tabular-nums;
+        color: var(--live);
+      }
+
+      #voice-busy-cancel {
+        min-height: 46px;
       }
 
       @media (max-width: 520px) {
@@ -1161,64 +1219,69 @@
 
       <section class="voice-card">
         <div class="voice-card-head">
-          <h2>目標聲音 A</h2>
+          <h2>聲音庫</h2>
           <span id="voice-engine-tag" class="voice-tag">—</span>
         </div>
-        <select id="voice-target" class="voice-select" aria-label="選擇目標聲音 A"></select>
-        <p id="voice-empty" class="voice-hint" hidden>尚未建立任何聲音,先在下方錄製或上傳 A 的聲音並儲存。</p>
-      </section>
-
-      <section class="voice-card">
-        <h2>新增聲音 A(錄製或上傳)</h2>
+        <p class="voice-hint">
+          目前目標聲音:<strong id="voice-target-name">尚未選擇</strong>
+        </p>
         <div class="voice-source">
-          <button id="vc-record" type="button" class="primary">● 開始錄音</button>
-          <button id="vc-upload" type="button">⤵ 上傳音檔</button>
+          <button id="vc-record" type="button" class="primary" data-idle-label="● 錄音新增聲音">● 錄音新增聲音</button>
+          <button id="vc-upload" type="button">⤵ 上傳音檔新增</button>
           <input id="vc-file" class="visually-hidden" type="file" accept="audio/*" />
         </div>
-        <audio id="vc-preview" class="voice-audio" controls preload="metadata" hidden></audio>
-        <div class="voice-form">
-          <input id="vc-name" class="voice-input" type="text" maxlength="120" placeholder="幫聲音取名,例如:阿福" />
-          <label class="voice-fav"><input id="vc-fav" type="checkbox" /> 加入我的最愛</label>
-        </div>
-        <button id="vc-save" type="button" class="primary" disabled>儲存聲音特徵</button>
+        <p class="voice-hint voice-hint-sub">錄製或上傳後會自動建立聲紋,並設為目標聲音;在清單中點名稱可改名、☆ 設為最愛。</p>
+        <p id="voice-empty" class="voice-hint" hidden>還沒有任何聲音。先錄一段或上傳一個音檔,系統會自動建立聲紋。</p>
+        <ul id="voice-list" class="voice-list"></ul>
       </section>
 
       <section class="voice-card">
-        <h2>B 講話 → 變成 A 的聲音</h2>
+        <h2>聲音轉換</h2>
+        <p class="voice-hint">錄一段或上傳你的聲音,系統會自動用「目標聲音」重新詮釋。</p>
         <div class="voice-source">
-          <button id="cv-record" type="button" class="primary">● 錄製 B 的聲音</button>
-          <button id="cv-upload" type="button">⤵ 上傳 B 音檔</button>
+          <button id="cv-record" type="button" class="primary" data-idle-label="● 錄音並轉換">● 錄音並轉換</button>
+          <button id="cv-upload" type="button">⤵ 上傳並轉換</button>
           <input id="cv-file" class="visually-hidden" type="file" accept="audio/*" />
         </div>
-        <audio id="cv-input" class="voice-audio" controls preload="metadata" hidden></audio>
-        <button id="cv-run" type="button" class="primary" disabled>轉換為 A 的聲音</button>
         <div id="cv-result-wrap" class="voice-result" hidden>
           <audio id="cv-result" class="voice-audio" controls preload="metadata"></audio>
-          <button id="cv-download" type="button" class="mini">下載</button>
+          <div class="voice-result-actions">
+            <button id="cv-download" type="button" class="mini">下載</button>
+            <button id="cv-save" type="button" class="mini">遠端儲存</button>
+          </div>
         </div>
       </section>
 
       <section class="voice-card">
-        <h2>文字 → A 的聲音</h2>
-        <textarea id="tts-text" class="voice-textarea" maxlength="2000" rows="3" placeholder="輸入想要 A 說的話…"></textarea>
-        <button id="tts-run" type="button" class="primary" disabled>合成 A 的語音</button>
+        <h2>文字轉語音</h2>
+        <p class="voice-hint">輸入文字,用「目標聲音」念出來。</p>
+        <textarea id="tts-text" class="voice-textarea" maxlength="2000" rows="3" placeholder="輸入想說的話…"></textarea>
+        <button id="tts-run" type="button" class="primary" disabled>用目標聲音念出來</button>
         <div id="tts-result-wrap" class="voice-result" hidden>
           <audio id="tts-result" class="voice-audio" controls preload="metadata"></audio>
-          <button id="tts-download" type="button" class="mini">下載</button>
+          <div class="voice-result-actions">
+            <button id="tts-download" type="button" class="mini">下載</button>
+            <button id="tts-save" type="button" class="mini">遠端儲存</button>
+          </div>
         </div>
-      </section>
-
-      <section class="voice-card">
-        <div class="voice-card-head">
-          <h2>我的最愛 / 聲音庫</h2>
-          <button id="vl-refresh" type="button" class="mini">重新整理</button>
-        </div>
-        <ul id="voice-list" class="voice-list"></ul>
       </section>
 
       <section class="stt-status" aria-live="polite">
         <span id="voice-status" class="status">待命</span>
       </section>
+
+      <div id="voice-busy" class="voice-busy" hidden>
+        <div class="voice-busy-card" role="status" aria-live="assertive">
+          <div class="vp-head">
+            <span id="voice-busy-label">處理中…</span>
+            <span id="voice-busy-pct"></span>
+          </div>
+          <div class="progress-track">
+            <div id="voice-busy-bar" class="progress-fill indeterminate"></div>
+          </div>
+          <button id="voice-busy-cancel" type="button" class="danger">■ 中斷</button>
+        </div>
+      </div>
     </main>
     </div>
 
@@ -1273,6 +1336,6 @@
     </dialog>
 
     <script src="./app.js?v=17" type="module"></script>
-    <script src="./voice.js?v=3" type="module"></script>
+    <script src="./voice.js?v=5" type="module"></script>
   </body>
 </html>

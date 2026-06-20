@@ -167,6 +167,65 @@ def update_voice(
     return updated
 
 
+@dataclass(frozen=True)
+class StoredVoiceOutput:
+    """A re-voiced / synthesized clip saved remotely for later download."""
+
+    id: str
+    filename: str
+    kind: str
+    created_at: str
+    size_bytes: int
+
+
+def save_voice_output(
+    audio_wav: bytes,
+    output_dir: str | Path,
+    *,
+    kind: str = "convert",
+    voice_id: str | None = None,
+    text: str | None = None,
+    now: datetime | None = None,
+) -> StoredVoiceOutput:
+    """Persist a generated WAV (plus a small JSON sidecar) to ``output_dir``."""
+    if not audio_wav:
+        raise ValueError("output audio must not be empty")
+
+    safe_kind = "tts" if (kind or "").strip().lower() == "tts" else "convert"
+    directory = _resolve_dir(output_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    created_at = _now_iso(now)
+    stamp = created_at.replace(":", "").replace("-", "")[:15].replace("T", "-")
+
+    for _ in range(10_000):
+        candidate = f"{safe_kind}-{stamp}-{secrets.token_hex(3)}"
+        wav_path = directory / f"{candidate}{_SAMPLE_SUFFIX}"
+        if not wav_path.exists():
+            break
+    else:
+        raise OSError("could not allocate a unique voice output id")
+
+    wav_path.write_bytes(audio_wav)
+    sidecar = {
+        "id": candidate,
+        "kind": safe_kind,
+        "created_at": created_at,
+        "voice_id": voice_id,
+        "text": text,
+        "size_bytes": len(audio_wav),
+    }
+    (directory / f"{candidate}{_META_SUFFIX}").write_text(
+        json.dumps(sidecar, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return StoredVoiceOutput(
+        id=candidate,
+        filename=wav_path.name,
+        kind=safe_kind,
+        created_at=created_at,
+        size_bytes=len(audio_wav),
+    )
+
+
 def delete_voice(voice_id: str, storage_dir: str | Path) -> bool:
     directory = _resolve_dir(storage_dir)
     safe = _safe_id(voice_id)

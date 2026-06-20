@@ -1,5 +1,6 @@
 import base64
 import json
+import pathlib
 import tempfile
 import unittest
 from dataclasses import replace
@@ -16,6 +17,7 @@ from breeze_elf.voice_storage import (
     list_voices,
     load_embedding,
     save_voice,
+    save_voice_output,
     update_voice,
 )
 
@@ -47,7 +49,9 @@ class WavIoTests(unittest.TestCase):
 
 class MockEngineTests(unittest.TestCase):
     def setUp(self):
-        self.engine = MockVoiceEngine(sample_rate=16_000, warmup_seconds=0.0)
+        # Force the synthetic fallback so synth tests stay deterministic and do
+        # not shell out to the OS text-to-speech voice.
+        self.engine = MockVoiceEngine(sample_rate=16_000, warmup_seconds=0.0, use_os_tts=False)
         self.engine.load()
 
     def test_load_reports_monotonic_progress_to_completion(self):
@@ -88,6 +92,24 @@ class MockEngineTests(unittest.TestCase):
         payload = json.loads(embedding.decode("utf-8"))
         self.assertEqual(payload["kind"], "mock")
         self.assertGreater(payload["medianHz"], 150.0)
+
+    def test_os_tts_produces_real_speech_when_available(self):
+        from breeze_elf.voice import _system_tts
+
+        spoken = _system_tts("你好世界,測試語音。")
+        if spoken is None:
+            self.skipTest("no OS text-to-speech voice on this host")
+        samples, rate = spoken
+        # Real speech is far longer than the few hundred ms a beep would last.
+        self.assertGreater(samples.size / rate, 0.8)
+        self.assertGreater(float(np.max(np.abs(samples))), 0.1)
+
+        engine = MockVoiceEngine(sample_rate=16_000, warmup_seconds=0.0, use_os_tts=True)
+        engine.load()
+        embedding = engine.extract_embedding(_tone(150.0), 16_000)
+        result = engine.synthesize("你好,這是一段比較長的測試語音。", "zh", embedding)
+        self.assertGreater(result.samples.size / result.sample_rate, 0.8)
+        self.assertTrue(np.isfinite(result.samples).all())
 
 
 class VoiceStorageTests(unittest.TestCase):
@@ -137,16 +159,43 @@ class VoiceStorageTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_embedding("../secret", tmp)
 
+    def test_save_voice_output_writes_wav_and_sidecar(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            wav = encode_wav(_tone(200.0), 16_000)
+            stored = save_voice_output(wav, tmp, kind="tts", voice_id="voice-x", text="你好")
+            self.assertTrue(stored.id.startswith("tts-"))
+            self.assertEqual(stored.kind, "tts")
+            self.assertEqual(stored.size_bytes, len(wav))
+            wav_path = pathlib.Path(tmp) / stored.filename
+            self.assertTrue(wav_path.exists())
+            sidecar = json.loads((pathlib.Path(tmp) / f"{stored.id}.json").read_text("utf-8"))
+            self.assertEqual(sidecar["text"], "你好")
+            self.assertEqual(sidecar["voice_id"], "voice-x")
+
+    def test_save_voice_output_defaults_unknown_kind_to_convert(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stored = save_voice_output(encode_wav(_tone(200.0), 16_000), tmp, kind="weird")
+            self.assertEqual(stored.kind, "convert")
+            self.assertTrue(stored.id.startswith("convert-"))
+
 
 class VoiceApiTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self._patch = patch.object(
-            main, "settings", replace(main.settings, voice_storage_dir=self._tmp.name)
+            main,
+            "settings",
+            replace(
+                main.settings,
+                voice_storage_dir=self._tmp.name,
+                voice_output_dir=self._tmp.name,
+            ),
         )
         self._patch.start()
         self._engine_patch = patch.object(
-            main, "voice_engine", MockVoiceEngine(sample_rate=16_000, warmup_seconds=0.0)
+            main,
+            "voice_engine",
+            MockVoiceEngine(sample_rate=16_000, warmup_seconds=0.0, use_os_tts=False),
         )
         self._engine_patch.start()
 
@@ -182,6 +231,25 @@ class VoiceApiTests(unittest.IsolatedAsyncioTestCase):
         tts_data = json.loads(tts.body)
         self.assertTrue(tts_data["ok"])
         self.assertGreater(tts_data["durationSeconds"], 0.0)
+
+    async def test_save_output_persists_generated_clip(self):
+        wav_b64 = base64.b64encode(encode_wav(_tone(180.0), 16_000)).decode("ascii")
+        saved = await main.save_voice_output_endpoint(
+            main.VoiceOutputSaveRequest(audioBase64=wav_b64, kind="tts", text="你好")
+        )
+        data = json.loads(saved.body)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["kind"], "tts")
+        self.assertTrue((pathlib.Path(self._tmp.name) / data["filename"]).exists())
+
+    async def test_save_output_rejects_empty_audio(self):
+        from fastapi import HTTPException
+
+        with self.assertRaises(HTTPException) as ctx:
+            await main.save_voice_output_endpoint(
+                main.VoiceOutputSaveRequest(audioBase64="!!!notbase64!!!", kind="convert")
+            )
+        self.assertEqual(ctx.exception.status_code, 400)
 
     async def test_convert_unknown_voice_returns_404(self):
         from fastapi import HTTPException

@@ -1,6 +1,9 @@
-// 變聲工作室 page controller: record/upload a target voice A, manage favorites,
-// re-voice B's speech as A, and read text in A's voice. Talks to the /api/voice*
-// endpoints and shows a progress bar while the model warms up.
+// 變聲工作室 page controller. A single 聲音庫 holds every saved voice (add /
+// favorite / rename / delete / pick-as-target are all in one place). Recording
+// or uploading runs the matching job immediately — building a voiceprint for a
+// new library voice, or re-voicing your clip as the target — behind a busy
+// overlay that locks the page and offers a 中斷 button. Finished audio lands in
+// a player so you can listen before downloading or saving it remotely.
 
 import {
   VOICE_SAMPLE_RATE,
@@ -14,39 +17,40 @@ const els = {
   page: document.querySelector("#page-voice"),
   status: document.querySelector("#voice-status"),
   engineTag: document.querySelector("#voice-engine-tag"),
-  target: document.querySelector("#voice-target"),
+  targetName: document.querySelector("#voice-target-name"),
   empty: document.querySelector("#voice-empty"),
-  // progress
+  // model-load progress (in-card)
   progress: document.querySelector("#voice-progress"),
   progressLabel: document.querySelector("#voice-progress-label"),
   progressPct: document.querySelector("#voice-progress-pct"),
   progressBar: document.querySelector("#voice-progress-bar"),
-  // create A
+  // busy overlay (locks the page during a job)
+  busy: document.querySelector("#voice-busy"),
+  busyLabel: document.querySelector("#voice-busy-label"),
+  busyPct: document.querySelector("#voice-busy-pct"),
+  busyBar: document.querySelector("#voice-busy-bar"),
+  busyCancel: document.querySelector("#voice-busy-cancel"),
+  // add to library
   vcRecord: document.querySelector("#vc-record"),
   vcUpload: document.querySelector("#vc-upload"),
   vcFile: document.querySelector("#vc-file"),
-  vcPreview: document.querySelector("#vc-preview"),
-  vcName: document.querySelector("#vc-name"),
-  vcFav: document.querySelector("#vc-fav"),
-  vcSave: document.querySelector("#vc-save"),
-  // convert B -> A
+  // convert
   cvRecord: document.querySelector("#cv-record"),
   cvUpload: document.querySelector("#cv-upload"),
   cvFile: document.querySelector("#cv-file"),
-  cvInput: document.querySelector("#cv-input"),
-  cvRun: document.querySelector("#cv-run"),
   cvResultWrap: document.querySelector("#cv-result-wrap"),
   cvResult: document.querySelector("#cv-result"),
   cvDownload: document.querySelector("#cv-download"),
-  // text -> A
+  cvSave: document.querySelector("#cv-save"),
+  // text -> target voice
   ttsText: document.querySelector("#tts-text"),
   ttsRun: document.querySelector("#tts-run"),
   ttsResultWrap: document.querySelector("#tts-result-wrap"),
   ttsResult: document.querySelector("#tts-result"),
   ttsDownload: document.querySelector("#tts-download"),
+  ttsSave: document.querySelector("#tts-save"),
   // library
   list: document.querySelector("#voice-list"),
-  refresh: document.querySelector("#vl-refresh"),
 };
 
 const state = {
@@ -56,13 +60,12 @@ const state = {
   pollTimer: 0,
   voices: [],
   selectedId: "",
-  vcBlob: null,
-  vcUrl: "",
-  cvBlob: null,
-  cvUrl: "",
-  cvResultUrl: "",
-  ttsResultUrl: "",
   busy: false,
+  abort: null,
+  cvResultB64: "",
+  cvResultUrl: "",
+  ttsResultB64: "",
+  ttsResultUrl: "",
 };
 
 // --------------------------------------------------------------------------- //
@@ -95,14 +98,20 @@ function showPage(page) {
 }
 
 tabs.forEach((tab) => {
-  tab.addEventListener("click", () => showPage(tab.dataset.page));
+  tab.addEventListener("click", () => {
+    // A running job locks the page, including page switches.
+    if (state.busy) {
+      return;
+    }
+    showPage(tab.dataset.page);
+  });
 });
 
 document.addEventListener("breeze:page", (event) => {
   if (event.detail?.page === "voice") {
     void initVoicePage();
   } else {
-    stopActiveRecording("切換頁面");
+    void stopActiveRecording("切換頁面");
   }
 });
 
@@ -172,7 +181,16 @@ class Recorder {
 let activeRecorder = null;
 let activeRecordButton = null;
 
-async function toggleRecording(button, label, onDone) {
+function idleLabel(button) {
+  return button?.dataset.idleLabel || "● 開始錄音";
+}
+
+// Record/stop toggle. On stop the captured blob is handed to onDone, which kicks
+// off the matching job (build voiceprint / convert) right away.
+async function toggleRecording(button, onDone) {
+  if (state.busy) {
+    return;
+  }
   if (activeRecorder && activeRecordButton !== button) {
     await stopActiveRecording("先停止其他錄音");
   }
@@ -182,15 +200,20 @@ async function toggleRecording(button, label, onDone) {
     activeRecorder = null;
     activeRecordButton = null;
     button.classList.remove("recording");
-    button.textContent = label;
+    button.textContent = idleLabel(button);
+    let blob = null;
     try {
-      const blob = await recorder.stop();
-      onDone(blob);
-      setStatus("錄音完成");
+      blob = await recorder.stop();
     } catch (error) {
       setStatus(error?.message || "錄音失敗", "error");
+      return;
     }
-    refreshButtons();
+    if (!blob || blob.size <= 44) {
+      setStatus("沒有錄到聲音", "error");
+      return;
+    }
+    setStatus("錄音完成");
+    await onDone(blob);
     return;
   }
 
@@ -227,7 +250,7 @@ async function stopActiveRecording(reason) {
   activeRecordButton = null;
   if (button) {
     button.classList.remove("recording");
-    button.textContent = button === els.vcRecord ? "● 開始錄音" : "● 錄製 B 的聲音";
+    button.textContent = idleLabel(button);
   }
   try {
     await recorder.stop();
@@ -268,11 +291,28 @@ async function ensureModelLoaded() {
     setStatus("無法連線到伺服器", "error");
     return;
   }
-  // Keep polling only while the model is still warming up; applyStatus already
-  // stops the loop once it reaches ready/error.
   if (state.loading) {
     startPolling();
   }
+}
+
+// Resolve once the model is ready; reject if it ends in an error state.
+function waitForModelReady() {
+  if (state.modelReady) {
+    return Promise.resolve();
+  }
+  void ensureModelLoaded();
+  return new Promise((resolve, reject) => {
+    const timer = window.setInterval(() => {
+      if (state.modelReady) {
+        window.clearInterval(timer);
+        resolve();
+      } else if (!state.loading) {
+        window.clearInterval(timer);
+        reject(new Error("模型尚未就緒,請稍後再試"));
+      }
+    }, 200);
+  });
 }
 
 function startPolling() {
@@ -315,7 +355,9 @@ function applyStatus(data) {
         els.progress.hidden = true;
       }
     }, 700);
-    setStatus("待命");
+    if (!state.busy) {
+      setStatus("待命");
+    }
   } else if (status === "error") {
     state.modelReady = false;
     state.loading = false;
@@ -345,193 +387,86 @@ function showProgress(label, fraction, indeterminate = false, isError = false) {
 }
 
 // --------------------------------------------------------------------------- //
-// create voice A
+// busy overlay — lock the page, show progress, allow 中斷
 // --------------------------------------------------------------------------- //
 
-function setVcAudio(blob) {
-  if (state.vcUrl) {
-    URL.revokeObjectURL(state.vcUrl);
-  }
-  state.vcBlob = blob;
-  state.vcUrl = URL.createObjectURL(blob);
-  els.vcPreview.src = state.vcUrl;
-  els.vcPreview.hidden = false;
-  refreshButtons();
+function showBusy(label) {
+  els.busyLabel.textContent = label;
+  els.busyPct.textContent = "";
+  els.busyBar.classList.add("indeterminate");
+  els.busy.hidden = false;
 }
 
-// Prefill a name after upload/record so the 儲存 button isn't silently disabled
-// just because the name field is blank. The user can still edit it.
-function suggestVcName(fileName) {
-  if (els.vcName.value.trim()) {
-    return;
-  }
-  let name = "";
-  if (fileName) {
-    name = fileName.replace(/\.[^.]+$/, "").trim();
-  }
-  els.vcName.value = name || `我的聲音 ${state.voices.length + 1}`;
-  refreshButtons();
+function hideBusy() {
+  els.busy.hidden = true;
 }
 
-async function saveVoice() {
-  const name = els.vcName.value.trim();
-  if (!state.vcBlob || !name || state.busy || !state.modelReady) {
-    if (!state.modelReady) {
-      void ensureModelLoaded();
-    }
+// Run a server job exclusively: lock the page with the busy overlay, expose an
+// AbortController to the 中斷 button, and always unlock afterwards.
+async function runExclusive(label, task) {
+  if (state.busy) {
     return;
   }
   state.busy = true;
+  const controller = new AbortController();
+  state.abort = controller;
+  showBusy(label);
   refreshButtons();
-  setStatus("擷取聲音特徵中…", "live");
   try {
-    const audioBase64 = await blobToBase64(state.vcBlob);
+    await task(controller.signal);
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      setStatus("已中斷");
+    } else {
+      setStatus(error?.message || "操作失敗", "error");
+    }
+  } finally {
+    state.busy = false;
+    state.abort = null;
+    hideBusy();
+    refreshButtons();
+  }
+}
+
+els.busyCancel.addEventListener("click", () => {
+  if (state.abort) {
+    state.abort.abort();
+  }
+});
+
+// --------------------------------------------------------------------------- //
+// library: add / list / favorite / rename / delete / pick target
+// --------------------------------------------------------------------------- //
+
+function defaultVoiceName(fileName) {
+  if (fileName) {
+    const stem = fileName.replace(/\.[^.]+$/, "").trim();
+    if (stem) {
+      return stem.slice(0, 120);
+    }
+  }
+  return `我的聲音 ${state.voices.length + 1}`;
+}
+
+async function addVoiceFromBlob(blob, fileName) {
+  await runExclusive("建立聲紋中…", async (signal) => {
+    await waitForModelReady();
+    setStatus("擷取聲音特徵中…", "live");
+    const audioBase64 = await blobToBase64(blob);
     const response = await fetch("/api/voices", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, audioBase64, favorite: els.vcFav.checked }),
+      body: JSON.stringify({ name: defaultVoiceName(fileName), audioBase64 }),
+      signal,
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok || !data.ok) {
-      throw new Error(data.detail || "儲存失敗");
+      throw new Error(data.detail || "建立聲紋失敗");
     }
-    setStatus(`已儲存「${data.voice.name}」`);
-    // reset the create form
-    els.vcName.value = "";
-    els.vcFav.checked = false;
-    clearVcAudio();
     await refreshVoices(data.voice.id);
-  } catch (error) {
-    setStatus(error?.message || "儲存失敗", "error");
-  } finally {
-    state.busy = false;
-    refreshButtons();
-  }
+    setStatus(`已新增「${data.voice.name}」並設為目標聲音`);
+  });
 }
-
-function clearVcAudio() {
-  if (state.vcUrl) {
-    URL.revokeObjectURL(state.vcUrl);
-    state.vcUrl = "";
-  }
-  state.vcBlob = null;
-  els.vcPreview.removeAttribute("src");
-  els.vcPreview.hidden = true;
-}
-
-// --------------------------------------------------------------------------- //
-// convert B -> A
-// --------------------------------------------------------------------------- //
-
-function setCvAudio(blob) {
-  if (state.cvUrl) {
-    URL.revokeObjectURL(state.cvUrl);
-  }
-  state.cvBlob = blob;
-  state.cvUrl = URL.createObjectURL(blob);
-  els.cvInput.src = state.cvUrl;
-  els.cvInput.hidden = false;
-  refreshButtons();
-}
-
-async function runConvert() {
-  if (!state.cvBlob || !state.selectedId || state.busy || !state.modelReady) {
-    if (!state.modelReady) {
-      void ensureModelLoaded();
-    }
-    return;
-  }
-  state.busy = true;
-  refreshButtons();
-  setStatus("轉換中…", "live");
-  try {
-    const audioBase64 = await blobToBase64(state.cvBlob);
-    const response = await fetch("/api/voice/convert", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ voiceId: state.selectedId, audioBase64 }),
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok || !data.ok) {
-      throw new Error(data.detail || "轉換失敗");
-    }
-    showResult(els.cvResult, els.cvResultWrap, "cvResultUrl", data.audioBase64);
-    setStatus("轉換完成");
-  } catch (error) {
-    setStatus(error?.message || "轉換失敗", "error");
-  } finally {
-    state.busy = false;
-    refreshButtons();
-  }
-}
-
-// --------------------------------------------------------------------------- //
-// text -> A
-// --------------------------------------------------------------------------- //
-
-async function runTts() {
-  const text = els.ttsText.value.trim();
-  if (!text || !state.selectedId || state.busy || !state.modelReady) {
-    if (!state.modelReady) {
-      void ensureModelLoaded();
-    }
-    return;
-  }
-  state.busy = true;
-  refreshButtons();
-  setStatus("合成語音中…", "live");
-  try {
-    const response = await fetch("/api/voice/tts", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ voiceId: state.selectedId, text }),
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok || !data.ok) {
-      throw new Error(data.detail || "合成失敗");
-    }
-    showResult(els.ttsResult, els.ttsResultWrap, "ttsResultUrl", data.audioBase64);
-    setStatus("合成完成");
-  } catch (error) {
-    setStatus(error?.message || "合成失敗", "error");
-  } finally {
-    state.busy = false;
-    refreshButtons();
-  }
-}
-
-function showResult(audioEl, wrapEl, urlKey, audioBase64) {
-  if (state[urlKey]) {
-    URL.revokeObjectURL(state[urlKey]);
-  }
-  const blob = base64ToBlob(audioBase64, "audio/wav");
-  state[urlKey] = URL.createObjectURL(blob);
-  audioEl.src = state[urlKey];
-  wrapEl.hidden = false;
-}
-
-function base64ToBlob(base64, type) {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
-  }
-  return new Blob([bytes], { type });
-}
-
-function downloadUrl(url, name) {
-  if (!url) {
-    return;
-  }
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = name;
-  link.click();
-}
-
-// --------------------------------------------------------------------------- //
-// library / favorites
-// --------------------------------------------------------------------------- //
 
 async function refreshVoices(selectId) {
   try {
@@ -546,24 +481,14 @@ async function refreshVoices(selectId) {
   } else if (!state.voices.some((voice) => voice.id === state.selectedId)) {
     state.selectedId = state.voices[0]?.id || "";
   }
-  renderTargetSelect();
   renderVoiceList();
+  renderTargetName();
   refreshButtons();
 }
 
-function renderTargetSelect() {
-  els.target.innerHTML = "";
-  state.voices.forEach((voice) => {
-    const option = document.createElement("option");
-    option.value = voice.id;
-    option.textContent = voice.favorite ? `★ ${voice.name}` : voice.name;
-    if (voice.id === state.selectedId) {
-      option.selected = true;
-    }
-    els.target.appendChild(option);
-  });
-  els.target.disabled = state.voices.length === 0;
-  els.empty.hidden = state.voices.length !== 0;
+function renderTargetName() {
+  const selected = state.voices.find((voice) => voice.id === state.selectedId);
+  els.targetName.textContent = selected ? selected.name : "尚未選擇";
 }
 
 function renderVoiceList() {
@@ -571,6 +496,7 @@ function renderVoiceList() {
   state.voices.forEach((voice) => {
     els.list.appendChild(renderVoiceItem(voice));
   });
+  els.empty.hidden = state.voices.length !== 0;
 }
 
 function renderVoiceItem(voice) {
@@ -586,7 +512,7 @@ function renderVoiceItem(voice) {
   pick.name = "voice-pick";
   pick.className = "voice-pick";
   pick.checked = voice.id === state.selectedId;
-  pick.setAttribute("aria-label", `選為目標聲音:${voice.name}`);
+  pick.setAttribute("aria-label", `設為目標聲音:${voice.name}`);
   pick.addEventListener("change", () => selectVoice(voice.id));
 
   const body = document.createElement("div");
@@ -612,7 +538,6 @@ function renderVoiceItem(voice) {
   star.title = voice.favorite ? "取消我的最愛" : "加入我的最愛";
   star.setAttribute("aria-label", star.title);
   star.addEventListener("click", () => toggleFavorite(voice));
-
   actions.appendChild(star);
 
   if (voice.hasSample) {
@@ -620,7 +545,7 @@ function renderVoiceItem(voice) {
     play.type = "button";
     play.className = "icon-btn play";
     play.textContent = "▶";
-    play.title = "試聽 A 的聲音";
+    play.title = "試聽這個聲音";
     play.setAttribute("aria-label", play.title);
     play.addEventListener("click", () => playSample(voice.id));
     actions.appendChild(play);
@@ -641,8 +566,8 @@ function renderVoiceItem(voice) {
 
 function selectVoice(voiceId) {
   state.selectedId = voiceId;
-  els.target.value = voiceId;
   renderVoiceList();
+  renderTargetName();
   refreshButtons();
 }
 
@@ -709,15 +634,147 @@ function playSample(voiceId) {
 }
 
 // --------------------------------------------------------------------------- //
+// convert (your voice -> target) and text -> target
+// --------------------------------------------------------------------------- //
+
+async function convertFromBlob(blob) {
+  if (!state.selectedId) {
+    setStatus("請先在聲音庫選擇或新增一個目標聲音", "error");
+    return;
+  }
+  await runExclusive("轉換聲音中…", async (signal) => {
+    await waitForModelReady();
+    setStatus("轉換中…", "live");
+    const audioBase64 = await blobToBase64(blob);
+    const response = await fetch("/api/voice/convert", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ voiceId: state.selectedId, audioBase64 }),
+      signal,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) {
+      throw new Error(data.detail || "轉換失敗");
+    }
+    showResult("cv", data.audioBase64);
+    setStatus("轉換完成,可試聽後下載或遠端儲存");
+  });
+}
+
+async function runTts() {
+  const text = els.ttsText.value.trim();
+  if (!text) {
+    setStatus("請先輸入文字", "error");
+    return;
+  }
+  if (!state.selectedId) {
+    setStatus("請先在聲音庫選擇或新增一個目標聲音", "error");
+    return;
+  }
+  await runExclusive("合成語音中…", async (signal) => {
+    await waitForModelReady();
+    setStatus("合成語音中…", "live");
+    const response = await fetch("/api/voice/tts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ voiceId: state.selectedId, text }),
+      signal,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) {
+      throw new Error(data.detail || "合成失敗");
+    }
+    showResult("tts", data.audioBase64);
+    setStatus("合成完成,可試聽後下載或遠端儲存");
+  });
+}
+
+function showResult(kind, audioBase64) {
+  const audioEl = kind === "cv" ? els.cvResult : els.ttsResult;
+  const wrapEl = kind === "cv" ? els.cvResultWrap : els.ttsResultWrap;
+  const urlKey = kind === "cv" ? "cvResultUrl" : "ttsResultUrl";
+  const b64Key = kind === "cv" ? "cvResultB64" : "ttsResultB64";
+  if (state[urlKey]) {
+    URL.revokeObjectURL(state[urlKey]);
+  }
+  const blob = base64ToBlob(audioBase64, "audio/wav");
+  state[urlKey] = URL.createObjectURL(blob);
+  state[b64Key] = audioBase64;
+  audioEl.src = state[urlKey];
+  audioEl.load();
+  wrapEl.hidden = false;
+  // Make sure the freshly revealed player is actually on screen so the user can
+  // listen before deciding to download / save.
+  try {
+    wrapEl.scrollIntoView({ behavior: "smooth", block: "center" });
+  } catch {
+    /* scrollIntoView options unsupported — ignore */
+  }
+}
+
+async function saveOutput(kind) {
+  const audioBase64 = kind === "convert" ? state.cvResultB64 : state.ttsResultB64;
+  if (!audioBase64) {
+    return;
+  }
+  const button = kind === "convert" ? els.cvSave : els.ttsSave;
+  button.disabled = true;
+  setStatus("遠端儲存中…", "live");
+  try {
+    const body = { kind, audioBase64, voiceId: state.selectedId };
+    if (kind === "tts") {
+      body.text = els.ttsText.value.trim();
+    }
+    const response = await fetch("/api/voice/outputs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) {
+      throw new Error(data.detail || "遠端儲存失敗");
+    }
+    setStatus(`已遠端儲存:${data.filename}`);
+  } catch (error) {
+    setStatus(error?.message || "遠端儲存失敗", "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function base64ToBlob(base64, type) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return new Blob([bytes], { type });
+}
+
+function downloadUrl(url, name) {
+  if (!url) {
+    return;
+  }
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  link.click();
+}
+
+// --------------------------------------------------------------------------- //
 // shared helpers
 // --------------------------------------------------------------------------- //
 
 function refreshButtons() {
-  const ready = state.modelReady && !state.busy;
-  const hasTarget = Boolean(state.selectedId);
-  els.vcSave.disabled = !(ready && state.vcBlob && els.vcName.value.trim());
-  els.cvRun.disabled = !(ready && state.cvBlob && hasTarget);
-  els.ttsRun.disabled = !(ready && els.ttsText.value.trim() && hasTarget);
+  const idle = !state.busy;
+  // The library + convert buttons gate on the page not being busy; TTS also
+  // needs text and a target. Model readiness is awaited inside each job, so the
+  // buttons stay usable and trigger a load on demand.
+  els.vcRecord.disabled = !idle;
+  els.vcUpload.disabled = !idle;
+  els.cvRecord.disabled = !idle;
+  els.cvUpload.disabled = !idle;
+  els.ttsRun.disabled = !(idle && els.ttsText.value.trim() && state.selectedId);
 }
 
 function setStatus(text, mode = "") {
@@ -747,17 +804,19 @@ async function handleUpload(file, onDone) {
     return;
   }
   setStatus("解碼音檔中…");
+  let blob;
   try {
     const decoded = await decodeFileToInt16(file, VOICE_SAMPLE_RATE);
     if (!decoded.pcm.length) {
       setStatus("音檔沒有聲音", "error");
       return;
     }
-    onDone(int16ToWavBlob(decoded.pcm, decoded.sampleRate));
-    setStatus("已載入音檔");
+    blob = int16ToWavBlob(decoded.pcm, decoded.sampleRate);
   } catch (error) {
     setStatus(error?.message || "音檔解碼失敗", "error");
+    return;
   }
+  await onDone(blob, file.name);
 }
 
 // --------------------------------------------------------------------------- //
@@ -765,45 +824,35 @@ async function handleUpload(file, onDone) {
 // --------------------------------------------------------------------------- //
 
 els.vcRecord.addEventListener("click", () =>
-  toggleRecording(els.vcRecord, "● 開始錄音", (blob) => {
-    setVcAudio(blob);
-    suggestVcName();
-  }),
+  toggleRecording(els.vcRecord, (blob) => addVoiceFromBlob(blob)),
 );
 els.vcUpload.addEventListener("click", () => els.vcFile.click());
 els.vcFile.addEventListener("change", (event) => {
   const file = event.target.files?.[0];
   event.target.value = "";
-  void handleUpload(file, (blob) => {
-    setVcAudio(blob);
-    suggestVcName(file?.name);
-  });
+  void handleUpload(file, (blob, name) => addVoiceFromBlob(blob, name));
 });
-els.vcName.addEventListener("input", refreshButtons);
-els.vcSave.addEventListener("click", saveVoice);
 
 els.cvRecord.addEventListener("click", () =>
-  toggleRecording(els.cvRecord, "● 錄製 B 的聲音", setCvAudio),
+  toggleRecording(els.cvRecord, (blob) => convertFromBlob(blob)),
 );
 els.cvUpload.addEventListener("click", () => els.cvFile.click());
 els.cvFile.addEventListener("change", (event) => {
   const file = event.target.files?.[0];
   event.target.value = "";
-  void handleUpload(file, setCvAudio);
+  void handleUpload(file, (blob) => convertFromBlob(blob));
 });
-els.cvRun.addEventListener("click", runConvert);
 els.cvDownload.addEventListener("click", () =>
   downloadUrl(state.cvResultUrl, `breeze-voice-convert-${Date.now()}.wav`),
 );
+els.cvSave.addEventListener("click", () => saveOutput("convert"));
 
 els.ttsText.addEventListener("input", refreshButtons);
 els.ttsRun.addEventListener("click", runTts);
 els.ttsDownload.addEventListener("click", () =>
   downloadUrl(state.ttsResultUrl, `breeze-voice-tts-${Date.now()}.wav`),
 );
-
-els.target.addEventListener("change", () => selectVoice(els.target.value));
-els.refresh.addEventListener("click", () => refreshVoices(state.selectedId));
+els.ttsSave.addEventListener("click", () => saveOutput("tts"));
 
 // Open the voice page directly when deep-linked (?page=voice / #voice), which is
 // how the phone PWA shortcut and a reloaded voice tab land here.

@@ -63,6 +63,8 @@ class Settings:
     remote_storage_dir: str = "remote_transcripts"
     voice_provider: str = "mock"
     voice_storage_dir: str = "voices"
+    voice_output_dir: str = "voice_outputs"
+    voice_os_tts: bool = True
     voice_sample_rate: int = 16_000
     voice_language: str = "zh"
     voice_checkpoints_dir: str = "checkpoints_v2"
@@ -104,6 +106,8 @@ def get_settings() -> Settings:
             {"mock", "openvoice"},
         ),
         voice_storage_dir=os.getenv("BREEZE_VOICE_STORAGE_DIR", "voices"),
+        voice_output_dir=os.getenv("BREEZE_VOICE_OUTPUT_DIR", "voice_outputs"),
+        voice_os_tts=_bool_env("BREEZE_VOICE_OS_TTS", True),
         voice_sample_rate=_int_env("BREEZE_VOICE_SAMPLE_RATE", 16_000),
         voice_language=os.getenv("BREEZE_VOICE_LANGUAGE", "zh"),
         voice_checkpoints_dir=os.getenv("BREEZE_VOICE_CHECKPOINTS_DIR", "checkpoints_v2"),
