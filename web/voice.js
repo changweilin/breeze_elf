@@ -83,6 +83,14 @@ function showPage(page) {
       tab.removeAttribute("aria-current");
     }
   });
+  // Keep the URL in sync so the voice page is deep-linkable (e.g. the PWA
+  // "變聲" home-screen shortcut opens ?page=voice directly) and survives reload.
+  try {
+    const url = page === "voice" ? "?page=voice" : location.pathname;
+    history.replaceState(null, "", url);
+  } catch {
+    /* history may be unavailable in some embedded contexts */
+  }
   document.dispatchEvent(new CustomEvent("breeze:page", { detail: { page } }));
 }
 
@@ -348,6 +356,20 @@ function setVcAudio(blob) {
   state.vcUrl = URL.createObjectURL(blob);
   els.vcPreview.src = state.vcUrl;
   els.vcPreview.hidden = false;
+  refreshButtons();
+}
+
+// Prefill a name after upload/record so the 儲存 button isn't silently disabled
+// just because the name field is blank. The user can still edit it.
+function suggestVcName(fileName) {
+  if (els.vcName.value.trim()) {
+    return;
+  }
+  let name = "";
+  if (fileName) {
+    name = fileName.replace(/\.[^.]+$/, "").trim();
+  }
+  els.vcName.value = name || `我的聲音 ${state.voices.length + 1}`;
   refreshButtons();
 }
 
@@ -743,13 +765,19 @@ async function handleUpload(file, onDone) {
 // --------------------------------------------------------------------------- //
 
 els.vcRecord.addEventListener("click", () =>
-  toggleRecording(els.vcRecord, "● 開始錄音", setVcAudio),
+  toggleRecording(els.vcRecord, "● 開始錄音", (blob) => {
+    setVcAudio(blob);
+    suggestVcName();
+  }),
 );
 els.vcUpload.addEventListener("click", () => els.vcFile.click());
 els.vcFile.addEventListener("change", (event) => {
   const file = event.target.files?.[0];
   event.target.value = "";
-  void handleUpload(file, setVcAudio);
+  void handleUpload(file, (blob) => {
+    setVcAudio(blob);
+    suggestVcName(file?.name);
+  });
 });
 els.vcName.addEventListener("input", refreshButtons);
 els.vcSave.addEventListener("click", saveVoice);
@@ -777,8 +805,10 @@ els.ttsDownload.addEventListener("click", () =>
 els.target.addEventListener("change", () => selectVoice(els.target.value));
 els.refresh.addEventListener("click", () => refreshVoices(state.selectedId));
 
-// If the page is loaded directly on the voice tab (e.g. via a deep link that
-// pre-set the body attribute), kick off initialization.
-if (document.body.dataset.page === "voice") {
-  void initVoicePage();
+// Open the voice page directly when deep-linked (?page=voice / #voice), which is
+// how the phone PWA shortcut and a reloaded voice tab land here.
+const requestedPage =
+  new URLSearchParams(location.search).get("page") || location.hash.replace("#", "");
+if (requestedPage === "voice" || document.body.dataset.page === "voice") {
+  showPage("voice");
 }

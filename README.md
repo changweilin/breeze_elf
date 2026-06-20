@@ -67,14 +67,35 @@ silent hang.
 
 By default `BREEZE_VOICE_PROVIDER=mock` runs a dependency-free DSP transform
 (phase-vocoder pitch shift toward A's pitch, plus a simple text-to-buzz) so the whole
-flow works without any downloads. For real speaker cloning set
-`BREEZE_VOICE_PROVIDER=openvoice` and install OpenVoice v2 + MeloTTS:
+flow works without any downloads.
+
+### Real cloning (OpenVoice v2)
+
+Set `BREEZE_VOICE_PROVIDER=openvoice`. The engine needs **torch with CUDA** in the
+same interpreter that runs the server. OpenVoice pins ancient `numpy`/`faster-whisper`
+in its metadata, so install it **without deps** and add only the light text helpers it
+imports at load time:
 
 ```powershell
-uv pip install git+https://github.com/myshell-ai/OpenVoice.git git+https://github.com/myshell-ai/MeloTTS.git
-# download the OpenVoice v2 checkpoints into checkpoints_v2/ (see the OpenVoice repo),
-# i.e. checkpoints_v2/converter/{config.json,checkpoint.pth} and base_speakers/ses/*.pth
+pip install --no-deps git+https://github.com/myshell-ai/OpenVoice.git
+pip install inflect unidecode eng_to_ipa pypinyin cn2an jieba
 ```
+
+Then download the v2 **converter** checkpoint into `checkpoints_v2/converter/`:
+
+```powershell
+# checkpoints_v2/converter/{config.json,checkpoint.pth}  (~131 MB)
+curl -L -o checkpoints_v2/converter/config.json   https://huggingface.co/myshell-ai/OpenVoiceV2/resolve/main/converter/config.json
+curl -L -o checkpoints_v2/converter/checkpoint.pth https://huggingface.co/myshell-ai/OpenVoiceV2/resolve/main/converter/checkpoint.pth
+```
+
+That is enough for **B → A** re-voicing and saving A's voice features: Breeze Elf
+bypasses `openvoice.se_extractor` (which would drag in `faster_whisper` +
+`whisper_timestamped`) and stubs out `wavmark`, so only the converter is required.
+
+**文字 → A (text-to-speech)** additionally needs [MeloTTS](https://github.com/myshell-ai/MeloTTS)
+plus the base-speaker embeddings under `checkpoints_v2/base_speakers/ses/`. Without it,
+B → A still works and synthesis returns a clear "needs MeloTTS" error.
 
 Saved voices store an engine-defined embedding blob, the reference `.wav`, and a JSON
 metadata sidecar. The mock and OpenVoice embeddings are not interchangeable, so a voice

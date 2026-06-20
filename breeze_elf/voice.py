@@ -151,12 +151,15 @@ class MockVoiceEngine:
 
 
 class OpenVoiceEngine:
-    """Real speaker cloning via OpenVoice v2 tone-color conversion + MeloTTS.
+    """Real speaker cloning via OpenVoice v2 tone-color conversion.
 
-    Heavy dependencies (``torch``, ``openvoice``, ``melo``) and the multi-GB
-    checkpoints are loaded lazily on the first :meth:`load`. When they are
-    missing a clear ``RuntimeError`` explains how to set them up; the server
-    keeps running on the mock provider until then.
+    The tone-color converter (``torch`` + the v2 ``converter`` checkpoint) does
+    the B→A re-voicing and A's embedding extraction. To keep the dependency
+    footprint sane we bypass ``openvoice.se_extractor`` (which hard-imports
+    ``faster_whisper`` + ``whisper_timestamped``) and call ``extract_se``
+    directly, and we stub out ``wavmark`` so no output watermark model is
+    needed. Text→A uses MeloTTS, loaded lazily on first use; if MeloTTS is not
+    installed, conversion still works and synthesis raises a clear error.
     """
 
     backend = "openvoice"
@@ -176,7 +179,6 @@ class OpenVoiceEngine:
         self._tts = None
         self._source_se = None
         self._speaker_id = None
-        self._se_extractor = None
         self._torch = None
         self._sf = None
         self._lock = threading.Lock()
@@ -195,21 +197,25 @@ class OpenVoiceEngine:
             try:
                 import soundfile as sf
                 import torch
-                from melo.api import TTS
-                from openvoice import se_extractor
+            except Exception as exc:  # pragma: no cover - depends on optional extras
+                raise RuntimeError(
+                    "OpenVoice 需要 torch 與 soundfile,請先安裝,或保持 "
+                    "BREEZE_VOICE_PROVIDER=mock。"
+                ) from exc
+
+            _install_wavmark_stub()
+            try:
                 from openvoice.api import ToneColorConverter
             except Exception as exc:  # pragma: no cover - depends on optional extras
                 raise RuntimeError(
-                    "OpenVoice v2 is not installed. Install it with "
-                    "`uv pip install git+https://github.com/myshell-ai/OpenVoice.git "
-                    "git+https://github.com/myshell-ai/MeloTTS.git` and download the "
-                    "v2 checkpoints into BREEZE_VOICE_CHECKPOINTS_DIR, or keep "
-                    "BREEZE_VOICE_PROVIDER=mock."
+                    "OpenVoice 未安裝。安裝方式:`pip install --no-deps "
+                    "git+https://github.com/myshell-ai/OpenVoice.git` 並安裝 "
+                    "inflect unidecode eng_to_ipa pypinyin cn2an jieba,"
+                    "或保持 BREEZE_VOICE_PROVIDER=mock。"
                 ) from exc
 
             self._torch = torch
             self._sf = sf
-            self._se_extractor = se_extractor
             device = self._resolve_device(torch)
             self.device = device
 
@@ -218,39 +224,23 @@ class OpenVoiceEngine:
             checkpoint_path = converter_dir / "checkpoint.pth"
             if not config_path.exists() or not checkpoint_path.exists():
                 raise RuntimeError(
-                    f"OpenVoice converter checkpoints missing under {converter_dir}. "
-                    "Download the v2 checkpoints (see README)."
+                    f"找不到 OpenVoice converter checkpoint ({converter_dir})。"
+                    "請下載 v2 checkpoints(見 README)。"
                 )
 
-            _report(progress, 0.2, "載入音色轉換器")
+            _report(progress, 0.3, "載入音色轉換器")
             converter = ToneColorConverter(str(config_path), device=device)
+            # No watermarking: we stubbed wavmark, so drop the model entirely.
+            converter.watermark_model = None
+            _report(progress, 0.6, "載入模型權重")
             converter.load_ckpt(str(checkpoint_path))
             self._converter = converter
-
-            _report(progress, 0.6, "載入語音合成 (MeloTTS)")
-            melo_language = _melo_language(self.language)
-            tts = TTS(language=melo_language, device=device)
-            speaker_ids = tts.hps.data.spk2id
-            self._speaker_id = next(iter(speaker_ids.values()))
-            speaker_key = next(iter(speaker_ids.keys())).lower().replace("_", "-")
-            self._tts = tts
-
-            _report(progress, 0.85, "載入基礎音色")
-            source_se_path = self.checkpoints_dir / "base_speakers" / "ses" / f"{speaker_key}.pth"
-            if not source_se_path.exists():
-                source_se_path = (
-                    self.checkpoints_dir / "base_speakers" / "ses" / f"{melo_language.lower()}.pth"
-                )
-            self._source_se = torch.load(str(source_se_path), map_location=device)
-
             _report(progress, 1.0, "完成")
 
     def extract_embedding(self, samples: np.ndarray, sample_rate: int) -> bytes:
         self.load()
         with _temp_wav(samples, sample_rate) as src_path:
-            target_se, _ = self._se_extractor.get_se(
-                str(src_path), self._converter, vad=True
-            )
+            target_se = self._converter.extract_se([str(src_path)])
         buffer = io.BytesIO()
         self._torch.save(target_se, buffer)
         return buffer.getvalue()
@@ -259,18 +249,20 @@ class OpenVoiceEngine:
         self.load()
         target_se = self._torch.load(io.BytesIO(embedding), map_location=self.device)
         with _temp_wav(samples, sample_rate) as src_path, _temp_wav_path() as out_path:
-            source_se, _ = self._se_extractor.get_se(str(src_path), self._converter, vad=True)
+            source_se = self._converter.extract_se([str(src_path)])
             self._converter.convert(
                 audio_src_path=str(src_path),
                 src_se=source_se,
                 tgt_se=target_se,
                 output_path=str(out_path),
+                message="@BreezeElf",
             )
             data, out_rate = self._sf.read(str(out_path), dtype="float32", always_2d=False)
         return VoiceAudio(samples=_as_float32_mono(data), sample_rate=int(out_rate))
 
     def synthesize(self, text: str, language: str, embedding: bytes) -> VoiceAudio:
         self.load()
+        self._load_tts()
         target_se = self._torch.load(io.BytesIO(embedding), map_location=self.device)
         with _temp_wav_path() as base_path, _temp_wav_path() as out_path:
             self._tts.tts_to_file(text, self._speaker_id, str(base_path), speed=1.0)
@@ -279,9 +271,38 @@ class OpenVoiceEngine:
                 src_se=self._source_se,
                 tgt_se=target_se,
                 output_path=str(out_path),
+                message="@BreezeElf",
             )
             data, out_rate = self._sf.read(str(out_path), dtype="float32", always_2d=False)
         return VoiceAudio(samples=_as_float32_mono(data), sample_rate=int(out_rate))
+
+    def _load_tts(self) -> None:
+        if self._tts is not None:
+            return
+        try:
+            from melo.api import TTS
+        except Exception as exc:  # pragma: no cover - optional extra
+            raise RuntimeError(
+                "文字轉語音需安裝 MeloTTS(`pip install git+https://github.com/myshell-ai/"
+                "MeloTTS.git` 並下載 base_speakers/ses)。B→A 變聲不需要它。"
+            ) from exc
+
+        melo_language = _melo_language(self.language)
+        tts = TTS(language=melo_language, device=self.device)
+        speaker_ids = tts.hps.data.spk2id
+        self._speaker_id = next(iter(speaker_ids.values()))
+        speaker_key = next(iter(speaker_ids.keys())).lower().replace("_", "-")
+        source_se_path = self.checkpoints_dir / "base_speakers" / "ses" / f"{speaker_key}.pth"
+        if not source_se_path.exists():
+            source_se_path = (
+                self.checkpoints_dir / "base_speakers" / "ses" / f"{melo_language.lower()}.pth"
+            )
+        if not source_se_path.exists():
+            raise RuntimeError(
+                f"找不到 MeloTTS 基礎音色 ({source_se_path})。請下載 base_speakers/ses。"
+            )
+        self._source_se = self._torch.load(str(source_se_path), map_location=self.device)
+        self._tts = tts
 
     def _resolve_device(self, torch) -> str:
         preference = self.device_preference.strip().lower()
@@ -317,6 +338,29 @@ def build_voice_from_env(settings: Settings | None = None) -> VoiceEngine:
 def _report(progress: ProgressCallback | None, fraction: float, label: str) -> None:
     if progress is not None:
         progress(max(0.0, min(1.0, fraction)), label)
+
+
+def _install_wavmark_stub() -> None:
+    """Inject a no-op ``wavmark`` module.
+
+    ``ToneColorConverter.__init__`` imports ``wavmark`` and loads a watermark
+    model unless told otherwise, but it forwards ``enable_watermark`` to a base
+    ``__init__`` that rejects it. Stubbing the module lets the converter build;
+    we then set ``watermark_model = None`` so output is never watermarked.
+    """
+    import sys
+    import types
+
+    if "wavmark" in sys.modules:
+        return
+
+    class _NoWatermark:
+        def to(self, *args, **kwargs):
+            return self
+
+    stub = types.ModuleType("wavmark")
+    stub.load_model = lambda *args, **kwargs: _NoWatermark()
+    sys.modules["wavmark"] = stub
 
 
 def _as_float32_mono(samples: np.ndarray) -> np.ndarray:
