@@ -7,11 +7,16 @@
 
 import {
   VOICE_SAMPLE_RATE,
+  base64ToBytes,
   blobToBase64,
   decodeFileToInt16,
+  filesToZipBlob,
   int16ToWavBlob,
   pcm16BytesToWavBlob,
-} from "./audio-utils.js";
+  // Versioned so a cached older audio-utils.js (without base64ToBytes /
+  // filesToZipBlob) can't break this whole module — a failed named import would
+  // stop voice.js from running, which also owns the page tab navigation.
+} from "./audio-utils.js?v=2";
 
 const els = {
   page: document.querySelector("#page-voice"),
@@ -39,16 +44,33 @@ const els = {
   cvUpload: document.querySelector("#cv-upload"),
   cvFile: document.querySelector("#cv-file"),
   cvResultWrap: document.querySelector("#cv-result-wrap"),
+  cvSource: document.querySelector("#cv-source"),
   cvResult: document.querySelector("#cv-result"),
+  cvSrcDownload: document.querySelector("#cv-src-download"),
+  cvSrcSave: document.querySelector("#cv-src-save"),
   cvDownload: document.querySelector("#cv-download"),
   cvSave: document.querySelector("#cv-save"),
+  cvBundleDownload: document.querySelector("#cv-bundle-download"),
+  cvBundleSave: document.querySelector("#cv-bundle-save"),
   // text -> target voice
+  ttsUpload: document.querySelector("#tts-upload"),
+  ttsFile: document.querySelector("#tts-file"),
   ttsText: document.querySelector("#tts-text"),
   ttsRun: document.querySelector("#tts-run"),
   ttsResultWrap: document.querySelector("#tts-result-wrap"),
   ttsResult: document.querySelector("#tts-result"),
   ttsDownload: document.querySelector("#tts-download"),
   ttsSave: document.querySelector("#tts-save"),
+  // 簡譜 singing
+  singUpload: document.querySelector("#sing-upload"),
+  singFile: document.querySelector("#sing-file"),
+  singScore: document.querySelector("#sing-score"),
+  singTonic: document.querySelector("#sing-tonic"),
+  singRun: document.querySelector("#sing-run"),
+  singResultWrap: document.querySelector("#sing-result-wrap"),
+  singResult: document.querySelector("#sing-result"),
+  singDownload: document.querySelector("#sing-download"),
+  singSave: document.querySelector("#sing-save"),
   // library
   list: document.querySelector("#voice-list"),
 };
@@ -62,10 +84,14 @@ const state = {
   selectedId: "",
   busy: false,
   abort: null,
+  cvSourceB64: "",
+  cvSourceUrl: "",
   cvResultB64: "",
   cvResultUrl: "",
   ttsResultB64: "",
   ttsResultUrl: "",
+  singResultB64: "",
+  singResultUrl: "",
 };
 
 // --------------------------------------------------------------------------- //
@@ -111,8 +137,33 @@ document.addEventListener("breeze:page", (event) => {
   if (event.detail?.page === "voice") {
     void initVoicePage();
   } else {
+    stopSamplePlayback();
+    closeAllPlayerMenus();
     void stopActiveRecording("切換頁面");
   }
+});
+
+// Sub-tabs inside the voice page: 聲音轉換 / 文字轉語音 / 簡譜唱歌 share the one
+// 聲音庫 above them, so only the active operation panel is shown at a time.
+const subtabs = Array.from(document.querySelectorAll("#page-voice .subtab"));
+
+function showVoicePanel(panel) {
+  closeAllPlayerMenus();
+  document.querySelectorAll("#page-voice .vpanel").forEach((element) => {
+    element.hidden = element.id !== `vpanel-${panel}`;
+  });
+  subtabs.forEach((tab) => {
+    tab.setAttribute("aria-selected", String(tab.dataset.panel === panel));
+  });
+}
+
+subtabs.forEach((tab) => {
+  tab.addEventListener("click", () => {
+    if (state.busy) {
+      return;
+    }
+    showVoicePanel(tab.dataset.panel);
+  });
 });
 
 // --------------------------------------------------------------------------- //
@@ -488,10 +539,19 @@ async function refreshVoices(selectId) {
 
 function renderTargetName() {
   const selected = state.voices.find((voice) => voice.id === state.selectedId);
-  els.targetName.textContent = selected ? selected.name : "尚未選擇";
+  const label = selected ? selected.name : "尚未選擇";
+  els.targetName.textContent = label;
+  // Echo the target inside each operation panel so it is always clear which
+  // voice a convert / TTS / sing will use, even when the 聲音庫 is scrolled away.
+  document.querySelectorAll("#page-voice [data-role='panel-target']").forEach((node) => {
+    node.textContent = label;
+  });
 }
 
 function renderVoiceList() {
+  // Re-rendering recreates every row, so any in-flight preview button reference
+  // would dangle — stop playback first so the ⏸ state never gets stranded.
+  stopSamplePlayback();
   els.list.innerHTML = "";
   state.voices.forEach((voice) => {
     els.list.appendChild(renderVoiceItem(voice));
@@ -506,6 +566,11 @@ function renderVoiceItem(voice) {
   if (voice.id === state.selectedId) {
     item.classList.add("selected");
   }
+  // The whole row is the target picker: tapping anywhere that is not an action
+  // button selects this voice. This is the reliable way to choose the target —
+  // the small radio alone was easy to miss, so conversions could run against the
+  // wrong (previously selected) voice.
+  item.addEventListener("click", () => selectVoice(voice.id));
 
   const pick = document.createElement("input");
   pick.type = "radio";
@@ -513,6 +578,7 @@ function renderVoiceItem(voice) {
   pick.className = "voice-pick";
   pick.checked = voice.id === state.selectedId;
   pick.setAttribute("aria-label", `設為目標聲音:${voice.name}`);
+  pick.addEventListener("click", (event) => event.stopPropagation());
   pick.addEventListener("change", () => selectVoice(voice.id));
 
   const body = document.createElement("div");
@@ -520,9 +586,6 @@ function renderVoiceItem(voice) {
   const name = document.createElement("div");
   name.className = "voice-item-name";
   name.textContent = voice.name;
-  name.title = "點擊重新命名";
-  name.style.cursor = "pointer";
-  name.addEventListener("click", () => renameVoice(voice));
   const meta = document.createElement("div");
   meta.className = "voice-item-meta";
   meta.textContent = `${formatDuration(voice.durationSeconds)} · ${formatDate(voice.createdAt)}`;
@@ -531,13 +594,18 @@ function renderVoiceItem(voice) {
   const actions = document.createElement("div");
   actions.className = "voice-item-actions";
 
+  const stopRowSelect = (handler) => (event) => {
+    event.stopPropagation();
+    handler();
+  };
+
   const star = document.createElement("button");
   star.type = "button";
   star.className = `icon-btn star${voice.favorite ? " on" : ""}`;
   star.textContent = voice.favorite ? "★" : "☆";
   star.title = voice.favorite ? "取消我的最愛" : "加入我的最愛";
   star.setAttribute("aria-label", star.title);
-  star.addEventListener("click", () => toggleFavorite(voice));
+  star.addEventListener("click", stopRowSelect(() => toggleFavorite(voice)));
   actions.appendChild(star);
 
   if (voice.hasSample) {
@@ -547,9 +615,18 @@ function renderVoiceItem(voice) {
     play.textContent = "▶";
     play.title = "試聽這個聲音";
     play.setAttribute("aria-label", play.title);
-    play.addEventListener("click", () => playSample(voice.id));
+    play.addEventListener("click", stopRowSelect(() => toggleSample(voice.id, play)));
     actions.appendChild(play);
   }
+
+  const edit = document.createElement("button");
+  edit.type = "button";
+  edit.className = "icon-btn edit";
+  edit.textContent = "✎";
+  edit.title = "重新命名";
+  edit.setAttribute("aria-label", edit.title);
+  edit.addEventListener("click", stopRowSelect(() => renameVoice(voice)));
+  actions.appendChild(edit);
 
   const del = document.createElement("button");
   del.type = "button";
@@ -557,7 +634,7 @@ function renderVoiceItem(voice) {
   del.textContent = "🗑";
   del.title = "刪除這個聲音";
   del.setAttribute("aria-label", del.title);
-  del.addEventListener("click", () => deleteVoice(voice));
+  del.addEventListener("click", stopRowSelect(() => deleteVoice(voice)));
   actions.appendChild(del);
 
   item.append(pick, body, actions);
@@ -624,13 +701,63 @@ async function deleteVoice(voice) {
 }
 
 let samplePlayer = null;
+let samplePlayButton = null;
 
-function playSample(voiceId) {
+// Reflect the player state on its button: ▶ when idle/paused, ⏸ while playing.
+function paintSampleButton(playing) {
+  if (!samplePlayButton) {
+    return;
+  }
+  samplePlayButton.textContent = playing ? "⏸" : "▶";
+  samplePlayButton.classList.toggle("playing", playing);
+  samplePlayButton.title = playing ? "暫停試聽" : "試聽這個聲音";
+  samplePlayButton.setAttribute("aria-label", samplePlayButton.title);
+}
+
+function stopSamplePlayback() {
   if (samplePlayer) {
     samplePlayer.pause();
+    samplePlayer = null;
   }
+  paintSampleButton(false);
+  samplePlayButton = null;
+}
+
+// Toggle a 聲音庫 preview. Clicking the active clip's button pauses/resumes it;
+// clicking a different voice switches to that clip. The button shows ⏸ while
+// playing so it doubles as a pause control.
+function toggleSample(voiceId, button) {
+  if (samplePlayer && samplePlayButton === button) {
+    if (samplePlayer.paused) {
+      void samplePlayer.play().catch(() => setStatus("無法播放試聽", "error"));
+    } else {
+      samplePlayer.pause();
+    }
+    return;
+  }
+
+  stopSamplePlayback();
   samplePlayer = new Audio(`/api/voices/${encodeURIComponent(voiceId)}/sample`);
-  samplePlayer.play().catch(() => setStatus("無法播放試聽", "error"));
+  samplePlayButton = button;
+  samplePlayer.addEventListener("play", () => {
+    if (samplePlayButton === button) {
+      paintSampleButton(true);
+    }
+  });
+  samplePlayer.addEventListener("pause", () => {
+    if (samplePlayButton === button) {
+      paintSampleButton(false);
+    }
+  });
+  samplePlayer.addEventListener("ended", () => {
+    if (samplePlayButton === button) {
+      stopSamplePlayback();
+    }
+  });
+  samplePlayer.play().catch(() => {
+    setStatus("無法播放試聽", "error");
+    stopSamplePlayback();
+  });
 }
 
 // --------------------------------------------------------------------------- //
@@ -656,8 +783,8 @@ async function convertFromBlob(blob) {
     if (!response.ok || !data.ok) {
       throw new Error(data.detail || "轉換失敗");
     }
-    showResult("cv", data.audioBase64);
-    setStatus("轉換完成,可試聽後下載或遠端儲存");
+    showConvertResult(audioBase64, data.audioBase64);
+    setStatus("轉換完成,可試聽後打包下載或打包遠端儲存");
   });
 }
 
@@ -689,11 +816,140 @@ async function runTts() {
   });
 }
 
+// --------------------------------------------------------------------------- //
+// 簡譜 singing
+// --------------------------------------------------------------------------- //
+
+async function loadTextFile(file) {
+  if (!file) {
+    return;
+  }
+  try {
+    const text = await file.text();
+    els.ttsText.value = text.slice(0, 2000);
+    refreshButtons();
+    setStatus(`已載入文字檔「${file.name}」`);
+  } catch (error) {
+    setStatus(error?.message || "讀取文字檔失敗", "error");
+  }
+}
+
+// Turn a transcript JSON (the 逐字稿 download/remote-save bundle) into the
+// editable "字 簡譜 秒" score. 主音 is left on 自動 so the song is sung at the
+// target voice's pitch; the original key is shown only as a placeholder hint.
+async function loadTranscriptFile(file) {
+  if (!file) {
+    return;
+  }
+  let doc;
+  try {
+    doc = JSON.parse(await file.text());
+  } catch {
+    setStatus("不是有效的逐字稿 JSON", "error");
+    return;
+  }
+  // Accept the downloaded / remote-saved transcript ({blocks}), the locally
+  // persisted session shape ({transcriptBlocks}), or a bare array of blocks.
+  const blocks = Array.isArray(doc?.blocks)
+    ? doc.blocks
+    : Array.isArray(doc?.transcriptBlocks)
+      ? doc.transcriptBlocks
+      : Array.isArray(doc)
+        ? doc
+        : [];
+  const lines = [];
+  let tonic = 0;
+  for (const block of blocks) {
+    if (!tonic && block.pitch && block.pitch.medianHz) {
+      tonic = Math.round(block.pitch.medianHz);
+    }
+    const chars = Array.isArray(block.characters) ? block.characters : [];
+    for (const entry of chars) {
+      const char = (entry.char || "").trim() || "-";
+      const jianpu = (entry.jianpu || "").trim() || "0";
+      const seconds = entry.durationSeconds ? Number(entry.durationSeconds).toFixed(2) : "0.40";
+      lines.push(`${char} ${jianpu} ${seconds}`);
+    }
+  }
+  if (!lines.length) {
+    setStatus("逐字稿裡找不到音高資料", "error");
+    return;
+  }
+  els.singScore.value = lines.join("\n");
+  // Keep 主音 empty so the song defaults to the *target* voice's pitch — that is
+  // what makes it sung in the chosen voice. The 簡譜 is relative, so the melody is
+  // preserved and just transposed into the target's range. Auto-filling the
+  // original recording's pitch (as before) forced the song into the original
+  // singer's key and ignored the target voice. Surface it as a hint instead.
+  els.singTonic.value = "";
+  els.singTonic.placeholder = tonic ? `自動 · 目標聲音(原曲約 ${tonic} Hz)` : "自動";
+  refreshButtons();
+  setStatus(`已載入逐字稿「${file.name}」,共 ${lines.length} 個音,將以目標聲音音高演唱`);
+}
+
+function parseScore(text) {
+  const notes = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) {
+      continue;
+    }
+    const parts = line.split(/\s+/);
+    const duration = parts[2] ? Number.parseFloat(parts[2]) : null;
+    notes.push({
+      char: parts[0] || "",
+      jianpu: parts[1] || "",
+      durationSeconds: Number.isFinite(duration) ? duration : null,
+    });
+  }
+  return notes;
+}
+
+async function runSing() {
+  if (!state.selectedId) {
+    setStatus("請先在聲音庫選擇或新增一個目標聲音", "error");
+    return;
+  }
+  const notes = parseScore(els.singScore.value);
+  if (!notes.some((note) => note.jianpu && note.jianpu !== "0")) {
+    setStatus("沒有可唱的簡譜,請先上傳逐字稿或輸入簡譜", "error");
+    return;
+  }
+  const tonic = Number.parseFloat(els.singTonic.value);
+  await runExclusive("合成歌聲中…", async (signal) => {
+    await waitForModelReady();
+    setStatus("唱歌合成中…", "live");
+    const body = { voiceId: state.selectedId, notes };
+    if (Number.isFinite(tonic) && tonic > 0) {
+      body.tonicHz = tonic;
+    }
+    const response = await fetch("/api/voice/sing", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) {
+      throw new Error(data.detail || "唱歌合成失敗");
+    }
+    showResult("sing", data.audioBase64);
+    setStatus("歌聲完成,可試聽後下載或遠端儲存");
+  });
+}
+
+// 文字轉語音 / 簡譜唱歌 each have one output player.
+const RESULT_TARGETS = {
+  tts: { audio: "ttsResult", wrap: "ttsResultWrap", url: "ttsResultUrl", b64: "ttsResultB64" },
+  sing: { audio: "singResult", wrap: "singResultWrap", url: "singResultUrl", b64: "singResultB64" },
+};
+
 function showResult(kind, audioBase64) {
-  const audioEl = kind === "cv" ? els.cvResult : els.ttsResult;
-  const wrapEl = kind === "cv" ? els.cvResultWrap : els.ttsResultWrap;
-  const urlKey = kind === "cv" ? "cvResultUrl" : "ttsResultUrl";
-  const b64Key = kind === "cv" ? "cvResultB64" : "ttsResultB64";
+  const target = RESULT_TARGETS[kind];
+  const audioEl = els[target.audio];
+  const wrapEl = els[target.wrap];
+  const urlKey = target.url;
+  const b64Key = target.b64;
   if (state[urlKey]) {
     URL.revokeObjectURL(state[urlKey]);
   }
@@ -712,43 +968,148 @@ function showResult(kind, audioBase64) {
   }
 }
 
-async function saveOutput(kind) {
-  const audioBase64 = kind === "convert" ? state.cvResultB64 : state.ttsResultB64;
-  if (!audioBase64) {
-    return;
+// 聲音轉換 shows the original input clip next to the converted one so they can be
+// compared. Per-clip 下載/遠端儲存 live in each player's ⋮ menu; the buttons below
+// act on both as a 打包 (bundle).
+function showConvertResult(sourceBase64, convertedBase64) {
+  if (state.cvSourceUrl) {
+    URL.revokeObjectURL(state.cvSourceUrl);
   }
-  const button = kind === "convert" ? els.cvSave : els.ttsSave;
-  button.disabled = true;
-  setStatus("遠端儲存中…", "live");
+  if (state.cvResultUrl) {
+    URL.revokeObjectURL(state.cvResultUrl);
+  }
+  state.cvSourceB64 = sourceBase64;
+  state.cvResultB64 = convertedBase64;
+  state.cvSourceUrl = URL.createObjectURL(base64ToBlob(sourceBase64, "audio/wav"));
+  state.cvResultUrl = URL.createObjectURL(base64ToBlob(convertedBase64, "audio/wav"));
+  els.cvSource.src = state.cvSourceUrl;
+  els.cvResult.src = state.cvResultUrl;
+  els.cvSource.load();
+  els.cvResult.load();
+  closeAllPlayerMenus();
+  els.cvResultWrap.hidden = false;
   try {
-    const body = { kind, audioBase64, voiceId: state.selectedId };
-    if (kind === "tts") {
-      body.text = els.ttsText.value.trim();
-    }
-    const response = await fetch("/api/voice/outputs", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok || !data.ok) {
-      throw new Error(data.detail || "遠端儲存失敗");
-    }
-    setStatus(`已遠端儲存:${data.filename}`);
-  } catch (error) {
-    setStatus(error?.message || "遠端儲存失敗", "error");
-  } finally {
-    button.disabled = false;
+    els.cvResultWrap.scrollIntoView({ behavior: "smooth", block: "center" });
+  } catch {
+    /* scrollIntoView options unsupported — ignore */
   }
 }
 
-function base64ToBlob(base64, type) {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
+// Low-level remote save: POST one WAV to the outputs endpoint, return its server
+// filename, or throw with a readable message.
+async function saveAudioRemote(audioBase64, kind, { text } = {}) {
+  const body = { kind, audioBase64, voiceId: state.selectedId };
+  if (text) {
+    body.text = text;
   }
-  return new Blob([bytes], { type });
+  const response = await fetch("/api/voice/outputs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.ok) {
+    throw new Error(data.detail || "遠端儲存失敗");
+  }
+  return data.filename;
+}
+
+// Save one clip with button-disable + status feedback (used by the single-clip
+// 遠端儲存 actions in the TTS/sing players and the convert ⋮ menus).
+async function saveSingleOutput(audioBase64, kind, button, { text } = {}) {
+  if (!audioBase64) {
+    return;
+  }
+  if (button) {
+    button.disabled = true;
+  }
+  setStatus("遠端儲存中…", "live");
+  try {
+    const filename = await saveAudioRemote(audioBase64, kind, { text });
+    setStatus(`已遠端儲存:${filename}`);
+  } catch (error) {
+    setStatus(error?.message || "遠端儲存失敗", "error");
+  } finally {
+    if (button) {
+      button.disabled = false;
+    }
+  }
+}
+
+// 打包下載 — zip the original + converted clips into one .zip download.
+function bundleDownloadConvert() {
+  if (!state.cvResultB64) {
+    return;
+  }
+  const stamp = Date.now();
+  const files = [];
+  if (state.cvSourceB64) {
+    files.push({ name: `breeze-voice-original-${stamp}.wav`, bytes: base64ToBytes(state.cvSourceB64) });
+  }
+  files.push({ name: `breeze-voice-converted-${stamp}.wav`, bytes: base64ToBytes(state.cvResultB64) });
+  const url = URL.createObjectURL(filesToZipBlob(files));
+  downloadUrl(url, `breeze-voice-convert-${stamp}.zip`);
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  setStatus("已打包下載原始與轉換音檔");
+}
+
+// 打包遠端儲存 — save both clips remotely as a pair.
+async function bundleSaveConvert() {
+  if (!state.cvResultB64) {
+    return;
+  }
+  els.cvBundleSave.disabled = true;
+  setStatus("打包遠端儲存中…", "live");
+  try {
+    const names = [];
+    if (state.cvSourceB64) {
+      names.push(await saveAudioRemote(state.cvSourceB64, "convert-source"));
+    }
+    names.push(await saveAudioRemote(state.cvResultB64, "convert"));
+    setStatus(`已打包遠端儲存:${names.join("、")}`);
+  } catch (error) {
+    setStatus(error?.message || "打包遠端儲存失敗", "error");
+  } finally {
+    els.cvBundleSave.disabled = false;
+  }
+}
+
+// --------------------------------------------------------------------------- //
+// per-player functions (⋮) menus
+// --------------------------------------------------------------------------- //
+
+function closeAllPlayerMenus(except) {
+  document.querySelectorAll("#page-voice .player-menu.open").forEach((menu) => {
+    if (menu === except) {
+      return;
+    }
+    menu.classList.remove("open");
+    menu.querySelector(".player-menu-btn")?.setAttribute("aria-expanded", "false");
+    const list = menu.querySelector(".player-menu-list");
+    if (list) {
+      list.hidden = true;
+    }
+  });
+}
+
+function wirePlayerMenu(menu) {
+  const button = menu.querySelector(".player-menu-btn");
+  const list = menu.querySelector(".player-menu-list");
+  if (!button || !list) {
+    return;
+  }
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const willOpen = !menu.classList.contains("open");
+    closeAllPlayerMenus(menu);
+    menu.classList.toggle("open", willOpen);
+    button.setAttribute("aria-expanded", String(willOpen));
+    list.hidden = !willOpen;
+  });
+}
+
+function base64ToBlob(base64, type) {
+  return new Blob([base64ToBytes(base64)], { type });
 }
 
 function downloadUrl(url, name) {
@@ -775,6 +1136,7 @@ function refreshButtons() {
   els.cvRecord.disabled = !idle;
   els.cvUpload.disabled = !idle;
   els.ttsRun.disabled = !(idle && els.ttsText.value.trim() && state.selectedId);
+  els.singRun.disabled = !(idle && els.singScore.value.trim() && state.selectedId);
 }
 
 function setStatus(text, mode = "") {
@@ -842,17 +1204,54 @@ els.cvFile.addEventListener("change", (event) => {
   event.target.value = "";
   void handleUpload(file, (blob) => convertFromBlob(blob));
 });
-els.cvDownload.addEventListener("click", () =>
-  downloadUrl(state.cvResultUrl, `breeze-voice-convert-${Date.now()}.wav`),
+els.cvSrcDownload.addEventListener("click", () =>
+  downloadUrl(state.cvSourceUrl, `breeze-voice-original-${Date.now()}.wav`),
 );
-els.cvSave.addEventListener("click", () => saveOutput("convert"));
+els.cvSrcSave.addEventListener("click", () =>
+  saveSingleOutput(state.cvSourceB64, "convert-source", els.cvSrcSave),
+);
+els.cvDownload.addEventListener("click", () =>
+  downloadUrl(state.cvResultUrl, `breeze-voice-converted-${Date.now()}.wav`),
+);
+els.cvSave.addEventListener("click", () =>
+  saveSingleOutput(state.cvResultB64, "convert", els.cvSave),
+);
+els.cvBundleDownload.addEventListener("click", bundleDownloadConvert);
+els.cvBundleSave.addEventListener("click", bundleSaveConvert);
 
+els.ttsUpload.addEventListener("click", () => els.ttsFile.click());
+els.ttsFile.addEventListener("change", (event) => {
+  const file = event.target.files?.[0];
+  event.target.value = "";
+  void loadTextFile(file);
+});
 els.ttsText.addEventListener("input", refreshButtons);
 els.ttsRun.addEventListener("click", runTts);
 els.ttsDownload.addEventListener("click", () =>
   downloadUrl(state.ttsResultUrl, `breeze-voice-tts-${Date.now()}.wav`),
 );
-els.ttsSave.addEventListener("click", () => saveOutput("tts"));
+els.ttsSave.addEventListener("click", () =>
+  saveSingleOutput(state.ttsResultB64, "tts", els.ttsSave, { text: els.ttsText.value.trim() }),
+);
+
+els.singUpload.addEventListener("click", () => els.singFile.click());
+els.singFile.addEventListener("change", (event) => {
+  const file = event.target.files?.[0];
+  event.target.value = "";
+  void loadTranscriptFile(file);
+});
+els.singScore.addEventListener("input", refreshButtons);
+els.singRun.addEventListener("click", runSing);
+els.singDownload.addEventListener("click", () =>
+  downloadUrl(state.singResultUrl, `breeze-voice-sing-${Date.now()}.wav`),
+);
+els.singSave.addEventListener("click", () =>
+  saveSingleOutput(state.singResultB64, "sing", els.singSave),
+);
+
+// Wire each player's ⋮ menu and close any open menu on an outside click.
+document.querySelectorAll("#page-voice .player-menu").forEach(wirePlayerMenu);
+document.addEventListener("click", () => closeAllPlayerMenus());
 
 // Open the voice page directly when deep-linked (?page=voice / #voice), which is
 // how the phone PWA shortcut and a reloaded voice tab land here.

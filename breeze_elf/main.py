@@ -31,6 +31,7 @@ from .audio import (
     analyze_segment,
     hz_to_jianpu,
     jianpu_glide,
+    jianpu_to_semitones,
     pitch_cents_off,
     prepare_asr_audio,
     summarize_pitch,
@@ -153,6 +154,20 @@ class VoiceOutputSaveRequest(BaseModel):
     text: str | None = Field(default=None, max_length=2000)
 
 
+class VoiceSingNote(BaseModel):
+    char: str = Field(default="", max_length=8)
+    jianpu: str | None = Field(default=None, max_length=16)
+    hz: float | None = None
+    durationSeconds: float | None = None
+
+
+class VoiceSingRequest(BaseModel):
+    voiceId: str = Field(min_length=1)
+    notes: list[VoiceSingNote] = Field(min_length=1, max_length=1000)
+    tonicHz: float | None = None
+    useMeasuredHz: bool = False
+
+
 @dataclass
 class VoiceLoadState:
     """Thread-safe snapshot of voice-model loading for the progress bar.
@@ -239,19 +254,33 @@ app = FastAPI(title="Breeze Elf", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
 
+# The PWA shell + service worker must always revalidate, otherwise a browser
+# (or an installed home-screen app) keeps serving a stale page after a deploy —
+# which masks frontend fixes until the user manually clears the cache.
+_NO_CACHE = {"Cache-Control": "no-cache, max-age=0"}
+
+
 @app.get("/")
 async def index() -> FileResponse:
-    return FileResponse(WEB_DIR / "index.html")
+    return FileResponse(WEB_DIR / "index.html", headers=_NO_CACHE)
 
 
 @app.get("/manifest.webmanifest")
 async def manifest() -> FileResponse:
-    return FileResponse(WEB_DIR / "manifest.webmanifest", media_type="application/manifest+json")
+    return FileResponse(
+        WEB_DIR / "manifest.webmanifest",
+        media_type="application/manifest+json",
+        headers=_NO_CACHE,
+    )
 
 
 @app.get("/service-worker.js")
 async def service_worker() -> FileResponse:
-    return FileResponse(WEB_DIR / "service-worker.js", media_type="application/javascript")
+    return FileResponse(
+        WEB_DIR / "service-worker.js",
+        media_type="application/javascript",
+        headers=_NO_CACHE,
+    )
 
 
 @app.get("/health")
@@ -534,6 +563,31 @@ async def voice_tts(payload: VoiceTtsRequest) -> JSONResponse:
     except Exception as exc:
         LOGGER.exception("Voice synthesis failed")
         raise HTTPException(status_code=500, detail=f"voice synthesis failed: {exc}") from exc
+    return JSONResponse({"ok": True, **_audio_response(result)})
+
+
+@app.post("/api/voice/sing")
+async def voice_sing(payload: VoiceSingRequest) -> JSONResponse:
+    embedding = _require_embedding(payload.voiceId)
+    if not hasattr(voice_engine, "synthesize_song"):
+        raise HTTPException(status_code=400, detail="singing not supported by this engine")
+    notes = [note.model_dump() for note in payload.notes]
+    singable = any(
+        (note.get("hz") or 0) > 0 or jianpu_to_semitones(note.get("jianpu")) is not None
+        for note in notes
+    )
+    if not singable:
+        raise HTTPException(status_code=400, detail="no singable notes (need 簡譜 or hz)")
+    tonic = payload.tonicHz or 0.0
+    loop = asyncio.get_running_loop()
+    try:
+        result = await loop.run_in_executor(
+            None,
+            lambda: voice_engine.synthesize_song(notes, tonic, embedding, payload.useMeasuredHz),
+        )
+    except Exception as exc:
+        LOGGER.exception("Voice singing failed")
+        raise HTTPException(status_code=500, detail=f"voice singing failed: {exc}") from exc
     return JSONResponse({"ok": True, **_audio_response(result)})
 
 

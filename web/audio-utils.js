@@ -51,6 +51,106 @@ export async function blobToBase64(blob) {
   return btoa(binary);
 }
 
+export function base64ToBytes(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
+// CRC-32 (IEEE 802.3) — required by the ZIP local + central headers below.
+const _CRC32_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n += 1) {
+    let c = n;
+    for (let k = 0; k < 8; k += 1) {
+      c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    }
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+
+function crc32(bytes) {
+  let crc = 0xffffffff;
+  for (let index = 0; index < bytes.length; index += 1) {
+    crc = _CRC32_TABLE[(crc ^ bytes[index]) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+// Pack a few files into a single ZIP (store / no compression). WAV audio barely
+// compresses, so storing keeps the helper tiny and dependency-free while still
+// producing a real, standard .zip the OS can open. ``files`` is a list of
+// ``{ name, bytes }`` where ``name`` is ASCII and ``bytes`` is a Uint8Array.
+export function filesToZipBlob(files) {
+  const encoder = new TextEncoder();
+  const locals = [];
+  const centrals = [];
+  let offset = 0;
+
+  for (const file of files) {
+    const nameBytes = encoder.encode(file.name);
+    const data = file.bytes;
+    const crc = crc32(data);
+
+    const local = new Uint8Array(30 + nameBytes.length + data.length);
+    const lview = new DataView(local.buffer);
+    lview.setUint32(0, 0x04034b50, true); // local file header signature
+    lview.setUint16(4, 20, true); // version needed
+    lview.setUint16(6, 0, true); // flags
+    lview.setUint16(8, 0, true); // method: store
+    lview.setUint16(10, 0, true); // mod time
+    lview.setUint16(12, 0, true); // mod date
+    lview.setUint32(14, crc, true);
+    lview.setUint32(18, data.length, true); // compressed size
+    lview.setUint32(22, data.length, true); // uncompressed size
+    lview.setUint16(26, nameBytes.length, true);
+    lview.setUint16(28, 0, true); // extra length
+    local.set(nameBytes, 30);
+    local.set(data, 30 + nameBytes.length);
+    locals.push(local);
+
+    const central = new Uint8Array(46 + nameBytes.length);
+    const cview = new DataView(central.buffer);
+    cview.setUint32(0, 0x02014b50, true); // central dir signature
+    cview.setUint16(4, 20, true); // version made by
+    cview.setUint16(6, 20, true); // version needed
+    cview.setUint16(8, 0, true); // flags
+    cview.setUint16(10, 0, true); // method: store
+    cview.setUint16(12, 0, true); // mod time
+    cview.setUint16(14, 0, true); // mod date
+    cview.setUint32(16, crc, true);
+    cview.setUint32(20, data.length, true);
+    cview.setUint32(24, data.length, true);
+    cview.setUint16(28, nameBytes.length, true);
+    cview.setUint16(30, 0, true); // extra length
+    cview.setUint16(32, 0, true); // comment length
+    cview.setUint16(34, 0, true); // disk number start
+    cview.setUint16(36, 0, true); // internal attrs
+    cview.setUint32(38, 0, true); // external attrs
+    cview.setUint32(42, offset, true); // local header offset
+    central.set(nameBytes, 46);
+    centrals.push(central);
+
+    offset += local.length;
+  }
+
+  const centralSize = centrals.reduce((total, part) => total + part.length, 0);
+  const end = new Uint8Array(22);
+  const eview = new DataView(end.buffer);
+  eview.setUint32(0, 0x06054b50, true); // end of central dir signature
+  eview.setUint16(8, files.length, true); // entries this disk
+  eview.setUint16(10, files.length, true); // total entries
+  eview.setUint32(12, centralSize, true);
+  eview.setUint32(16, offset, true); // central dir offset
+  eview.setUint16(20, 0, true); // comment length
+
+  return new Blob([...locals, ...centrals, end], { type: "application/zip" });
+}
+
 function downmixToMono(audioBuffer) {
   const channels = audioBuffer.numberOfChannels;
   if (channels === 1) {

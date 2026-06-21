@@ -657,6 +657,17 @@
         height: 38px;
       }
 
+      .audio-actions {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+
+      .audio-actions .mini {
+        width: 100%;
+        min-width: 0;
+      }
+
       footer {
         display: flex;
         align-items: center;
@@ -967,6 +978,86 @@
         min-width: 0;
       }
 
+      .voice-player {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        padding: 8px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+      }
+
+      .voice-player-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .voice-player-title {
+        font-size: 0.82rem;
+        font-weight: 720;
+        color: var(--muted);
+      }
+
+      .player-menu {
+        position: relative;
+        flex: 0 0 auto;
+      }
+
+      .player-menu-btn {
+        width: 34px;
+        min-width: 34px;
+        min-height: 34px;
+        font-size: 1.1rem;
+        line-height: 1;
+      }
+
+      .player-menu-list {
+        position: absolute;
+        top: calc(100% + 4px);
+        right: 0;
+        z-index: 20;
+        min-width: 8.5rem;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        padding: 4px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        box-shadow: 0 8px 24px var(--shadow);
+      }
+
+      .player-menu-list[hidden] {
+        display: none;
+      }
+
+      .player-menu-list button {
+        min-height: 38px;
+        border: 0;
+        border-radius: 6px;
+        background: none;
+        text-align: left;
+        padding: 0 10px;
+        font-size: 0.88rem;
+        font-weight: 680;
+      }
+
+      .player-menu-list button:hover:not(:disabled) {
+        background: var(--button-hover);
+      }
+
+      .icon-btn.edit {
+        color: var(--muted);
+      }
+
+      .icon-btn.play.playing {
+        border-color: var(--live);
+        color: var(--live);
+      }
+
       .voice-list {
         list-style: none;
         margin: 0;
@@ -1040,6 +1131,57 @@
       .voice-hint-sub {
         font-size: 0.78rem;
         opacity: 0.9;
+      }
+
+      .voice-hint code {
+        font-size: 0.82em;
+        padding: 1px 5px;
+        border-radius: 5px;
+        background: var(--panel-subtle);
+        white-space: nowrap;
+      }
+
+      #sing-tonic {
+        flex: 0 0 7rem;
+        max-width: 7rem;
+        min-height: 40px;
+      }
+
+      .subtabs {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 4px;
+        padding: 4px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--panel-subtle);
+      }
+
+      .subtab {
+        min-height: 42px;
+        min-width: 0;
+        border: 0;
+        border-radius: 8px;
+        background: transparent;
+        color: var(--muted);
+        font: inherit;
+        font-weight: 720;
+        font-size: 0.9rem;
+        cursor: pointer;
+      }
+
+      .subtab[aria-selected="true"] {
+        background: var(--panel);
+        color: var(--ink);
+        box-shadow: 0 1px 2px var(--shadow);
+      }
+
+      .subtab:hover:not([aria-selected="true"]) {
+        color: var(--ink);
+      }
+
+      .vpanel[hidden] {
+        display: none;
       }
 
       .voice-busy {
@@ -1186,6 +1328,10 @@
 
       <section id="audio-panel" class="recording" aria-label="錄音" hidden>
         <audio id="recording" controls preload="metadata"></audio>
+        <div class="audio-actions">
+          <button id="audio-download" class="mini" type="button" disabled>下載音檔</button>
+          <button id="audio-save" class="mini" type="button" disabled>遠端儲存音檔</button>
+        </div>
       </section>
 
       <section class="stt-status" aria-label="語音轉文字狀態" aria-live="polite">
@@ -1235,33 +1381,88 @@
         <ul id="voice-list" class="voice-list"></ul>
       </section>
 
-      <section class="voice-card">
+      <div class="subtabs" role="tablist" aria-label="變聲功能">
+        <button class="subtab" type="button" data-panel="convert" role="tab" aria-selected="true">聲音轉換</button>
+        <button class="subtab" type="button" data-panel="tts" role="tab" aria-selected="false">文字轉語音</button>
+        <button class="subtab" type="button" data-panel="sing" role="tab" aria-selected="false">簡譜唱歌</button>
+      </div>
+
+      <section id="vpanel-convert" class="voice-card vpanel">
         <h2>聲音轉換</h2>
-        <p class="voice-hint">錄一段或上傳你的聲音,系統會自動用「目標聲音」重新詮釋。</p>
+        <p class="voice-hint">錄一段或上傳你的聲音,系統會自動用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」重新詮釋。</p>
         <div class="voice-source">
           <button id="cv-record" type="button" class="primary" data-idle-label="● 錄音並轉換">● 錄音並轉換</button>
           <button id="cv-upload" type="button">⤵ 上傳並轉換</button>
           <input id="cv-file" class="visually-hidden" type="file" accept="audio/*" />
         </div>
         <div id="cv-result-wrap" class="voice-result" hidden>
-          <audio id="cv-result" class="voice-audio" controls preload="metadata"></audio>
+          <div class="voice-player">
+            <div class="voice-player-head">
+              <span class="voice-player-title">原始音檔</span>
+              <div class="player-menu">
+                <button class="icon-btn player-menu-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-label="原始音檔功能選單" title="功能選單">⋮</button>
+                <div class="player-menu-list" role="menu" hidden>
+                  <button id="cv-src-download" type="button" role="menuitem">下載</button>
+                  <button id="cv-src-save" type="button" role="menuitem">遠端儲存</button>
+                </div>
+              </div>
+            </div>
+            <audio id="cv-source" class="voice-audio" controls preload="metadata"></audio>
+          </div>
+          <div class="voice-player">
+            <div class="voice-player-head">
+              <span class="voice-player-title">轉換音檔</span>
+              <div class="player-menu">
+                <button class="icon-btn player-menu-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-label="轉換音檔功能選單" title="功能選單">⋮</button>
+                <div class="player-menu-list" role="menu" hidden>
+                  <button id="cv-download" type="button" role="menuitem">下載</button>
+                  <button id="cv-save" type="button" role="menuitem">遠端儲存</button>
+                </div>
+              </div>
+            </div>
+            <audio id="cv-result" class="voice-audio" controls preload="metadata"></audio>
+          </div>
           <div class="voice-result-actions">
-            <button id="cv-download" type="button" class="mini">下載</button>
-            <button id="cv-save" type="button" class="mini">遠端儲存</button>
+            <button id="cv-bundle-download" type="button" class="mini">打包下載</button>
+            <button id="cv-bundle-save" type="button" class="mini">打包遠端儲存</button>
           </div>
         </div>
       </section>
 
-      <section class="voice-card">
+      <section id="vpanel-tts" class="voice-card vpanel" hidden>
         <h2>文字轉語音</h2>
-        <p class="voice-hint">輸入文字,用「目標聲音」念出來。</p>
-        <textarea id="tts-text" class="voice-textarea" maxlength="2000" rows="3" placeholder="輸入想說的話…"></textarea>
+        <p class="voice-hint">輸入或上傳文字,用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」念出來。</p>
+        <button id="tts-upload" type="button">⤵ 上傳文字檔(.txt)</button>
+        <input id="tts-file" class="visually-hidden" type="file" accept=".txt,text/plain" />
+        <textarea id="tts-text" class="voice-textarea" maxlength="2000" rows="3" placeholder="輸入想說的話,或上傳文字檔…"></textarea>
         <button id="tts-run" type="button" class="primary" disabled>用目標聲音念出來</button>
         <div id="tts-result-wrap" class="voice-result" hidden>
           <audio id="tts-result" class="voice-audio" controls preload="metadata"></audio>
           <div class="voice-result-actions">
             <button id="tts-download" type="button" class="mini">下載</button>
             <button id="tts-save" type="button" class="mini">遠端儲存</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="vpanel-sing" class="voice-card vpanel" hidden>
+        <h2>簡譜唱歌</h2>
+        <p class="voice-hint">
+          上傳逐字稿(含音高的 .json),或直接編輯下面的簡譜,用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」唱出來。每行一個字:<code>字 簡譜 秒數</code>(例:<code>小 1 0.4</code>;休止用 <code>- 0 0.3</code>;高八度加 <code>'</code>、低八度加 <code>,</code>)。
+        </p>
+        <button id="sing-upload" type="button">⤵ 上傳逐字稿 JSON</button>
+        <input id="sing-file" class="visually-hidden" type="file" accept="application/json,.json" />
+        <textarea id="sing-score" class="voice-textarea" rows="6" placeholder="小 1 0.4&#10;星 2 0.4&#10;星 3 0.4&#10;眨 3 0.4"></textarea>
+        <label class="voice-fav" for="sing-tonic">
+          主音 Hz(可留空,預設用目標聲音音高)
+          <input id="sing-tonic" type="number" min="80" max="600" step="1" class="voice-input" placeholder="自動" />
+        </label>
+        <button id="sing-run" type="button" class="primary" disabled>用目標聲音唱出來</button>
+        <div id="sing-result-wrap" class="voice-result" hidden>
+          <audio id="sing-result" class="voice-audio" controls preload="metadata"></audio>
+          <div class="voice-result-actions">
+            <button id="sing-download" type="button" class="mini">下載</button>
+            <button id="sing-save" type="button" class="mini">遠端儲存</button>
           </div>
         </div>
       </section>
@@ -1335,7 +1536,7 @@
       </div>
     </dialog>
 
-    <script src="./app.js?v=17" type="module"></script>
-    <script src="./voice.js?v=5" type="module"></script>
+    <script src="./app.js?v=19" type="module"></script>
+    <script src="./voice.js?v=10" type="module"></script>
   </body>
 </html>

@@ -9,7 +9,13 @@ from unittest.mock import patch
 import numpy as np
 
 from breeze_elf import main
-from breeze_elf.voice import MockVoiceEngine, _pitch_shift
+from breeze_elf.voice import (
+    MockVoiceEngine,
+    _fit_duration,
+    _pitch_shift,
+    _resample_rate,
+    _song_base,
+)
 from breeze_elf.voice_storage import (
     decode_wav,
     delete_voice,
@@ -92,6 +98,73 @@ class MockEngineTests(unittest.TestCase):
         payload = json.loads(embedding.decode("utf-8"))
         self.assertEqual(payload["kind"], "mock")
         self.assertGreater(payload["medianHz"], 150.0)
+
+    def test_synthesize_song_follows_jianpu_pitch(self):
+        embedding = self.engine.extract_embedding(_tone(200.0), 16_000)
+        notes = [
+            {"char": "do", "jianpu": "1", "durationSeconds": 0.4},
+            {"char": "rest", "jianpu": "0", "durationSeconds": 0.2},
+            {"char": "sol", "jianpu": "5", "durationSeconds": 0.4},
+        ]
+        result = self.engine.synthesize_song(notes, 220.0, embedding)
+        self.assertEqual(result.sample_rate, 16_000)
+        # 1 (220 Hz) + rest + 5 (sol, ~330 Hz) => roughly a second of audio.
+        self.assertGreater(result.samples.size / result.sample_rate, 0.8)
+        self.assertGreater(float(np.max(np.abs(result.samples))), 0.1)
+
+    def test_synthesize_song_uses_target_pitch_when_no_tonic(self):
+        # With tonic_hz<=0 the mock falls back to the saved voice's median pitch.
+        embedding = self.engine.extract_embedding(_tone(300.0), 16_000)
+        result = self.engine.synthesize_song(
+            [{"char": "la", "jianpu": "1", "durationSeconds": 0.5}], 0.0, embedding
+        )
+        self.assertGreater(_median_hz(result.samples), 240.0)
+
+    def test_fit_duration_resizes_without_changing_pitch(self):
+        tone = _tone(220.0, 16_000, 1.0)
+        shorter = _fit_duration(tone, 8_000)
+        longer = _fit_duration(tone, 24_000)
+        self.assertEqual(shorter.size, 8_000)
+        self.assertEqual(longer.size, 24_000)
+        # Time-stretching changes length but keeps the pitch (unlike resampling).
+        self.assertAlmostEqual(_median_hz(shorter), 220.0, delta=20.0)
+        self.assertAlmostEqual(_median_hz(longer), 220.0, delta=20.0)
+
+    def test_resample_rate_preserves_pitch_and_duration(self):
+        tone = _tone(220.0, 16_000, 1.0)
+        out = _resample_rate(tone, 16_000, 24_000)
+        self.assertAlmostEqual(out.size / 24_000, 1.0, places=2)
+        self.assertAlmostEqual(_median_hz(out, 24_000), 220.0, delta=20.0)
+
+    def test_song_base_falls_back_to_synth_without_os_tts(self):
+        # The base track shared by both engines (mock plays it; OpenVoice re-voices
+        # it) uses the synthetic voice at synth_rate when no OS voice is requested.
+        notes = [{"char": "a", "freq": 220.0, "duration": 0.4}]
+        samples, rate, is_real = _song_base(notes, use_os_tts=False, synth_rate=22_050)
+        self.assertFalse(is_real)
+        self.assertEqual(rate, 22_050)
+        self.assertGreater(samples.size, 0)
+        self.assertTrue(np.isfinite(samples).all())
+
+    def test_synthesize_song_uses_real_voice_when_os_tts_available(self):
+        from breeze_elf.voice import _system_tts
+
+        if _system_tts("你好") is None:
+            self.skipTest("no OS text-to-speech voice on this host")
+        engine = MockVoiceEngine(sample_rate=16_000, warmup_seconds=0.0, use_os_tts=True)
+        engine.load()
+        embedding = engine.extract_embedding(_tone(200.0), 16_000)
+        notes = [
+            {"char": "小", "jianpu": "1", "durationSeconds": 0.5},
+            {"char": "星", "jianpu": "5", "durationSeconds": 0.5},
+            {"char": "-", "jianpu": "0", "durationSeconds": 0.3},  # rest
+            {"char": "星", "jianpu": "5", "durationSeconds": 0.5},
+        ]
+        result = engine.synthesize_song(notes, 220.0, embedding)
+        # ~1.8s of melody + small gaps, real audio, no NaNs.
+        self.assertGreater(result.samples.size / result.sample_rate, 1.2)
+        self.assertTrue(np.isfinite(result.samples).all())
+        self.assertGreater(float(np.max(np.abs(result.samples))), 0.1)
 
     def test_os_tts_produces_real_speech_when_available(self):
         from breeze_elf.voice import _system_tts
@@ -178,6 +251,13 @@ class VoiceStorageTests(unittest.TestCase):
             self.assertEqual(stored.kind, "convert")
             self.assertTrue(stored.id.startswith("convert-"))
 
+    def test_save_voice_output_keeps_known_kinds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for kind in ("sing", "recording", "tts", "convert", "convert-source"):
+                stored = save_voice_output(encode_wav(_tone(200.0), 16_000), tmp, kind=kind)
+                self.assertEqual(stored.kind, kind)
+                self.assertTrue(stored.id.startswith(f"{kind}-"))
+
 
 class VoiceApiTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -231,6 +311,46 @@ class VoiceApiTests(unittest.IsolatedAsyncioTestCase):
         tts_data = json.loads(tts.body)
         self.assertTrue(tts_data["ok"])
         self.assertGreater(tts_data["durationSeconds"], 0.0)
+
+    async def test_sing_returns_audio_from_jianpu(self):
+        vid = json.loads(
+            (
+                await main.create_saved_voice(
+                    main.VoiceCreateRequest(name="歌手", audioBase64=self._wav_b64(220.0))
+                )
+            ).body
+        )["voice"]["id"]
+        sing = await main.voice_sing(
+            main.VoiceSingRequest(
+                voiceId=vid,
+                tonicHz=220.0,
+                notes=[
+                    main.VoiceSingNote(char="小", jianpu="1", durationSeconds=0.4),
+                    main.VoiceSingNote(char="星", jianpu="2", durationSeconds=0.4),
+                ],
+            )
+        )
+        data = json.loads(sing.body)
+        self.assertTrue(data["ok"])
+        self.assertGreater(data["durationSeconds"], 0.0)
+
+    async def test_sing_rejects_when_no_singable_notes(self):
+        from fastapi import HTTPException
+
+        vid = json.loads(
+            (
+                await main.create_saved_voice(
+                    main.VoiceCreateRequest(name="x", audioBase64=self._wav_b64(220.0))
+                )
+            ).body
+        )["voice"]["id"]
+        with self.assertRaises(HTTPException) as ctx:
+            await main.voice_sing(
+                main.VoiceSingRequest(
+                    voiceId=vid, notes=[main.VoiceSingNote(char="-", jianpu="0")]
+                )
+            )
+        self.assertEqual(ctx.exception.status_code, 400)
 
     async def test_save_output_persists_generated_clip(self):
         wav_b64 = base64.b64encode(encode_wav(_tone(180.0), 16_000)).decode("ascii")

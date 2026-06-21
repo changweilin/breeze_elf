@@ -356,6 +356,48 @@ def jianpu_glide(start_hz: float | None, end_hz: float | None, tonic_hz: float |
     return f"{start}{arrow}{end}"
 
 
+# Base scale degrees 1-7 (no accidental) → semitones above the tonic.
+_JIANPU_BASE_SEMITONES = {"1": 0, "2": 2, "3": 4, "4": 5, "5": 7, "6": 9, "7": 11}
+
+
+def jianpu_to_semitones(jianpu: str | None) -> float | None:
+    """Parse a 簡譜 token back into semitones above the tonic (inverse of
+    :func:`hz_to_jianpu`).
+
+    Understands the digits 1-7, a leading ``#``/``b`` accidental, octave marks
+    (combining dot above/below as produced by :func:`hz_to_jianpu`, or the ASCII
+    shortcuts ``'``/``^`` for up and ``,``/``_`` for down), and a glide such as
+    ``3↗5`` (the leading degree is used). Returns ``None`` for rests/blanks or
+    anything unparseable so the caller can treat it as silence.
+    """
+    if not jianpu:
+        return None
+    token = jianpu.strip()
+    for arrow in (_JIANPU_GLIDE_UP, _JIANPU_GLIDE_DOWN):
+        if arrow in token:
+            token = token.split(arrow, 1)[0]
+            break
+
+    octave = 0
+    body = ""
+    for char in token:
+        if char in (_JIANPU_DOT_ABOVE, "'", "^", "˙", "̇"):
+            octave += 1
+        elif char in (_JIANPU_DOT_BELOW, ",", "_", "̣"):
+            octave -= 1
+        elif not char.isspace():
+            body += char
+
+    accidental = 0
+    while body[:1] in ("#", "♯", "b", "♭"):
+        accidental += 1 if body[0] in ("#", "♯") else -1
+        body = body[1:]
+    if not body or body[0] not in _JIANPU_BASE_SEMITONES:
+        return None
+    base = _JIANPU_BASE_SEMITONES[body[0]]
+    return float(base + accidental + 12 * octave)
+
+
 def pitch_cents_off(hz: float | None, tonic_hz: float | None) -> float | None:
     """Signed distance, in cents, from the nearest scale degree of the tonic.
 

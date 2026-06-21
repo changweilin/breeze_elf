@@ -9,6 +9,8 @@ const els = {
   save: document.querySelector("#save"),
   audioPanel: document.querySelector("#audio-panel"),
   audioPlayer: document.querySelector("#recording"),
+  audioDownload: document.querySelector("#audio-download"),
+  audioSave: document.querySelector("#audio-save"),
   theme: document.querySelector("#theme"),
   themeColor: document.querySelector("meta[name='theme-color']"),
   status: document.querySelector("#status"),
@@ -125,6 +127,7 @@ const state = {
   audioDirty: false,
   audioStorageFailed: false,
   savingRemote: false,
+  savingAudio: false,
   fileLanguageShown: false,
   openBlocks: new Set(),
   demoRunning: false,
@@ -295,6 +298,7 @@ function setRunning(isRunning) {
   els.toggle.textContent = isRunning ? "■ 停止" : "▶ 開始";
   els.toggle.setAttribute("aria-pressed", String(isRunning));
   els.load.disabled = DEMO_MODE || isRunning;
+  setAudioActions();
 }
 
 function handleToggle() {
@@ -1008,6 +1012,12 @@ function recordedAudioBlob() {
   return new Blob([header, ...state.audioChunks], { type: "audio/wav" });
 }
 
+function setAudioActions() {
+  const hasAudio = state.audioBytes > 0;
+  els.audioDownload.disabled = !hasAudio;
+  els.audioSave.disabled = DEMO_MODE || !hasAudio || state.savingAudio || state.running;
+}
+
 function refreshAudioPreview() {
   window.clearTimeout(state.audioPreviewTimer);
   state.audioPreviewTimer = 0;
@@ -1021,12 +1031,14 @@ function refreshAudioPreview() {
     els.audioPanel.hidden = true;
     els.audioPlayer.removeAttribute("src");
     els.audioPlayer.load();
+    setAudioActions();
     return;
   }
 
   state.audioObjectUrl = URL.createObjectURL(recordedAudioBlob());
   els.audioPlayer.src = state.audioObjectUrl;
   els.audioPanel.hidden = false;
+  setAudioActions();
 }
 
 function scheduleAudioPreviewRefresh() {
@@ -1715,18 +1727,29 @@ els.copy.addEventListener("click", async () => {
   }
 });
 els.download.addEventListener("click", () => {
-  if (!state.transcript.trim()) {
+  const text = state.transcript.trim();
+  if (!text) {
     return;
   }
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const blob = new Blob([state.transcript], { type: "text/plain;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = `breeze-elf-${stamp}.txt`;
-  link.click();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-  flashStats("已下載");
+  downloadBlobAs(
+    new Blob([state.transcript], { type: "text/plain;charset=utf-8" }),
+    `breeze-elf-${stamp}.txt`,
+  );
+  // When the transcript carries 簡譜/timing, also emit the structured .json the
+  // 簡譜唱歌 page reads (same shape as the remote save), so a downloaded
+  // transcript can be uploaded there directly and parsed in full.
+  if (hasStructuredTranscript()) {
+    downloadBlobAs(
+      new Blob([JSON.stringify(buildTranscriptDocument(state.transcript), null, 2)], {
+        type: "application/json;charset=utf-8",
+      }),
+      `breeze-elf-${stamp}.json`,
+    );
+    flashStats("已下載逐字稿(含簡譜 JSON)");
+  } else {
+    flashStats("已下載");
+  }
 });
 els.save.addEventListener("click", async () => {
   if (DEMO_MODE) {
@@ -1746,16 +1769,14 @@ els.save.addEventListener("click", async () => {
   els.stats.textContent = "遠端儲存中";
 
   try {
+    // The transcript save carries only the transcript + its 簡譜/timing (the
+    // recording has its own download / remote-save at the player below).
     const payload = {
       text,
       title: transcriptTitle(text),
       sampleRate: state.audioSampleRate,
       blocks: serializeBlocksForSave(),
     };
-    const audioBase64 = await encodeRecordedAudioBase64();
-    if (audioBase64) {
-      payload.audioBase64 = audioBase64;
-    }
 
     const response = await fetch("/api/transcripts", {
       method: "POST",
@@ -1766,12 +1787,9 @@ els.save.addEventListener("click", async () => {
     if (!response.ok || !data.ok) {
       throw new Error(data.detail || "遠端儲存失敗");
     }
-    const extras = [data.audioFilename ? "音檔" : "", data.jsonFilename ? "簡譜" : ""]
-      .filter(Boolean)
-      .join("+");
-    const suffix = extras ? `(含${extras})` : "";
+    const suffix = data.jsonFilename ? "(含簡譜)" : "";
     flashStats(
-      data.filename ? `已遠端儲存 ${data.filename}${suffix}` : "已遠端儲存",
+      data.filename ? `已遠端儲存逐字稿 ${data.filename}${suffix}` : "已遠端儲存逐字稿",
       previousStats,
     );
   } catch (error) {
@@ -1779,6 +1797,61 @@ els.save.addEventListener("click", async () => {
   } finally {
     state.savingRemote = false;
     setTranscriptActions(Boolean(state.transcript.trim()));
+  }
+});
+
+els.audioDownload.addEventListener("click", () => {
+  if (!state.audioBytes) {
+    return;
+  }
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const url = URL.createObjectURL(recordedAudioBlob());
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `breeze-elf-${stamp}.wav`;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  flashStats("已下載音檔");
+});
+
+els.audioSave.addEventListener("click", async () => {
+  if (DEMO_MODE) {
+    flashStats("示意模式不會遠端儲存");
+    return;
+  }
+  if (!state.audioBytes || state.savingAudio) {
+    return;
+  }
+
+  state.savingAudio = true;
+  setAudioActions();
+  window.clearTimeout(state.statsTimer);
+  const previousStats = els.stats.textContent;
+  els.stats.textContent = "音檔遠端儲存中";
+
+  try {
+    const audioBase64 = await encodeRecordedAudioBase64();
+    if (!audioBase64) {
+      throw new Error("沒有可儲存的音檔");
+    }
+    const response = await fetch("/api/voice/outputs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: "recording", audioBase64 }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) {
+      throw new Error(data.detail || "遠端儲存失敗");
+    }
+    flashStats(
+      data.filename ? `已遠端儲存音檔 ${data.filename}` : "已遠端儲存音檔",
+      previousStats,
+    );
+  } catch (error) {
+    flashStats(error.message || "遠端儲存失敗", previousStats);
+  } finally {
+    state.savingAudio = false;
+    setAudioActions();
   }
 });
 
@@ -1791,6 +1864,36 @@ function serializeBlocksForSave() {
     pitch: block.pitch || null,
     characters: Array.isArray(block.characters) ? block.characters : [],
   }));
+}
+
+// True when the transcript carries per-character 簡譜/timing or block pitch — the
+// data the 簡譜唱歌 page needs. Plain-text-only transcripts have none of it.
+function hasStructuredTranscript() {
+  return state.transcriptBlocks.some(
+    (block) => (Array.isArray(block.characters) && block.characters.length > 0) || block.pitch,
+  );
+}
+
+// Build the structured transcript document. Mirrors the remote-save payload (plus
+// createdAt) so the downloaded .json and the server-saved .json are identical and
+// both load fully in 簡譜唱歌.
+function buildTranscriptDocument(text) {
+  return {
+    text,
+    title: transcriptTitle(text),
+    sampleRate: state.audioSampleRate,
+    blocks: serializeBlocksForSave(),
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function downloadBlobAs(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 async function encodeRecordedAudioBase64() {

@@ -167,6 +167,24 @@ class MockVoiceEngine:
         samples = _match_loudness(samples, target_rms, default_peak=0.6)
         return VoiceAudio(samples=samples, sample_rate=self.sample_rate)
 
+    def synthesize_song(
+        self,
+        notes: list[dict],
+        tonic_hz: float,
+        embedding: bytes,
+        use_measured_hz: bool = False,
+    ) -> VoiceAudio:
+        profile = _load_mock_embedding(embedding)
+        if not tonic_hz or tonic_hz <= 0:
+            tonic_hz = float(profile.get("medianHz") or _DEFAULT_VOICE_HZ)
+        resolved = _resolve_song_notes(notes, tonic_hz, use_measured_hz)
+        target_rms = float(profile.get("rms") or 0.0)
+        # Real words in the OS voice (the same voice 文字轉語音 uses), pitched to
+        # the melody; falls back to the synthetic vowel voice when unavailable.
+        samples, rate, is_real = _song_base(resolved, self.use_os_tts, self.sample_rate)
+        samples = _match_loudness(samples, target_rms, default_peak=0.92 if is_real else 0.85)
+        return VoiceAudio(samples=samples, sample_rate=rate)
+
 
 # --------------------------------------------------------------------------- #
 # OpenVoice v2 engine (lazy, optional)
@@ -314,6 +332,34 @@ class OpenVoiceEngine:
             self._converter.convert(
                 audio_src_path=str(base_path),
                 src_se=self._source_se,
+                tgt_se=target_se,
+                output_path=str(out_path),
+                message="@BreezeElf",
+            )
+            data, out_rate = self._sf.read(str(out_path), dtype="float32", always_2d=False)
+        return VoiceAudio(samples=_as_float32_mono(data), sample_rate=int(out_rate))
+
+    def synthesize_song(
+        self,
+        notes: list[dict],
+        tonic_hz: float,
+        embedding: bytes,
+        use_measured_hz: bool = False,
+    ) -> VoiceAudio:
+        self.load()
+        if not tonic_hz or tonic_hz <= 0:
+            tonic_hz = _DEFAULT_VOICE_HZ
+        resolved = _resolve_song_notes(notes, tonic_hz, use_measured_hz)
+        # Sing a real-word base in the OS voice so the tone-color converter has
+        # actual speech to re-voice (far more natural than converting a synth
+        # buzz); falls back to the synthetic voice when no OS voice is available.
+        base, base_rate, _ = _song_base(resolved, self.use_os_tts, 22_050)
+        target_se = self._torch.load(io.BytesIO(embedding), map_location=self.device)
+        with _temp_wav(base, base_rate) as base_path, _temp_wav_path() as out_path:
+            source_se = self._converter.extract_se([str(base_path)])
+            self._converter.convert(
+                audio_src_path=str(base_path),
+                src_se=source_se,
                 tgt_se=target_se,
                 output_path=str(out_path),
                 message="@BreezeElf",
@@ -626,6 +672,208 @@ def _synthesize_voice(text: str, sample_rate: int, base_hz: float) -> np.ndarray
             pieces.append(gap)
 
     return np.concatenate(pieces).astype(np.float32)
+
+
+def _resolve_song_notes(
+    notes: list[dict], tonic_hz: float, use_measured_hz: bool
+) -> list[dict]:
+    """Turn ``{char, jianpu, hz, durationSeconds}`` notes into ``{char, freq,
+    duration}`` ones.
+
+    Pitch comes from the 簡譜 degree relative to ``tonic_hz`` (quantized,
+    in-tune singing); when ``use_measured_hz`` is set, or the 簡譜 is missing,
+    the measured ``hz`` is used instead. Unparseable / rest notes get
+    ``freq=None`` so the synthesizer renders silence for that beat.
+    """
+    from .audio import jianpu_to_semitones
+
+    resolved: list[dict] = []
+    for note in notes:
+        char = str(note.get("char") or "").strip()
+        hz = note.get("hz")
+        measured = float(hz) if hz else 0.0
+        freq: float | None = None
+        if use_measured_hz and measured > 0:
+            freq = measured
+        else:
+            semitones = jianpu_to_semitones(note.get("jianpu"))
+            if semitones is not None and tonic_hz > 0:
+                freq = tonic_hz * (2.0 ** (semitones / 12.0))
+            elif measured > 0:
+                freq = measured
+        resolved.append(
+            {"char": char or "a", "freq": freq, "duration": note.get("durationSeconds")}
+        )
+    return resolved
+
+
+def _synthesize_song(notes: list[dict], sample_rate: int) -> np.ndarray:
+    """Sing a sequence of notes as sustained, vibrato'd vowels (one per note)."""
+    nyquist = sample_rate / 2.0
+    gap = np.zeros(max(1, int(sample_rate * 0.02)), dtype=np.float32)
+    pieces: list[np.ndarray] = []
+    for position, note in enumerate(notes[:400]):
+        duration = note.get("duration")
+        seconds = float(duration) if duration else 0.45
+        seconds = max(0.12, min(2.0, seconds))
+        count = max(1, int(sample_rate * seconds))
+
+        freq = note.get("freq")
+        if not freq or freq <= 0:
+            pieces.append(np.zeros(count, dtype=np.float32))
+            continue
+        freq = float(min(_MAX_VOICE_HZ, max(_MIN_VOICE_HZ, freq)))
+
+        axis = np.arange(count, dtype=np.float64) / sample_rate
+        # Vibrato that eases in over the first ~180 ms — sounds sung, not synthy.
+        vibrato = 0.012 * np.sin(2 * np.pi * 5.2 * axis) * np.clip(axis / 0.18, 0.0, 1.0)
+        phase = 2 * np.pi * np.cumsum(freq * (1.0 + vibrato)) / sample_rate
+
+        max_harmonic = max(1, min(48, int((nyquist * 0.92) / freq)))
+        harmonics = np.arange(1, max_harmonic + 1, dtype=np.float64)
+        char = note.get("char") or "a"
+        formants = _VOWEL_FORMANTS[ord(char[0]) % len(_VOWEL_FORMANTS)]
+        amplitudes = _formant_response(harmonics * freq, formants) / harmonics
+        tone = np.zeros(count, dtype=np.float64)
+        for harmonic, amplitude in zip(harmonics, amplitudes):
+            tone += amplitude * np.sin(harmonic * phase)
+        peak = float(np.max(np.abs(tone)))
+        if peak > 1e-9:
+            tone /= peak
+        pieces.append((tone * _syllable_envelope(count, sample_rate)).astype(np.float32))
+        if position != len(notes) - 1:
+            pieces.append(gap)
+
+    if not pieces:
+        return np.zeros(1, dtype=np.float32)
+    return np.concatenate(pieces).astype(np.float32)
+
+
+# Melodies can sit well above/below the OS voice's natural pitch; allow a wide
+# (but bounded) shift so the tune is faithful without runaway artifacts.
+_MAX_SING_SHIFT_SEMITONES = 24.0
+# Cap how many distinct syllables we shell out to the OS voice for, so a long
+# lyric with many unique characters can't spawn an unbounded number of renders.
+_MAX_SUNG_SYLLABLES = 120
+
+
+def _resample_rate(samples: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
+    """Resample to a new sample rate, preserving duration and pitch."""
+    if src_rate == dst_rate or samples.size == 0:
+        return samples
+    target_len = max(1, round(samples.size * dst_rate / src_rate))
+    return _resample_to_length(samples, target_len)
+
+
+def _fit_duration(samples: np.ndarray, target_len: int) -> np.ndarray:
+    """Stretch / compress to ``target_len`` samples without changing pitch."""
+    if target_len <= 0:
+        return np.zeros(0, dtype=np.float32)
+    if samples.size == 0:
+        return np.zeros(target_len, dtype=np.float32)
+    if abs(samples.size - target_len) <= 2:
+        return _resample_to_length(samples, target_len)
+    stretched = _time_stretch(samples, samples.size / target_len)
+    return _resample_to_length(stretched, target_len)
+
+
+def _apply_edge_fade(
+    samples: np.ndarray, sample_rate: int, fade_seconds: float = 0.01
+) -> np.ndarray:
+    """Short fade in/out so concatenated sung notes don't click."""
+    count = samples.size
+    if count == 0:
+        return samples
+    fade = min(count // 2, max(1, int(sample_rate * fade_seconds)))
+    if fade <= 0:
+        return samples
+    envelope = np.ones(count, dtype=np.float32)
+    ramp = np.linspace(0.0, 1.0, fade, dtype=np.float32)
+    envelope[:fade] = ramp
+    envelope[count - fade :] = ramp[::-1]
+    return (samples * envelope).astype(np.float32)
+
+
+def _sing_with_os_voice(notes: list[dict]) -> tuple[np.ndarray, int] | None:
+    """Sing ``{char, freq, duration}`` notes as real OS-TTS syllables.
+
+    Each lyric character is spoken once by the OS voice (cached, since songs
+    reuse characters), then for every note it is pitch-shifted onto the melody
+    note and time-stretched to the note's duration. Rests render as silence; a
+    note whose character cannot be spoken keeps the melody via a synth tone.
+    Returns ``(samples, sample_rate)``, or ``None`` when no syllable could be
+    rendered (no OS voice) so the caller can fall back to the synthetic voice.
+    """
+    notes = notes[:400]
+    cache: dict[str, tuple[np.ndarray, float] | None] = {}
+    rate = 0
+    for note in notes:
+        char = str(note.get("char") or "").strip()
+        freq = note.get("freq")
+        if not char or not freq or freq <= 0 or char in cache:
+            continue
+        if len(cache) >= _MAX_SUNG_SYLLABLES:
+            break
+        spoken = _system_tts(char)
+        if spoken is None:
+            cache[char] = None
+            continue
+        samples, srate = spoken
+        if rate == 0:
+            rate = srate
+        samples = _resample_rate(samples, srate, rate)
+        cache[char] = (samples, _estimate_median_hz(samples, rate))
+
+    if rate == 0:
+        return None  # nothing rendered — let the caller use the synth voice
+
+    gap = np.zeros(max(1, int(rate * 0.02)), dtype=np.float32)
+    pieces: list[np.ndarray] = []
+    for index, note in enumerate(notes):
+        duration = note.get("duration")
+        seconds = float(duration) if duration else 0.45
+        seconds = max(0.12, min(2.5, seconds))
+        count = max(1, int(rate * seconds))
+
+        freq = note.get("freq")
+        char = str(note.get("char") or "").strip()
+        entry = cache.get(char)
+        if not freq or freq <= 0:
+            pieces.append(np.zeros(count, dtype=np.float32))  # rest
+        elif entry is None:
+            # Character could not be spoken — keep the melody with a synth tone.
+            pieces.append(_synthesize_song([note], rate))
+        else:
+            syllable, source_hz = entry
+            target = float(min(_MAX_VOICE_HZ, max(_MIN_VOICE_HZ, freq)))
+            semitones = 12.0 * math.log2(target / source_hz) if source_hz > 0 else 0.0
+            semitones = max(-_MAX_SING_SHIFT_SEMITONES, min(_MAX_SING_SHIFT_SEMITONES, semitones))
+            pitched = _pitch_shift(syllable, semitones)
+            pieces.append(_apply_edge_fade(_fit_duration(pitched, count), rate))
+        if index != len(notes) - 1:
+            pieces.append(gap)
+
+    if not pieces:
+        return None
+    return np.concatenate(pieces).astype(np.float32), rate
+
+
+def _song_base(
+    notes: list[dict], use_os_tts: bool, synth_rate: int
+) -> tuple[np.ndarray, int, bool]:
+    """Pick the singing base track shared by both engines.
+
+    Returns ``(samples, sample_rate, is_real)``: a real-word OS-voice rendering
+    when one is available (``is_real=True``), otherwise the synthetic vowel voice
+    at ``synth_rate``. The mock plays this directly; OpenVoice re-voices it with
+    the tone-color converter, which sounds far better given real speech.
+    """
+    if use_os_tts:
+        sung = _sing_with_os_voice(notes)
+        if sung is not None:
+            samples, rate = sung
+            return samples, rate, True
+    return _synthesize_song(notes, synth_rate), synth_rate, False
 
 
 _OS_TTS_SCRIPT = (

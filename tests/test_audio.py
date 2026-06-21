@@ -9,6 +9,7 @@ from breeze_elf.audio import (
     calculate_rms,
     hz_to_jianpu,
     jianpu_glide,
+    jianpu_to_semitones,
     pcm16le_to_float32,
     pitch_cents_off,
     prepare_asr_audio,
@@ -235,6 +236,27 @@ class AudioTests(unittest.TestCase):
         self.assertEqual(len(windows), 1)
         self.assertEqual(windows[0].start_seconds, 0.0)
         self.assertEqual(windows[0].samples.size, 3)
+
+
+class JianpuParseTests(unittest.TestCase):
+    def test_round_trips_hz_to_jianpu_to_semitones(self):
+        tonic = 220.0
+        for semitones in (-13, -12, -1, 0, 1, 2, 4, 5, 7, 9, 11, 12, 13):
+            token = hz_to_jianpu(tonic * 2 ** (semitones / 12.0), tonic)
+            self.assertEqual(jianpu_to_semitones(token), float(semitones))
+
+    def test_ascii_octave_marks(self):
+        self.assertEqual(jianpu_to_semitones("1'"), 12.0)
+        self.assertEqual(jianpu_to_semitones("1,"), -12.0)
+        self.assertEqual(jianpu_to_semitones("#4"), 6.0)
+
+    def test_glide_uses_leading_degree(self):
+        self.assertEqual(jianpu_to_semitones("3↗5"), 4.0)
+        self.assertEqual(jianpu_to_semitones("5↘1"), 7.0)
+
+    def test_rests_and_garbage_return_none(self):
+        for token in ("", "0", "-", None, "x"):
+            self.assertIsNone(jianpu_to_semitones(token))
 
 
 if __name__ == "__main__":

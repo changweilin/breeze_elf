@@ -191,7 +191,11 @@ def save_voice_output(
     if not audio_wav:
         raise ValueError("output audio must not be empty")
 
-    safe_kind = "tts" if (kind or "").strip().lower() == "tts" else "convert"
+    normalized_kind = (kind or "").strip().lower()
+    # "convert-source" is the user's original clip kept alongside a "convert"
+    # output when 聲音轉換 saves the pair (打包遠端儲存).
+    valid_kinds = {"tts", "sing", "convert", "convert-source", "recording"}
+    safe_kind = normalized_kind if normalized_kind in valid_kinds else "convert"
     directory = _resolve_dir(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
     created_at = _now_iso(now)
