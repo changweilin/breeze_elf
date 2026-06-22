@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import math
 from dataclasses import dataclass
 
@@ -311,6 +312,97 @@ def summarize_pitch(
         voiced_ratio=float(voiced_ratio),
         points=tuple(_thin_pitch_points(points, max_points)),
     )
+
+
+def compute_spectrogram(
+    samples: np.ndarray,
+    sample_rate: int,
+    *,
+    max_hz: float = 2000.0,
+    time_bins: int = 160,
+    freq_bins: int = 64,
+    n_fft: int = 1024,
+    min_hz: float = 70.0,
+    f0_max_hz: float = 500.0,
+    rms_threshold: float = 0.01,
+    yin_threshold: float = 0.15,
+    confidence_threshold: float = 0.4,
+) -> dict | None:
+    """STFT magnitude spectrogram + an aligned per-frame f0 track for 基頻分析.
+
+    Returns a compact, JSON-friendly payload: the magnitudes are pooled to
+    ``time_bins × freq_bins``, converted to dB, normalized to 0–1 and quantized
+    to ``uint8`` (base64). ``f0`` holds one fundamental per time bin (``None``
+    where the frame is non-voiced) sharing the spectrogram's time axis, so the
+    frontend can overlay the continuous 基頻 curve directly on the image.
+    """
+    if sample_rate <= 0 or samples.size == 0 or n_fft <= 0:
+        return None
+    window = np.hanning(n_fft).astype(np.float64)
+    if samples.size >= n_fft:
+        usable = samples.size - n_fft
+        hop = max(1, usable // max(1, time_bins - 1)) if time_bins > 1 else usable + 1
+        starts = list(range(0, usable + 1, hop))[:time_bins]
+    else:
+        starts = [0]
+    if not starts:
+        starts = [0]
+
+    freqs = np.fft.rfftfreq(n_fft, d=1.0 / sample_rate)
+    keep = freqs <= max_hz
+    nkeep = int(np.count_nonzero(keep))
+    if nkeep < 2:
+        return None
+
+    min_lag = max(1, round(sample_rate / f0_max_hz))
+    max_lag = max(min_lag + 1, round(sample_rate / min_hz))
+    can_track_f0 = n_fft > max_lag
+
+    mags = np.empty((len(starts), nkeep), dtype=np.float64)
+    f0: list[float | None] = []
+    for index, start in enumerate(starts):
+        segment = samples[start : start + n_fft]
+        if segment.size < n_fft:
+            segment = np.pad(segment, (0, n_fft - segment.size))
+        segment = segment.astype(np.float64)
+        mags[index] = np.abs(np.fft.rfft(segment * window))[keep]
+
+        hz: float | None = None
+        centered = segment - segment.mean()
+        if can_track_f0 and calculate_rms(centered) >= rms_threshold:
+            candidate, confidence = _yin_pitch(
+                centered, sample_rate, min_lag, max_lag, yin_threshold
+            )
+            in_range = min_hz <= candidate <= f0_max_hz
+            if candidate > 0 and confidence >= confidence_threshold and in_range:
+                hz = round(float(candidate), 1)
+        f0.append(hz)
+
+    if nkeep > freq_bins:
+        edges = np.linspace(0, nkeep, freq_bins + 1).astype(int)
+        pooled = np.empty((mags.shape[0], freq_bins), dtype=np.float64)
+        for band in range(freq_bins):
+            low = edges[band]
+            high = max(low + 1, edges[band + 1])
+            pooled[:, band] = mags[:, low:high].mean(axis=1)
+        mags = pooled
+        out_freq_bins = freq_bins
+    else:
+        out_freq_bins = nkeep
+
+    db = 20.0 * np.log10(np.maximum(mags, 1e-6))
+    db -= float(db.max())
+    db = np.clip(db, -80.0, 0.0)
+    quant = np.clip((db + 80.0) / 80.0 * 255.0, 0.0, 255.0).astype(np.uint8)
+
+    return {
+        "timeBins": int(quant.shape[0]),
+        "freqBins": int(out_freq_bins),
+        "maxHz": round(float(freqs[keep][-1]), 1),
+        "f0MaxHz": float(f0_max_hz),
+        "magnitudes": base64.b64encode(np.ascontiguousarray(quant).tobytes()).decode("ascii"),
+        "f0": f0,
+    }
 
 
 def hz_to_jianpu(hz: float | None, tonic_hz: float | None) -> str:

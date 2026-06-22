@@ -1053,37 +1053,78 @@ async function saveSingleOutput(audioBase64, kind, button, { text } = {}) {
   }
 }
 
-// 打包下載 — zip the original + converted clips into one .zip download.
-function bundleDownloadConvert() {
+// Which clips to include — asked via the checkbox dialog (selection remembered).
+// The converted clip defaults on; the original defaults off but stays available.
+function convertBundleItems() {
+  const items = [];
+  if (state.cvSourceB64) {
+    items.push({ key: "source", label: "原始音檔", defaultChecked: false });
+  }
+  items.push({ key: "converted", label: "轉換音檔", defaultChecked: true });
+  return items;
+}
+
+// 打包下載 — ask which clips to include, then download (zip when >1, else the
+// single wav directly).
+async function bundleDownloadConvert() {
   if (!state.cvResultB64) {
+    return;
+  }
+  const keys = await pickItems({
+    title: "打包下載",
+    storageKey: "voice-convert-download",
+    items: convertBundleItems(),
+  });
+  if (!keys || keys.length === 0) {
     return;
   }
   const stamp = Date.now();
   const files = [];
-  if (state.cvSourceB64) {
+  if (keys.includes("source") && state.cvSourceB64) {
     files.push({ name: `breeze-voice-original-${stamp}.wav`, bytes: base64ToBytes(state.cvSourceB64) });
   }
-  files.push({ name: `breeze-voice-converted-${stamp}.wav`, bytes: base64ToBytes(state.cvResultB64) });
-  const url = URL.createObjectURL(filesToZipBlob(files));
-  downloadUrl(url, `breeze-voice-convert-${stamp}.zip`);
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-  setStatus("已打包下載原始與轉換音檔");
+  if (keys.includes("converted")) {
+    files.push({ name: `breeze-voice-converted-${stamp}.wav`, bytes: base64ToBytes(state.cvResultB64) });
+  }
+  if (files.length === 0) {
+    return;
+  }
+  if (files.length === 1) {
+    const url = URL.createObjectURL(new Blob([files[0].bytes], { type: "audio/wav" }));
+    downloadUrl(url, files[0].name);
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } else {
+    const url = URL.createObjectURL(filesToZipBlob(files));
+    downloadUrl(url, `breeze-voice-convert-${stamp}.zip`);
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  setStatus("已下載所選音檔");
 }
 
-// 打包遠端儲存 — save both clips remotely as a pair.
+// 打包遠端儲存 — ask which clips to include, then save the selected ones.
 async function bundleSaveConvert() {
   if (!state.cvResultB64) {
+    return;
+  }
+  const keys = await pickItems({
+    title: "打包遠端儲存",
+    storageKey: "voice-convert-save",
+    items: convertBundleItems(),
+  });
+  if (!keys || keys.length === 0) {
     return;
   }
   els.cvBundleSave.disabled = true;
   setStatus("打包遠端儲存中…", "live");
   try {
     const names = [];
-    if (state.cvSourceB64) {
+    if (keys.includes("source") && state.cvSourceB64) {
       names.push(await saveAudioRemote(state.cvSourceB64, "convert-source"));
     }
-    names.push(await saveAudioRemote(state.cvResultB64, "convert"));
-    setStatus(`已打包遠端儲存:${names.join("、")}`);
+    if (keys.includes("converted")) {
+      names.push(await saveAudioRemote(state.cvResultB64, "convert"));
+    }
+    setStatus(names.length ? `已遠端儲存:${names.join("、")}` : "未選擇任何項目");
   } catch (error) {
     setStatus(error?.message || "打包遠端儲存失敗", "error");
   } finally {
@@ -1167,6 +1208,100 @@ function setStatus(text, mode = "") {
 function positiveNumber(value) {
   const parsed = Number.parseFloat(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+// --------------------------------------------------------------------------- //
+// multi-file picker dialog (shared markup in index.html, remembers selection)
+// --------------------------------------------------------------------------- //
+
+const PICK_STORAGE_PREFIX = "breeze-elf-pick-";
+
+function readPickedKeys(storageKey) {
+  try {
+    const value = JSON.parse(localStorage.getItem(PICK_STORAGE_PREFIX + storageKey));
+    return Array.isArray(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function writePickedKeys(storageKey, keys) {
+  try {
+    localStorage.setItem(PICK_STORAGE_PREFIX + storageKey, JSON.stringify(keys));
+  } catch {
+    /* storage unavailable — selection just won't be remembered */
+  }
+}
+
+// Show the shared checkbox dialog; resolves to the chosen keys (locked items are
+// always included) or null when cancelled. Selection is remembered per key.
+function pickItems({ title, storageKey, items, confirmLabel = "確認" }) {
+  return new Promise((resolve) => {
+    const dialog = document.querySelector("#pick-dialog");
+    if (!dialog) {
+      resolve(items.map((item) => item.key));
+      return;
+    }
+    dialog.querySelector(".pick-title").textContent = title;
+    const list = dialog.querySelector(".pick-list");
+    list.replaceChildren();
+
+    const remembered = readPickedKeys(storageKey);
+    items.forEach((item) => {
+      const checked = item.locked
+        ? true
+        : remembered
+          ? remembered.includes(item.key)
+          : item.defaultChecked !== false;
+      const label = document.createElement("label");
+      label.className = "pick-item";
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.value = item.key;
+      checkbox.checked = checked;
+      checkbox.disabled = Boolean(item.locked);
+      const span = document.createElement("span");
+      span.textContent = item.label;
+      label.append(checkbox, span);
+      list.append(label);
+    });
+
+    const confirmBtn = dialog.querySelector(".pick-confirm");
+    const cancelBtn = dialog.querySelector(".pick-cancel");
+    confirmBtn.textContent = confirmLabel;
+
+    let settled = false;
+    const onClose = () => finish(null);
+    const finish = (result) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      confirmBtn.onclick = null;
+      cancelBtn.onclick = null;
+      dialog.removeEventListener("close", onClose);
+      if (dialog.open) {
+        dialog.close();
+      }
+      resolve(result);
+    };
+    confirmBtn.onclick = () => {
+      const inputs = list.querySelectorAll("input");
+      const keys = items
+        .filter((item, index) => item.locked || inputs[index].checked)
+        .map((item) => item.key);
+      writePickedKeys(storageKey, keys);
+      finish(keys);
+    };
+    cancelBtn.onclick = () => finish(null);
+    dialog.addEventListener("close", onClose); // ESC / programmatic close → cancel
+
+    if (typeof dialog.showModal === "function") {
+      dialog.showModal();
+    } else {
+      dialog.setAttribute("open", "");
+    }
+  });
 }
 
 function formatDuration(seconds) {

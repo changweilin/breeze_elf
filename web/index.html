@@ -356,12 +356,6 @@
         font-weight: 720;
       }
 
-      #pitch {
-        position: relative;
-        z-index: 1;
-      }
-
-      #pitch[aria-pressed="true"],
       .mini.active {
         border-color: var(--warn);
         color: var(--warn-contrast);
@@ -369,9 +363,72 @@
         box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warn-contrast) 24%, transparent);
       }
 
-      #pitch[aria-pressed="true"]:hover:not(:disabled),
       .mini.active:hover:not(:disabled) {
         background: var(--warn);
+      }
+
+      /* 逐字稿顯示頁籤:文字 / 文字+簡譜 / 基頻分析 */
+      .view-tabs {
+        display: inline-flex;
+        flex: 0 0 auto;
+        gap: 2px;
+        padding: 3px;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: var(--panel-subtle);
+      }
+
+      .view-tab {
+        min-height: 30px;
+        padding: 0 9px;
+        border: 0;
+        border-radius: 7px;
+        background: transparent;
+        color: var(--muted);
+        font: inherit;
+        font-weight: 700;
+        font-size: 0.8rem;
+        white-space: nowrap;
+        cursor: pointer;
+      }
+
+      .view-tab[aria-selected="true"] {
+        background: var(--panel);
+        color: var(--ink);
+        box-shadow: 0 1px 2px var(--shadow);
+      }
+
+      .view-tab:hover:not([aria-selected="true"]) {
+        color: var(--ink);
+      }
+
+      /* 基頻分析:STFT 圖譜 + 疊加的基頻曲線 */
+      .spectro-wrap {
+        margin-top: 8px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        overflow: hidden;
+        background: #0b1020;
+      }
+
+      .spectro-wrap canvas {
+        display: block;
+        width: 100%;
+        height: 132px;
+      }
+
+      .spectro-legend {
+        display: flex;
+        justify-content: space-between;
+        padding: 4px 8px;
+        font-size: 0.72rem;
+        color: var(--muted);
+      }
+
+      .spectro-empty {
+        padding: 16px;
+        font-size: 0.84rem;
+        color: var(--muted);
       }
 
       #lines {
@@ -717,6 +774,67 @@
 
       dialog.about::backdrop {
         background: rgba(0, 0, 0, 0.45);
+      }
+
+      /* 多檔案下載/儲存的勾選對話框 */
+      dialog.pick-dialog {
+        width: min(360px, 90vw);
+        padding: 0;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--panel);
+        color: var(--ink);
+        box-shadow: 0 18px 48px var(--shadow);
+      }
+
+      dialog.pick-dialog::backdrop {
+        background: rgba(0, 0, 0, 0.45);
+      }
+
+      .pick-form {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        padding: 18px;
+        margin: 0;
+      }
+
+      .pick-title {
+        margin: 0;
+        font-size: 1rem;
+      }
+
+      .pick-list {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      .pick-item {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 12px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        font-weight: 640;
+        cursor: pointer;
+      }
+
+      .pick-item input {
+        width: 18px;
+        height: 18px;
+        flex: none;
+      }
+
+      .pick-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+      }
+
+      .pick-actions .mini {
+        min-width: 4rem;
       }
 
       .about-head {
@@ -1345,9 +1463,13 @@
 
       <section class="transcript" aria-label="transcript">
         <div class="bar">
+          <div class="view-tabs" role="tablist" aria-label="逐字稿顯示方式">
+            <button class="view-tab" type="button" data-view="text" role="tab" aria-selected="true">文字</button>
+            <button class="view-tab" type="button" data-view="jianpu" role="tab" aria-selected="false">文字+簡譜</button>
+            <button class="view-tab" type="button" data-view="spectrum" role="tab" aria-selected="false">基頻分析</button>
+          </div>
           <div class="bar-actions">
-            <button id="pitch" class="mini" type="button" aria-pressed="false" aria-label="顯示音高模式" title="顯示每段文字的音高與簡譜">音高</button>
-            <button id="analyze" class="mini" type="button" disabled aria-label="重新計算音準" title="用更精準的演算法重新計算每個字的音高(後續計算,有進度條)">校準音準</button>
+            <button id="analyze" class="mini" type="button" disabled aria-label="後處理:重新計算音階與基頻分析" title="後處理:用更精準的演算法重新計算每個字的音階與簡譜,並產生基頻分析(後續計算,有進度條)">後處理</button>
             <button id="copy" class="mini" type="button" disabled>複製</button>
             <button id="download" class="mini" type="button" disabled>下載</button>
             <button id="save" class="mini" type="button" disabled>遠端儲存</button>
@@ -1355,7 +1477,7 @@
         </div>
         <div id="analyze-progress" class="voice-progress" hidden aria-live="polite">
           <div class="vp-head">
-            <span id="analyze-progress-label">重新計算音準中</span>
+            <span id="analyze-progress-label">後處理中</span>
             <span id="analyze-progress-pct"></span>
           </div>
           <div class="progress-track">
@@ -1588,7 +1710,18 @@
       </div>
     </dialog>
 
-    <script src="./app.js?v=20" type="module"></script>
-    <script src="./voice.js?v=12" type="module"></script>
+    <dialog id="pick-dialog" class="pick-dialog" aria-labelledby="pick-title">
+      <form method="dialog" class="pick-form">
+        <h2 id="pick-title" class="pick-title">選擇項目</h2>
+        <div class="pick-list"></div>
+        <div class="pick-actions">
+          <button type="button" class="mini pick-cancel">取消</button>
+          <button type="button" class="primary pick-confirm">確認</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="./app.js?v=21" type="module"></script>
+    <script src="./voice.js?v=13" type="module"></script>
   </body>
 </html>

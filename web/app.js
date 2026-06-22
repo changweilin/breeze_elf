@@ -3,7 +3,7 @@ const els = {
   load: document.querySelector("#load"),
   fileInput: document.querySelector("#file"),
   clear: document.querySelector("#clear"),
-  pitch: document.querySelector("#pitch"),
+  viewTabs: Array.from(document.querySelectorAll(".view-tab")),
   analyze: document.querySelector("#analyze"),
   analyzeProgress: document.querySelector("#analyze-progress"),
   analyzeProgressLabel: document.querySelector("#analyze-progress-label"),
@@ -53,6 +53,9 @@ const THEME_COLORS = {
 };
 const PITCH_MIN_HZ = 70;
 const PITCH_MAX_HZ = 500;
+// Transcript display tabs: 文字 / 文字+簡譜 / 基頻分析. Declared up here because
+// initialViewMode() (used in the state initializer below) reads it.
+const VIEW_MODES = ["text", "jianpu", "spectrum"];
 const INITIAL_SETTINGS = readStoredSettings();
 const DEMO_EVENTS = [
   {
@@ -117,9 +120,10 @@ const state = {
   analyzing: false,
   transcript: "",
   transcriptBlocks: [],
-  pitchMode: SEARCH_PARAMS.has("pitch")
-    ? SEARCH_PARAMS.get("pitch") === "1"
-    : INITIAL_SETTINGS.pitchMode === true,
+  // Per-block 基頻分析 (spectrogram + f0), produced by 後處理, parallel to
+  // transcriptBlocks by index. Kept out of the persisted/saved transcript.
+  analysisSpectra: [],
+  viewMode: initialViewMode(),
   droppedClientChunks: 0,
   statsTimer: 0,
   sessionPersistTimer: 0,
@@ -140,7 +144,6 @@ const state = {
   demoTimers: [],
 };
 
-let lastPitchTouchToggleAt = 0;
 let audioDatabasePromise = null;
 
 function demoPitch(medianHz, values) {
@@ -212,7 +215,7 @@ function persistSettings() {
     localStorage.setItem(
       SETTINGS_STORAGE_KEY,
       JSON.stringify({
-        pitchMode: state.pitchMode,
+        viewMode: state.viewMode,
       }),
     );
   } catch {
@@ -318,6 +321,7 @@ function handleToggle() {
 function renderTranscript(text, { persist = true } = {}) {
   state.transcript = text;
   state.transcriptBlocks = [];
+  state.analysisSpectra = [];
   state.openBlocks.clear();
   renderTranscriptView({ scrollToEnd: true });
   setTranscriptActions(Boolean(text.trim()));
@@ -362,8 +366,9 @@ function renderTranscriptView({ scrollToEnd = false } = {}) {
   const previousScroll = els.lines.scrollTop;
   const wasAtBottom = els.lines.scrollHeight - previousScroll - els.lines.clientHeight < 48;
 
-  els.lines.classList.toggle("pitch-mode", state.pitchMode);
   els.lines.classList.toggle("block-mode", hasBlocks);
+  els.lines.classList.toggle("view-jianpu", state.viewMode === "jianpu");
+  els.lines.classList.toggle("view-spectrum", state.viewMode === "spectrum");
   els.lines.replaceChildren();
 
   if (hasBlocks) {
@@ -388,8 +393,11 @@ function renderTranscriptEntry(block, index) {
   entry.className = "transcript-entry";
 
   const characters = Array.isArray(block.characters) ? block.characters : [];
-  const jianpuMode = state.pitchMode && characters.length > 0;
-  const hasDetails = characters.length > 0 || Boolean(block.pitch);
+  const mode = state.viewMode;
+  const jianpuMode = mode === "jianpu" && characters.length > 0;
+  const spectrumMode = mode === "spectrum";
+  // In 基頻分析 the spectrogram is shown inline (not behind the expand chevron).
+  const hasDetails = !spectrumMode && (characters.length > 0 || Boolean(block.pitch));
   const open = hasDetails && state.openBlocks.has(index);
 
   const main = document.createElement("div");
@@ -400,7 +408,7 @@ function renderTranscriptEntry(block, index) {
   const range = document.createElement("span");
   range.textContent = formatTimeRange(block.startSeconds, block.endSeconds);
   meta.append(range);
-  if (state.pitchMode && block.pitch) {
+  if (mode !== "text" && block.pitch) {
     const pitch = document.createElement("span");
     pitch.className = "pitch-value";
     pitch.textContent = formatPitch(block.pitch);
@@ -436,6 +444,11 @@ function renderTranscriptEntry(block, index) {
     main.setAttribute("aria-label", `${block.text.trim().slice(0, 24) || "段落"} 詳細資訊`);
   }
   entry.append(main);
+
+  if (spectrumMode) {
+    entry.classList.add("spectrum");
+    entry.append(renderSpectrogram(state.analysisSpectra[index]));
+  }
 
   if (hasDetails) {
     const details = renderEntryDetails(block);
@@ -665,11 +678,129 @@ function renderPitchSpark(pitch) {
 function renderPartial(data) {
   const text = data.text || "";
   const pitch = normalizePitch(data.pitch);
-  if (state.pitchMode && pitch) {
+  if (state.viewMode !== "text" && pitch) {
     els.partial.textContent = `${text}\n${formatPitch(pitch)}`;
     return;
   }
   els.partial.textContent = text;
+}
+
+// 基頻分析:render a block's STFT spectrogram (uint8 magnitudes from 後處理) with
+// the continuous time→基頻 curve overlaid; non-voiced frames (null f0) leave gaps.
+function renderSpectrogram(spectro) {
+  const wrap = document.createElement("div");
+  wrap.className = "spectro-wrap";
+  if (!spectro || !spectro.magnitudes || !spectro.timeBins || !spectro.freqBins) {
+    const empty = document.createElement("div");
+    empty.className = "spectro-empty";
+    empty.textContent = "尚無基頻分析資料,請先點上方的「後處理」。";
+    wrap.append(empty);
+    return wrap;
+  }
+
+  const timeBins = spectro.timeBins;
+  const freqBins = spectro.freqBins;
+  const maxHz = spectro.maxHz || 2000;
+  const magnitudes = base64ToUint8(spectro.magnitudes);
+
+  // Paint the magnitudes onto a low-res offscreen canvas (one pixel per bin),
+  // then scale it up smoothly onto the display canvas.
+  const source = document.createElement("canvas");
+  source.width = timeBins;
+  source.height = freqBins;
+  const sctx = source.getContext("2d");
+  const image = sctx.createImageData(timeBins, freqBins);
+  for (let t = 0; t < timeBins; t += 1) {
+    for (let f = 0; f < freqBins; f += 1) {
+      const value = magnitudes[t * freqBins + f] || 0;
+      const [r, g, b] = spectroColor(value);
+      const y = freqBins - 1 - f; // low freq at the bottom
+      const offset = (y * timeBins + t) * 4;
+      image.data[offset] = r;
+      image.data[offset + 1] = g;
+      image.data[offset + 2] = b;
+      image.data[offset + 3] = 255;
+    }
+  }
+  sctx.putImageData(image, 0, 0);
+
+  const width = 480;
+  const height = 132;
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(source, 0, 0, timeBins, freqBins, 0, 0, width, height);
+
+  // Overlay the f0 curve on the same freq axis (0–maxHz), breaking at nulls.
+  const f0 = Array.isArray(spectro.f0) ? spectro.f0 : [];
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = "#7df9ff";
+  ctx.lineJoin = "round";
+  ctx.beginPath();
+  let drawing = false;
+  f0.forEach((hz, index) => {
+    if (hz == null || !Number.isFinite(hz)) {
+      drawing = false;
+      return;
+    }
+    const x = f0.length > 1 ? (index / (f0.length - 1)) * width : width / 2;
+    const y = height - Math.min(1, hz / maxHz) * height;
+    if (drawing) {
+      ctx.lineTo(x, y);
+    } else {
+      ctx.moveTo(x, y);
+      drawing = true;
+    }
+  });
+  ctx.stroke();
+
+  wrap.append(canvas);
+  const legend = document.createElement("div");
+  legend.className = "spectro-legend";
+  const left = document.createElement("span");
+  left.textContent = `0–${Math.round(maxHz)} Hz`;
+  const right = document.createElement("span");
+  right.textContent = "基頻曲線";
+  legend.append(left, right);
+  wrap.append(legend);
+  return wrap;
+}
+
+// Inferno-ish ramp (dark → purple → orange → pale) readable on the dark canvas.
+function spectroColor(value) {
+  const stops = [
+    [0.0, 12, 14, 32],
+    [0.25, 64, 22, 96],
+    [0.5, 146, 42, 94],
+    [0.7, 222, 92, 52],
+    [0.85, 250, 172, 56],
+    [1.0, 255, 252, 206],
+  ];
+  const t = value / 255;
+  for (let i = 1; i < stops.length; i += 1) {
+    if (t <= stops[i][0]) {
+      const [t0, r0, g0, b0] = stops[i - 1];
+      const [t1, r1, g1, b1] = stops[i];
+      const k = (t - t0) / (t1 - t0 || 1);
+      return [
+        Math.round(r0 + (r1 - r0) * k),
+        Math.round(g0 + (g1 - g0) * k),
+        Math.round(b0 + (b1 - b0) * k),
+      ];
+    }
+  }
+  return [255, 252, 206];
+}
+
+function base64ToUint8(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
 }
 
 function finiteNumber(value) {
@@ -728,9 +859,9 @@ function normalizeCharacters(characters) {
 
 function formatPitch(pitch) {
   if (!Number.isFinite(pitch?.medianHz)) {
-    return "音高未偵測";
+    return "音階未偵測";
   }
-  return `音高 ${Math.round(pitch.medianHz)} Hz`;
+  return `音階 ${Math.round(pitch.medianHz)} Hz`;
 }
 
 function formatTimeRange(startSeconds, endSeconds) {
@@ -748,44 +879,36 @@ function formatClockTime(totalSeconds) {
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${fraction}`;
 }
 
-function setPitchMode(enabled, { persist = true } = {}) {
-  state.pitchMode = Boolean(enabled);
-  els.pitch.classList.toggle("active", state.pitchMode);
-  els.pitch.textContent = "音高";
-  els.pitch.setAttribute("aria-pressed", String(state.pitchMode));
-  els.pitch.setAttribute("aria-label", state.pitchMode ? "隱藏音高模式" : "顯示音高模式");
-  els.pitch.setAttribute("title", state.pitchMode ? "隱藏每段文字的音高" : "顯示每段文字的音高");
+function initialViewMode() {
+  const requested = SEARCH_PARAMS.get("view");
+  if (VIEW_MODES.includes(requested)) {
+    return requested;
+  }
+  if (SEARCH_PARAMS.has("pitch")) {
+    return SEARCH_PARAMS.get("pitch") === "1" ? "jianpu" : "text";
+  }
+  if (VIEW_MODES.includes(INITIAL_SETTINGS.viewMode)) {
+    return INITIAL_SETTINGS.viewMode;
+  }
+  // Migrate the old boolean 音高 setting to the matching tab.
+  return INITIAL_SETTINGS.pitchMode === true ? "jianpu" : "text";
+}
+
+function setViewMode(mode, { persist = true } = {}) {
+  state.viewMode = VIEW_MODES.includes(mode) ? mode : "text";
+  els.viewTabs.forEach((tab) => {
+    tab.setAttribute("aria-selected", String(tab.dataset.view === state.viewMode));
+  });
   renderTranscriptView({ scrollToEnd: true });
   if (persist) {
     persistSettings();
   }
 }
 
-function togglePitchModeFromEvent(event) {
-  const now = Date.now();
-  const isPointer = event?.type === "pointerup";
-  const isPointerTouch = isPointer && event.pointerType !== "mouse";
-  const isTouch = event?.type === "touchend" || isPointerTouch;
-  if (isPointer && !isPointerTouch) {
-    return;
-  }
-  if (event?.type === "click" && now - lastPitchTouchToggleAt < 700) {
-    return;
-  }
-  if (isTouch) {
-    event.preventDefault();
-    lastPitchTouchToggleAt = now;
-  }
-  setPitchMode(!state.pitchMode);
-}
-
-function bindPitchToggle() {
-  if (window.PointerEvent) {
-    els.pitch.addEventListener("pointerup", togglePitchModeFromEvent);
-  } else {
-    els.pitch.addEventListener("touchend", togglePitchModeFromEvent, { passive: false });
-  }
-  els.pitch.addEventListener("click", togglePitchModeFromEvent);
+function bindViewTabs() {
+  els.viewTabs.forEach((tab) => {
+    tab.addEventListener("click", () => setViewMode(tab.dataset.view));
+  });
 }
 
 function entryIndexFromEvent(event) {
@@ -1698,7 +1821,7 @@ function handleServerMessage(event) {
 applyTheme(preferredTheme());
 applyRuntimeMode();
 setRunning(false);
-setPitchMode(state.pitchMode, { persist: false });
+setViewMode(state.viewMode, { persist: false });
 restoreTranscriptSession();
 void restoreAudioSession();
 
@@ -1716,7 +1839,7 @@ els.about?.addEventListener("click", (event) => {
     els.about.close();
   }
 });
-bindPitchToggle();
+bindViewTabs();
 bindEntryToggle();
 SYSTEM_DARK_QUERY.addEventListener("change", syncSystemTheme);
 els.toggle.addEventListener("click", handleToggle);
@@ -1749,30 +1872,52 @@ els.copy.addEventListener("click", async () => {
     flashStats("複製失敗");
   }
 });
-els.download.addEventListener("click", () => {
+els.download.addEventListener("click", async () => {
   const text = state.transcript.trim();
   if (!text) {
     return;
   }
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  downloadBlobAs(
-    new Blob([state.transcript], { type: "text/plain;charset=utf-8" }),
-    `breeze-elf-${stamp}.txt`,
-  );
-  // When the transcript carries 簡譜/timing, also emit the structured .json the
-  // 簡譜唱歌 page reads (same shape as the remote save), so a downloaded
-  // transcript can be uploaded there directly and parsed in full.
-  if (hasStructuredTranscript()) {
+  const downloadTxt = () =>
+    downloadBlobAs(
+      new Blob([state.transcript], { type: "text/plain;charset=utf-8" }),
+      `breeze-elf-${stamp}.txt`,
+    );
+  // The structured .json (簡譜/timing) is what the 簡譜唱歌 page reads, so a
+  // downloaded transcript can be uploaded there directly.
+  const downloadJson = () =>
     downloadBlobAs(
       new Blob([JSON.stringify(buildTranscriptDocument(state.transcript), null, 2)], {
         type: "application/json;charset=utf-8",
       }),
       `breeze-elf-${stamp}.json`,
     );
-    flashStats("已下載逐字稿(含簡譜 JSON)");
-  } else {
+
+  // Plain text only → a single file, no need to ask.
+  if (!hasStructuredTranscript()) {
+    downloadTxt();
     flashStats("已下載");
+    return;
   }
+
+  const keys = await pickItems({
+    title: "下載逐字稿",
+    storageKey: "transcript-download",
+    items: [
+      { key: "txt", label: "逐字稿文字 (.txt)" },
+      { key: "json", label: "簡譜 JSON (.json)" },
+    ],
+  });
+  if (!keys || keys.length === 0) {
+    return;
+  }
+  if (keys.includes("txt")) {
+    downloadTxt();
+  }
+  if (keys.includes("json")) {
+    downloadJson();
+  }
+  flashStats("已下載");
 });
 els.save.addEventListener("click", async () => {
   if (DEMO_MODE) {
@@ -1785,6 +1930,24 @@ els.save.addEventListener("click", async () => {
     return;
   }
 
+  // When the transcript has 簡譜/timing, ask which parts to save (the text is
+  // always written; the 簡譜 JSON is optional). Selection is remembered.
+  let includeJianpu = true;
+  if (hasStructuredTranscript()) {
+    const keys = await pickItems({
+      title: "遠端儲存逐字稿",
+      storageKey: "transcript-save",
+      items: [
+        { key: "text", label: "逐字稿文字", locked: true },
+        { key: "jianpu", label: "簡譜 / 音階資料" },
+      ],
+    });
+    if (!keys) {
+      return;
+    }
+    includeJianpu = keys.includes("jianpu");
+  }
+
   state.savingRemote = true;
   setTranscriptActions(true);
   window.clearTimeout(state.statsTimer);
@@ -1792,14 +1955,17 @@ els.save.addEventListener("click", async () => {
   els.stats.textContent = "遠端儲存中";
 
   try {
-    // The transcript save carries only the transcript + its 簡譜/timing (the
-    // recording has its own download / remote-save at the player below).
+    // The transcript save carries the transcript text plus, when chosen, its
+    // 簡譜/timing. Omitting `blocks` entirely tells the server to write txt only
+    // (sending [] would still emit an empty .json).
     const payload = {
       text,
       title: transcriptTitle(text),
       sampleRate: state.audioSampleRate,
-      blocks: serializeBlocksForSave(),
     };
+    if (includeJianpu) {
+      payload.blocks = serializeBlocksForSave();
+    }
 
     const response = await fetch("/api/transcripts", {
       method: "POST",
@@ -1923,6 +2089,101 @@ function downloadBlobAs(blob, name) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+// --------------------------------------------------------------------------- //
+// multi-file picker dialog (remembers the last selection per operation)
+// --------------------------------------------------------------------------- //
+
+const PICK_STORAGE_PREFIX = "breeze-elf-pick-";
+
+function readPickedKeys(storageKey) {
+  try {
+    const value = JSON.parse(localStorage.getItem(PICK_STORAGE_PREFIX + storageKey));
+    return Array.isArray(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function writePickedKeys(storageKey, keys) {
+  try {
+    localStorage.setItem(PICK_STORAGE_PREFIX + storageKey, JSON.stringify(keys));
+  } catch {
+    /* storage full / unavailable — selection just won't be remembered */
+  }
+}
+
+// Show the shared checkbox dialog. Resolves to the array of chosen keys (locked
+// items are always included), or null when cancelled. The selection is restored
+// from / saved to localStorage under `storageKey` so it is remembered.
+function pickItems({ title, storageKey, items, confirmLabel = "確認" }) {
+  return new Promise((resolve) => {
+    const dialog = document.querySelector("#pick-dialog");
+    if (!dialog) {
+      resolve(items.map((item) => item.key));
+      return;
+    }
+    dialog.querySelector(".pick-title").textContent = title;
+    const list = dialog.querySelector(".pick-list");
+    list.replaceChildren();
+
+    const remembered = readPickedKeys(storageKey);
+    items.forEach((item) => {
+      const checked = item.locked
+        ? true
+        : remembered
+          ? remembered.includes(item.key)
+          : item.defaultChecked !== false;
+      const label = document.createElement("label");
+      label.className = "pick-item";
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.value = item.key;
+      checkbox.checked = checked;
+      checkbox.disabled = Boolean(item.locked);
+      const span = document.createElement("span");
+      span.textContent = item.label;
+      label.append(checkbox, span);
+      list.append(label);
+    });
+
+    const confirmBtn = dialog.querySelector(".pick-confirm");
+    const cancelBtn = dialog.querySelector(".pick-cancel");
+    confirmBtn.textContent = confirmLabel;
+
+    let settled = false;
+    const onClose = () => finish(null);
+    const finish = (result) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      confirmBtn.onclick = null;
+      cancelBtn.onclick = null;
+      dialog.removeEventListener("close", onClose);
+      if (dialog.open) {
+        dialog.close();
+      }
+      resolve(result);
+    };
+    confirmBtn.onclick = () => {
+      const inputs = list.querySelectorAll("input");
+      const keys = items
+        .filter((item, index) => item.locked || inputs[index].checked)
+        .map((item) => item.key);
+      writePickedKeys(storageKey, keys);
+      finish(keys);
+    };
+    cancelBtn.onclick = () => finish(null);
+    dialog.addEventListener("close", onClose); // ESC / programmatic close → cancel
+
+    if (typeof dialog.showModal === "function") {
+      dialog.showModal();
+    } else {
+      dialog.setAttribute("open", "");
+    }
+  });
+}
+
 async function encodeRecordedAudioBase64() {
   if (!state.audioBytes) {
     return "";
@@ -1937,30 +2198,30 @@ async function encodeRecordedAudioBase64() {
   return btoa(binary);
 }
 
-// 校準音準 — re-measure every character's pitch from the recorded/loaded audio
-// with the more accurate (offline) tracker and a single global 主音, then fold
-// the refined 簡譜/音高 back into the transcript. The compute runs server-side
-// behind a real progress bar (it does not need to be real-time).
+// 後處理 — re-measure every character's pitch from the recorded/loaded audio with
+// the more accurate (offline) tracker and a single global 主音, and compute each
+// block's 基頻分析 (STFT + f0). Everything post-processable is done in one pass,
+// server-side, behind a real progress bar (it does not need to be real-time).
 async function analyzePitch() {
   if (DEMO_MODE) {
-    flashStats("示意模式不會重新分析音準");
+    flashStats("示意模式不會執行後處理");
     return;
   }
   if (state.analyzingPitch || state.running) {
     return;
   }
   if (!hasStructuredTranscript()) {
-    flashStats("沒有可校準的逐字稿,請先以音高模式錄製或載入");
+    flashStats("沒有可後處理的逐字稿,請先錄製或載入");
     return;
   }
   if (!state.audioBytes) {
-    flashStats("找不到對應的音檔,無法重新計算音準");
+    flashStats("找不到對應的音檔,無法後處理");
     return;
   }
 
   state.analyzingPitch = true;
   setTranscriptActions(Boolean(state.transcript.trim()));
-  showAnalyzeProgress("重新計算音準中", 0, true);
+  showAnalyzeProgress("後處理中", 0, true);
   try {
     const audioBase64 = await encodeRecordedAudioBase64();
     if (!audioBase64) {
@@ -1977,7 +2238,7 @@ async function analyzePitch() {
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok || !data.ok) {
-      throw new Error(data.detail || "重新分析失敗");
+      throw new Error(data.detail || "後處理失敗");
     }
 
     const result = await pollAnalyzeStatus();
@@ -1986,9 +2247,9 @@ async function analyzePitch() {
     renderTranscriptView({ scrollToEnd: false });
     scheduleSessionPersist();
     const tonic = Number.isFinite(result.tonicHz) ? `,主音 ${Math.round(result.tonicHz)} Hz` : "";
-    flashStats(`音準已重新計算(${result.characterCount || 0} 字${tonic})`);
+    flashStats(`後處理完成(${result.characterCount || 0} 字${tonic})`);
   } catch (error) {
-    flashStats(error.message || "重新分析失敗");
+    flashStats(error.message || "後處理失敗");
   } finally {
     state.analyzingPitch = false;
     hideAnalyzeProgress();
@@ -2015,10 +2276,10 @@ function pollAnalyzeStatus() {
         resolve(data.result || { blocks: [] });
       } else if (data.status === "error") {
         window.clearInterval(timer);
-        reject(new Error(data.error || "重新分析失敗"));
+        reject(new Error(data.error || "後處理失敗"));
       } else {
         window.clearInterval(timer);
-        reject(new Error("分析未啟動"));
+        reject(new Error("後處理未啟動"));
       }
     }, 300);
   });
@@ -2030,6 +2291,7 @@ function applyAnalyzedBlocks(blocks) {
   if (!Array.isArray(blocks)) {
     return;
   }
+  state.analysisSpectra = [];
   blocks.forEach((refined, index) => {
     const target = state.transcriptBlocks[index];
     if (!target) {
@@ -2037,6 +2299,8 @@ function applyAnalyzedBlocks(blocks) {
     }
     target.pitch = normalizePitch(refined.pitch);
     target.characters = normalizeCharacters(refined.characters);
+    // Spectrogram stays out of transcriptBlocks so it is never persisted/saved.
+    state.analysisSpectra[index] = refined.spectrogram || null;
   });
 }
 

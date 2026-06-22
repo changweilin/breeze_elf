@@ -29,6 +29,7 @@ from .audio import (
     PitchSummary,
     SegmentAnalysis,
     analyze_segment,
+    compute_spectrogram,
     hz_to_jianpu,
     jianpu_glide,
     jianpu_to_semitones,
@@ -1146,13 +1147,16 @@ def _analyze_blocks_pitch(
     blocks: list[dict[str, Any]],
     progress: Callable[[float, str], None],
 ) -> dict[str, Any]:
-    """Re-measure every character's pitch from the audio, then rebuild the 簡譜
-    against a single global 主音 so it stays consistent across the whole piece."""
+    """Run every post-processable step in one pass: re-measure each character's
+    pitch from the audio, rebuild the 簡譜 against a single global 主音 (so it
+    stays consistent across the whole piece), and compute each block's STFT
+    spectrogram + 基頻 curve for the 基頻分析 view."""
     total = sum(len(block.get("characters") or []) for block in blocks) or 1
     done = 0
     measured: list[list[tuple[str, float, float, SegmentAnalysis]]] = []
     all_medians: list[float] = []
 
+    # Pass 1 (0.02–0.5): measure every character's pitch from its audio slice.
     progress(0.02, "分析音高")
     for block in blocks:
         block_measured: list[tuple[str, float, float, SegmentAnalysis]] = []
@@ -1169,14 +1173,15 @@ def _analyze_blocks_pitch(
                 if seg.median_hz:
                     all_medians.append(seg.median_hz)
             if done % 8 == 0 or done == total:
-                progress(0.02 + 0.88 * (done / total), f"分析音高 {done}/{total}")
+                progress(0.02 + 0.48 * (done / total), f"分析音高 {done}/{total}")
         measured.append(block_measured)
 
     tonic = float(np.median(all_medians)) if all_medians else 0.0
-    progress(0.92, "計算主音與簡譜")
 
+    # Pass 2 (0.5–1.0): rebuild 簡譜 vs the global 主音 + per-block 基頻分析.
+    block_total = len(blocks) or 1
     out_blocks: list[dict[str, Any]] = []
-    for block, block_measured in zip(blocks, measured):
+    for block_index, (block, block_measured) in enumerate(zip(blocks, measured)):
         characters = [
             _analyzed_character_payload(char, start, end, seg, tonic)
             for char, start, end, seg in block_measured
@@ -1189,8 +1194,11 @@ def _analyze_blocks_pitch(
                 "segmentKind": block.get("segmentKind") or "",
                 "pitch": _block_pitch_from_audio(samples, sample_rate, block),
                 "characters": characters,
+                "spectrogram": _block_spectrogram(samples, sample_rate, block),
             }
         )
+        spectro_done = (block_index + 1) / block_total
+        progress(0.5 + 0.5 * spectro_done, f"基頻分析 {block_index + 1}/{block_total}")
 
     progress(1.0, "完成")
     return {
@@ -1198,6 +1206,23 @@ def _analyze_blocks_pitch(
         "tonicHz": round(tonic, 1) if tonic else None,
         "characterCount": len(all_medians),
     }
+
+
+def _block_spectrogram(
+    samples: np.ndarray, sample_rate: int, block: dict[str, Any]
+) -> dict[str, Any] | None:
+    start = block.get("startSeconds")
+    end = block.get("endSeconds")
+    if start is None or end is None:
+        return None
+    begin = max(0, int(float(start) * sample_rate))
+    finish = min(samples.size, int(math.ceil(float(end) * sample_rate)))
+    if finish - begin < sample_rate // 50:
+        return None
+    payload = compute_spectrogram(samples[begin:finish], sample_rate)
+    if payload is not None:
+        payload["durationSeconds"] = round((finish - begin) / sample_rate, 3)
+    return payload
 
 
 def _block_pitch_from_audio(
