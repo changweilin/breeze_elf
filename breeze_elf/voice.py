@@ -755,6 +755,28 @@ _MAX_SING_SHIFT_SEMITONES = 24.0
 # Cap how many distinct syllables we shell out to the OS voice for, so a long
 # lyric with many unique characters can't spawn an unbounded number of renders.
 _MAX_SUNG_SYLLABLES = 120
+# Floor for a sung note so syllables sustain instead of sounding clipped/abrupt.
+_MIN_SUNG_SECONDS = 0.3
+
+
+def _trim_silence(samples: np.ndarray) -> np.ndarray:
+    """Drop the leading/trailing near-silence the OS voice pads around a single
+    spoken syllable.
+
+    Without this the padding gets stretched into the note, so the note holds
+    mostly silence and the voiced part sounds short and abrupt with big gaps
+    between words. Trimming lets the voiced sound sustain the whole note.
+    """
+    if samples.size == 0:
+        return samples
+    peak = float(np.max(np.abs(samples)))
+    if peak <= 1e-6:
+        return samples
+    threshold = max(0.015, 0.06 * peak)
+    voiced = np.where(np.abs(samples) > threshold)[0]
+    if voiced.size == 0:
+        return samples
+    return samples[voiced[0] : voiced[-1] + 1]
 
 
 def _resample_rate(samples: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
@@ -794,15 +816,35 @@ def _apply_edge_fade(
     return (samples * envelope).astype(np.float32)
 
 
+def _render_syllable(text: str, rate: int) -> tuple[np.ndarray, int, float] | None:
+    """Speak one syllable with the OS voice, trimmed to its voiced part.
+
+    Returns ``(samples, rate, median_hz)`` resampled to ``rate`` (or the OS rate
+    when ``rate`` is 0), or ``None`` if nothing could be spoken.
+    """
+    spoken = _system_tts(text)
+    if spoken is None:
+        return None
+    samples, srate = spoken
+    out_rate = rate or srate
+    samples = _trim_silence(_resample_rate(samples, srate, out_rate))
+    if samples.size == 0:
+        return None
+    return samples, out_rate, _estimate_median_hz(samples, out_rate)
+
+
 def _sing_with_os_voice(notes: list[dict]) -> tuple[np.ndarray, int] | None:
     """Sing ``{char, freq, duration}`` notes as real OS-TTS syllables.
 
     Each lyric character is spoken once by the OS voice (cached, since songs
-    reuse characters), then for every note it is pitch-shifted onto the melody
-    note and time-stretched to the note's duration. Rests render as silence; a
-    note whose character cannot be spoken keeps the melody via a synth tone.
-    Returns ``(samples, sample_rate)``, or ``None`` when no syllable could be
-    rendered (no OS voice) so the caller can fall back to the synthetic voice.
+    reuse characters), trimmed to its voiced part, then for every note pitch-
+    shifted onto the melody note and time-stretched to fill the note's duration
+    so it sustains like singing instead of a clipped syllable with a big gap.
+    Notes run legato (no inserted gap); rests render as silence. A character the
+    OS voice cannot speak is sung with a neutral vowel ("啦") so it stays a real
+    voice rather than dropping to the synth buzz. Returns ``(samples, rate)``, or
+    ``None`` when no syllable could be rendered (no OS voice) so the caller can
+    fall back to the synthetic voice.
     """
     notes = notes[:400]
     cache: dict[str, tuple[np.ndarray, float] | None] = {}
@@ -814,44 +856,49 @@ def _sing_with_os_voice(notes: list[dict]) -> tuple[np.ndarray, int] | None:
             continue
         if len(cache) >= _MAX_SUNG_SYLLABLES:
             break
-        spoken = _system_tts(char)
-        if spoken is None:
+        rendered = _render_syllable(char, rate)
+        if rendered is None:
             cache[char] = None
             continue
-        samples, srate = spoken
-        if rate == 0:
-            rate = srate
-        samples = _resample_rate(samples, srate, rate)
-        cache[char] = (samples, _estimate_median_hz(samples, rate))
+        samples, rate, median = rendered
+        cache[char] = (samples, median)
 
     if rate == 0:
         return None  # nothing rendered — let the caller use the synth voice
 
-    gap = np.zeros(max(1, int(rate * 0.02)), dtype=np.float32)
+    # A neutral sung vowel for any character the OS voice could not speak, so a
+    # missing syllable stays a real voice instead of the synth buzz (喇叭聲).
+    fallback: tuple[np.ndarray, float] | None = None
+    if any(value is None for value in cache.values()):
+        rendered = _render_syllable("啦", rate)
+        if rendered is not None:
+            fallback = (rendered[0], rendered[2])
+    if fallback is None:
+        fallback = next((value for value in cache.values() if value is not None), None)
+
     pieces: list[np.ndarray] = []
-    for index, note in enumerate(notes):
+    for note in notes:
         duration = note.get("duration")
         seconds = float(duration) if duration else 0.45
-        seconds = max(0.12, min(2.5, seconds))
+        seconds = max(_MIN_SUNG_SECONDS, min(2.5, seconds))
         count = max(1, int(rate * seconds))
 
         freq = note.get("freq")
         char = str(note.get("char") or "").strip()
-        entry = cache.get(char)
         if not freq or freq <= 0:
             pieces.append(np.zeros(count, dtype=np.float32))  # rest
-        elif entry is None:
-            # Character could not be spoken — keep the melody with a synth tone.
+            continue
+        entry = cache.get(char) or fallback
+        if entry is None:
+            # No real voice for this note at all — keep the melody with a tone.
             pieces.append(_synthesize_song([note], rate))
-        else:
-            syllable, source_hz = entry
-            target = float(min(_MAX_VOICE_HZ, max(_MIN_VOICE_HZ, freq)))
-            semitones = 12.0 * math.log2(target / source_hz) if source_hz > 0 else 0.0
-            semitones = max(-_MAX_SING_SHIFT_SEMITONES, min(_MAX_SING_SHIFT_SEMITONES, semitones))
-            pitched = _pitch_shift(syllable, semitones)
-            pieces.append(_apply_edge_fade(_fit_duration(pitched, count), rate))
-        if index != len(notes) - 1:
-            pieces.append(gap)
+            continue
+        syllable, source_hz = entry
+        target = float(min(_MAX_VOICE_HZ, max(_MIN_VOICE_HZ, freq)))
+        semitones = 12.0 * math.log2(target / source_hz) if source_hz > 0 else 0.0
+        semitones = max(-_MAX_SING_SHIFT_SEMITONES, min(_MAX_SING_SHIFT_SEMITONES, semitones))
+        pitched = _pitch_shift(syllable, semitones)
+        pieces.append(_apply_edge_fade(_fit_duration(pitched, count), rate))
 
     if not pieces:
         return None

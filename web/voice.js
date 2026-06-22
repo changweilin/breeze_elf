@@ -960,9 +960,10 @@ function showResult(kind, audioBase64) {
   audioEl.load();
   wrapEl.hidden = false;
   // Make sure the freshly revealed player is actually on screen so the user can
-  // listen before deciding to download / save.
+  // listen before deciding to download / save. "nearest" avoids the big viewport
+  // jump that "center" can cause on phones.
   try {
-    wrapEl.scrollIntoView({ behavior: "smooth", block: "center" });
+    wrapEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
   } catch {
     /* scrollIntoView options unsupported — ignore */
   }
@@ -989,7 +990,7 @@ function showConvertResult(sourceBase64, convertedBase64) {
   closeAllPlayerMenus();
   els.cvResultWrap.hidden = false;
   try {
-    els.cvResultWrap.scrollIntoView({ behavior: "smooth", block: "center" });
+    els.cvResultWrap.scrollIntoView({ behavior: "smooth", block: "nearest" });
   } catch {
     /* scrollIntoView options unsupported — ignore */
   }

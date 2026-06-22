@@ -15,6 +15,7 @@ from breeze_elf.voice import (
     _pitch_shift,
     _resample_rate,
     _song_base,
+    _trim_silence,
 )
 from breeze_elf.voice_storage import (
     decode_wav,
@@ -135,6 +136,17 @@ class MockEngineTests(unittest.TestCase):
         out = _resample_rate(tone, 16_000, 24_000)
         self.assertAlmostEqual(out.size / 24_000, 1.0, places=2)
         self.assertAlmostEqual(_median_hz(out, 24_000), 220.0, delta=20.0)
+
+    def test_trim_silence_drops_padding(self):
+        rate = 16_000
+        voiced = _tone(220.0, rate, 0.3)
+        pad = np.zeros(int(rate * 0.2), dtype=np.float32)
+        padded = np.concatenate([pad, voiced, pad]).astype(np.float32)
+        trimmed = _trim_silence(padded)
+        # The padding is gone and roughly the voiced span remains.
+        self.assertLess(trimmed.size, padded.size)
+        self.assertGreater(trimmed.size, voiced.size * 0.8)
+        self.assertLess(trimmed.size, voiced.size * 1.2)
 
     def test_song_base_falls_back_to_synth_without_os_tts(self):
         # The base track shared by both engines (mock plays it; OpenVoice re-voices

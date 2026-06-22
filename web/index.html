@@ -782,14 +782,25 @@
 
       .voice-page {
         width: min(720px, 100%);
+        max-width: 100%;
         height: 100%;
         margin: 0 auto;
         overflow-y: auto;
+        /* Clip any horizontal overflow so a long status line / dropdown can't
+           widen the page past the viewport (which locks pinch-zoom on phones). */
+        overflow-x: hidden;
         overscroll-behavior: contain;
         display: flex;
         flex-direction: column;
         gap: 14px;
         padding: max(18px, env(safe-area-inset-top)) 16px 18px;
+      }
+
+      /* The voice status echoes filenames and long messages — let it wrap instead
+         of forcing one nowrap line that overflows the page width. */
+      #voice-status {
+        white-space: normal;
+        overflow-wrap: anywhere;
       }
 
       .voice-progress {
@@ -1537,6 +1548,6 @@
     </dialog>
 
     <script src="./app.js?v=19" type="module"></script>
-    <script src="./voice.js?v=10" type="module"></script>
+    <script src="./voice.js?v=11" type="module"></script>
   </body>
 </html>
