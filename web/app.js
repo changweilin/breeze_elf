@@ -4,6 +4,11 @@ const els = {
   fileInput: document.querySelector("#file"),
   clear: document.querySelector("#clear"),
   pitch: document.querySelector("#pitch"),
+  analyze: document.querySelector("#analyze"),
+  analyzeProgress: document.querySelector("#analyze-progress"),
+  analyzeProgressLabel: document.querySelector("#analyze-progress-label"),
+  analyzeProgressPct: document.querySelector("#analyze-progress-pct"),
+  analyzeProgressBar: document.querySelector("#analyze-progress-bar"),
   copy: document.querySelector("#copy"),
   download: document.querySelector("#download"),
   save: document.querySelector("#save"),
@@ -128,6 +133,7 @@ const state = {
   audioStorageFailed: false,
   savingRemote: false,
   savingAudio: false,
+  analyzingPitch: false,
   fileLanguageShown: false,
   openBlocks: new Set(),
   demoRunning: false,
@@ -882,6 +888,21 @@ function setTranscriptActions(hasTranscript) {
   els.copy.disabled = !hasTranscript;
   els.download.disabled = !hasTranscript;
   els.save.disabled = DEMO_MODE || !hasTranscript || state.savingRemote;
+  updateAnalyzeButton();
+}
+
+// 校準音準 needs both the recorded/loaded audio and a structured (per-character)
+// transcript to recompute against; it is pointless (and disabled) otherwise.
+function updateAnalyzeButton() {
+  if (!els.analyze) {
+    return;
+  }
+  els.analyze.disabled =
+    DEMO_MODE ||
+    state.analyzingPitch ||
+    state.running ||
+    !state.audioBytes ||
+    !hasStructuredTranscript();
 }
 
 function transcriptTitle(text) {
@@ -1016,6 +1037,8 @@ function setAudioActions() {
   const hasAudio = state.audioBytes > 0;
   els.audioDownload.disabled = !hasAudio;
   els.audioSave.disabled = DEMO_MODE || !hasAudio || state.savingAudio || state.running;
+  // Audio availability gates 校準音準 too, so keep that button in sync.
+  updateAnalyzeButton();
 }
 
 function refreshAudioPreview() {
@@ -1800,6 +1823,10 @@ els.save.addEventListener("click", async () => {
   }
 });
 
+els.analyze.addEventListener("click", () => {
+  void analyzePitch();
+});
+
 els.audioDownload.addEventListener("click", () => {
   if (!state.audioBytes) {
     return;
@@ -1908,6 +1935,126 @@ async function encodeRecordedAudioBase64() {
     binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
   }
   return btoa(binary);
+}
+
+// 校準音準 — re-measure every character's pitch from the recorded/loaded audio
+// with the more accurate (offline) tracker and a single global 主音, then fold
+// the refined 簡譜/音高 back into the transcript. The compute runs server-side
+// behind a real progress bar (it does not need to be real-time).
+async function analyzePitch() {
+  if (DEMO_MODE) {
+    flashStats("示意模式不會重新分析音準");
+    return;
+  }
+  if (state.analyzingPitch || state.running) {
+    return;
+  }
+  if (!hasStructuredTranscript()) {
+    flashStats("沒有可校準的逐字稿,請先以音高模式錄製或載入");
+    return;
+  }
+  if (!state.audioBytes) {
+    flashStats("找不到對應的音檔,無法重新計算音準");
+    return;
+  }
+
+  state.analyzingPitch = true;
+  setTranscriptActions(Boolean(state.transcript.trim()));
+  showAnalyzeProgress("重新計算音準中", 0, true);
+  try {
+    const audioBase64 = await encodeRecordedAudioBase64();
+    if (!audioBase64) {
+      throw new Error("找不到音檔");
+    }
+    const response = await fetch("/api/transcript/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        audioBase64,
+        sampleRate: state.audioSampleRate,
+        blocks: serializeBlocksForSave(),
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) {
+      throw new Error(data.detail || "重新分析失敗");
+    }
+
+    const result = await pollAnalyzeStatus();
+    applyAnalyzedBlocks(result.blocks);
+    state.openBlocks.clear();
+    renderTranscriptView({ scrollToEnd: false });
+    scheduleSessionPersist();
+    const tonic = Number.isFinite(result.tonicHz) ? `,主音 ${Math.round(result.tonicHz)} Hz` : "";
+    flashStats(`音準已重新計算(${result.characterCount || 0} 字${tonic})`);
+  } catch (error) {
+    flashStats(error.message || "重新分析失敗");
+  } finally {
+    state.analyzingPitch = false;
+    hideAnalyzeProgress();
+    setTranscriptActions(Boolean(state.transcript.trim()));
+  }
+}
+
+// Poll the analysis job, updating the progress bar, until it finishes or fails.
+function pollAnalyzeStatus() {
+  return new Promise((resolve, reject) => {
+    const timer = window.setInterval(async () => {
+      let data;
+      try {
+        const response = await fetch("/api/transcript/analyze/status");
+        data = await response.json().catch(() => ({}));
+      } catch {
+        return; // transient — keep polling
+      }
+      if (data.status === "running") {
+        const fraction = Number.isFinite(data.progress) ? data.progress : 0;
+        showAnalyzeProgress(data.stage || "分析中", fraction, fraction <= 0.001);
+      } else if (data.status === "done") {
+        window.clearInterval(timer);
+        resolve(data.result || { blocks: [] });
+      } else if (data.status === "error") {
+        window.clearInterval(timer);
+        reject(new Error(data.error || "重新分析失敗"));
+      } else {
+        window.clearInterval(timer);
+        reject(new Error("分析未啟動"));
+      }
+    }, 300);
+  });
+}
+
+// Fold refined pitch + per-character data back onto the existing blocks (matched
+// by order); text and timings are left untouched.
+function applyAnalyzedBlocks(blocks) {
+  if (!Array.isArray(blocks)) {
+    return;
+  }
+  blocks.forEach((refined, index) => {
+    const target = state.transcriptBlocks[index];
+    if (!target) {
+      return;
+    }
+    target.pitch = normalizePitch(refined.pitch);
+    target.characters = normalizeCharacters(refined.characters);
+  });
+}
+
+function showAnalyzeProgress(label, fraction, indeterminate) {
+  els.analyzeProgress.hidden = false;
+  els.analyzeProgressLabel.textContent = label;
+  els.analyzeProgressBar.classList.toggle("indeterminate", Boolean(indeterminate));
+  if (indeterminate) {
+    els.analyzeProgressPct.textContent = "";
+  } else {
+    const pct = Math.round(Math.max(0, Math.min(1, fraction)) * 100);
+    els.analyzeProgressPct.textContent = `${pct}%`;
+    els.analyzeProgressBar.style.width = `${pct}%`;
+  }
+}
+
+function hideAnalyzeProgress() {
+  els.analyzeProgress.hidden = true;
 }
 
 window.addEventListener("pagehide", () => {

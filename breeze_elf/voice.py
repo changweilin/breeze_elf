@@ -46,6 +46,23 @@ _MAX_SHIFT_SEMITONES = 12.0
 _STFT_SIZE = 1024
 _STFT_HOP = 256
 
+# Playback speed multiplier bounds for 文字轉語音 / 簡譜唱歌. The change is applied
+# as a pitch-preserving time-stretch so the voice keeps its pitch and timbre and
+# only the tempo changes (speed > 1 → faster/shorter, < 1 → slower/longer).
+_MIN_SPEED = 0.5
+_MAX_SPEED = 2.0
+
+# Spectral-envelope (timbre) transfer for the mock engine. The reference voice's
+# average log-magnitude spectrum is summarized into a handful of log-spaced bands
+# and stored in the embedding; on convert/synthesize the produced audio's own
+# envelope is reshaped toward it so the clone takes on the reference's timbre
+# (formant / brightness structure), not just its median pitch and loudness. This
+# is what makes the mock 聲紋 noticeably closer to the original voice.
+_ENVELOPE_BANDS = 28
+_ENVELOPE_MIN_HZ = 90.0
+_ENVELOPE_MAX_HZ = 7600.0
+_ENVELOPE_MAX_GAIN_DB = 9.0
+
 
 @dataclass(frozen=True)
 class VoiceAudio:
@@ -69,7 +86,14 @@ class VoiceEngine(Protocol):
     def convert(self, samples: np.ndarray, sample_rate: int, embedding: bytes) -> VoiceAudio:
         ...
 
-    def synthesize(self, text: str, language: str, embedding: bytes) -> VoiceAudio:
+    def synthesize(
+        self,
+        text: str,
+        language: str,
+        embedding: bytes,
+        base_hz: float | None = None,
+        speed: float = 1.0,
+    ) -> VoiceAudio:
         ...
 
 
@@ -124,11 +148,13 @@ class MockVoiceEngine:
         median_hz = _estimate_median_hz(mono, sample_rate)
         rms = float(np.sqrt(np.mean(np.square(mono)))) if mono.size else 0.0
         payload = {
-            "version": 1,
+            "version": 2,
             "kind": "mock",
             "medianHz": round(median_hz, 2),
             "rms": round(rms, 5),
             "centroidHz": round(_spectral_centroid(mono, sample_rate), 2),
+            # Compact timbre fingerprint (log-magnitude envelope, mean-removed).
+            "bands": _spectral_envelope_bands(mono, sample_rate),
         }
         return json.dumps(payload).encode("utf-8")
 
@@ -143,28 +169,50 @@ class MockVoiceEngine:
         semitones = _shift_semitones(source_hz, target_hz)
         shifted = _pitch_shift(mono, semitones)
 
+        # Reshape B's timbre toward A's so the conversion sounds like A, not just
+        # B re-pitched. (No-op for old embeddings that have no stored envelope.)
+        shifted = _apply_envelope_match(shifted, sample_rate, profile.get("bands"))
+
         target_rms = float(profile.get("rms") or 0.0)
         shifted = _match_loudness(shifted, target_rms)
         return VoiceAudio(samples=shifted.astype(np.float32, copy=False), sample_rate=sample_rate)
 
-    def synthesize(self, text: str, language: str, embedding: bytes) -> VoiceAudio:
+    def synthesize(
+        self,
+        text: str,
+        language: str,
+        embedding: bytes,
+        base_hz: float | None = None,
+        speed: float = 1.0,
+    ) -> VoiceAudio:
         del language  # the OS voice picks its own language; the fallback is fixed
         profile = _load_mock_embedding(embedding)
-        base_hz = float(profile.get("medianHz") or _DEFAULT_VOICE_HZ)
+        # An explicit 基音 Hz from the UI overrides the voice's measured pitch and
+        # is allowed a wider retune so the requested register is actually reached.
+        explicit = bool(base_hz and base_hz > 0)
+        measured_hz = float(profile.get("medianHz") or _DEFAULT_VOICE_HZ)
+        target_hz = float(base_hz) if explicit else measured_hz
+        target_hz = float(min(_MAX_VOICE_HZ, max(_MIN_VOICE_HZ, target_hz)))
+        max_shift = 12.0 if explicit else 7.0
         target_rms = float(profile.get("rms") or 0.0)
+        bands = profile.get("bands")
 
         # Prefer the real OS text-to-speech voice (e.g. Microsoft Hanhan, zh-TW)
-        # so the result is actual words, then nudge its pitch toward the target.
+        # so the result is actual words, then nudge its pitch + timbre toward A.
         spoken = _system_tts(text) if self.use_os_tts else None
         if spoken is not None:
             samples, rate = spoken
-            samples = _retune_to_target(samples, rate, base_hz)
+            samples = _retune_to_target(samples, rate, target_hz, max_semitones=max_shift)
+            samples = _apply_envelope_match(samples, rate, bands)
             samples = _match_loudness(samples, target_rms, default_peak=0.92)
+            samples = _apply_speed(samples, speed)
             return VoiceAudio(samples=samples, sample_rate=rate)
 
         # Fallback: a synthetic vowel voice (no OS TTS available).
-        samples = _synthesize_voice(text, self.sample_rate, base_hz)
+        samples = _synthesize_voice(text, self.sample_rate, target_hz)
+        samples = _apply_envelope_match(samples, self.sample_rate, bands)
         samples = _match_loudness(samples, target_rms, default_peak=0.6)
+        samples = _apply_speed(samples, speed)
         return VoiceAudio(samples=samples, sample_rate=self.sample_rate)
 
     def synthesize_song(
@@ -173,6 +221,7 @@ class MockVoiceEngine:
         tonic_hz: float,
         embedding: bytes,
         use_measured_hz: bool = False,
+        speed: float = 1.0,
     ) -> VoiceAudio:
         profile = _load_mock_embedding(embedding)
         if not tonic_hz or tonic_hz <= 0:
@@ -183,6 +232,7 @@ class MockVoiceEngine:
         # the melody; falls back to the synthetic vowel voice when unavailable.
         samples, rate, is_real = _song_base(resolved, self.use_os_tts, self.sample_rate)
         samples = _match_loudness(samples, target_rms, default_peak=0.92 if is_real else 0.85)
+        samples = _apply_speed(samples, speed)
         return VoiceAudio(samples=samples, sample_rate=rate)
 
 
@@ -303,7 +353,14 @@ class OpenVoiceEngine:
             data, out_rate = self._sf.read(str(out_path), dtype="float32", always_2d=False)
         return VoiceAudio(samples=_as_float32_mono(data), sample_rate=int(out_rate))
 
-    def synthesize(self, text: str, language: str, embedding: bytes) -> VoiceAudio:
+    def synthesize(
+        self,
+        text: str,
+        language: str,
+        embedding: bytes,
+        base_hz: float | None = None,
+        speed: float = 1.0,
+    ) -> VoiceAudio:
         self.load()
         target_se = self._torch.load(io.BytesIO(embedding), map_location=self.device)
 
@@ -323,21 +380,26 @@ class OpenVoiceEngine:
                     message="@BreezeElf",
                 )
                 data, out_rate = self._sf.read(str(out_path), dtype="float32", always_2d=False)
-            return VoiceAudio(samples=_as_float32_mono(data), sample_rate=int(out_rate))
+        else:
+            # Fallback (e.g. non-Windows host): MeloTTS base speaker + convert.
+            self._load_tts()
+            with _temp_wav_path() as base_path, _temp_wav_path() as out_path:
+                self._tts.tts_to_file(text, self._speaker_id, str(base_path), speed=1.0)
+                self._converter.convert(
+                    audio_src_path=str(base_path),
+                    src_se=self._source_se,
+                    tgt_se=target_se,
+                    output_path=str(out_path),
+                    message="@BreezeElf",
+                )
+                data, out_rate = self._sf.read(str(out_path), dtype="float32", always_2d=False)
 
-        # Fallback (e.g. non-Windows host): MeloTTS base speaker + convert.
-        self._load_tts()
-        with _temp_wav_path() as base_path, _temp_wav_path() as out_path:
-            self._tts.tts_to_file(text, self._speaker_id, str(base_path), speed=1.0)
-            self._converter.convert(
-                audio_src_path=str(base_path),
-                src_se=self._source_se,
-                tgt_se=target_se,
-                output_path=str(out_path),
-                message="@BreezeElf",
-            )
-            data, out_rate = self._sf.read(str(out_path), dtype="float32", always_2d=False)
-        return VoiceAudio(samples=_as_float32_mono(data), sample_rate=int(out_rate))
+        samples = _as_float32_mono(data)
+        out_rate = int(out_rate)
+        if base_hz and base_hz > 0:
+            samples = _retune_to_target(samples, out_rate, float(base_hz), max_semitones=12.0)
+        samples = _apply_speed(samples, speed)
+        return VoiceAudio(samples=samples, sample_rate=out_rate)
 
     def synthesize_song(
         self,
@@ -345,6 +407,7 @@ class OpenVoiceEngine:
         tonic_hz: float,
         embedding: bytes,
         use_measured_hz: bool = False,
+        speed: float = 1.0,
     ) -> VoiceAudio:
         self.load()
         if not tonic_hz or tonic_hz <= 0:
@@ -365,7 +428,8 @@ class OpenVoiceEngine:
                 message="@BreezeElf",
             )
             data, out_rate = self._sf.read(str(out_path), dtype="float32", always_2d=False)
-        return VoiceAudio(samples=_as_float32_mono(data), sample_rate=int(out_rate))
+        samples = _apply_speed(_as_float32_mono(data), speed)
+        return VoiceAudio(samples=samples, sample_rate=int(out_rate))
 
     def _load_tts(self) -> None:
         if self._tts is not None:
@@ -982,16 +1046,133 @@ def _system_tts(text: str) -> tuple[np.ndarray, int] | None:
         out_path.unlink(missing_ok=True)
 
 
-def _retune_to_target(samples: np.ndarray, sample_rate: int, target_hz: float) -> np.ndarray:
+def _retune_to_target(
+    samples: np.ndarray,
+    sample_rate: int,
+    target_hz: float,
+    max_semitones: float = 7.0,
+) -> np.ndarray:
     """Shift real speech toward the target voice's pitch (kept modest/natural)."""
     if samples.size < _STFT_SIZE:
         return samples
     source_hz = _estimate_median_hz(samples, sample_rate)
     semitones = _shift_semitones(source_hz, target_hz)
-    semitones = float(max(-7.0, min(7.0, semitones)))
+    limit = float(max(0.0, max_semitones))
+    semitones = float(max(-limit, min(limit, semitones)))
     if abs(semitones) < 0.5:
         return samples
     return _pitch_shift(samples, semitones)
+
+
+def _clamp_speed(speed: float | None) -> float:
+    try:
+        value = float(speed)
+    except (TypeError, ValueError):
+        return 1.0
+    if not math.isfinite(value) or value <= 0:
+        return 1.0
+    return float(min(_MAX_SPEED, max(_MIN_SPEED, value)))
+
+
+def _apply_speed(samples: np.ndarray, speed: float | None) -> np.ndarray:
+    """Apply a pitch-preserving playback-speed multiplier (tempo only)."""
+    rate = _clamp_speed(speed)
+    if abs(rate - 1.0) < 1e-3 or samples.size < _STFT_SIZE:
+        return samples.astype(np.float32, copy=False)
+    # rate > 1 → fewer output frames → shorter / faster; rate < 1 → slower.
+    return _time_stretch(samples, rate).astype(np.float32, copy=False)
+
+
+def _envelope_band_edges(sample_rate: int) -> np.ndarray:
+    top = min(_ENVELOPE_MAX_HZ, (sample_rate / 2.0) * 0.97)
+    top = max(top, _ENVELOPE_MIN_HZ * 2.0)
+    return np.geomspace(_ENVELOPE_MIN_HZ, top, _ENVELOPE_BANDS + 1)
+
+
+def _spectral_envelope_bands(samples: np.ndarray, sample_rate: int) -> list[float] | None:
+    """Summarize the average voiced log-magnitude spectrum into log-spaced bands.
+
+    The result is mean-removed (so it captures spectral *shape* / timbre, not
+    overall level — loudness is matched separately) and short / silent input
+    yields ``None`` so callers can skip the transfer cleanly.
+    """
+    if samples.size < _STFT_SIZE:
+        return None
+    magnitude = np.abs(_stft(samples, _STFT_SIZE, _STFT_HOP))
+    if magnitude.size == 0:
+        return None
+    frame_energy = magnitude.sum(axis=0)
+    voiced = frame_energy > 0
+    if np.any(voiced):
+        threshold = 0.25 * float(np.median(frame_energy[voiced]))
+        keep = frame_energy > threshold
+        if not np.any(keep):
+            keep = voiced
+    else:
+        return None
+    average = magnitude[:, keep].mean(axis=1)
+    freqs = np.fft.rfftfreq(_STFT_SIZE, d=1.0 / sample_rate)
+    edges = _envelope_band_edges(sample_rate)
+    bands = np.empty(_ENVELOPE_BANDS, dtype=np.float64)
+    for index in range(_ENVELOPE_BANDS):
+        selection = (freqs >= edges[index]) & (freqs < edges[index + 1])
+        if np.any(selection):
+            bands[index] = float(average[selection].mean())
+        else:
+            nearest = int(np.argmin(np.abs(freqs - math.sqrt(edges[index] * edges[index + 1]))))
+            bands[index] = float(average[nearest])
+    log_bands = np.log(np.maximum(bands, 1e-7))
+    log_bands -= float(log_bands.mean())
+    return [round(float(value), 4) for value in log_bands]
+
+
+def _smooth_curve(values: np.ndarray, radius: int) -> np.ndarray:
+    if radius <= 0 or values.size <= 2:
+        return values
+    kernel = np.ones(2 * radius + 1, dtype=np.float64) / (2 * radius + 1)
+    return np.convolve(values, kernel, mode="same")
+
+
+def _apply_envelope_match(
+    samples: np.ndarray, sample_rate: int, target_bands: list[float] | None
+) -> np.ndarray:
+    """Reshape ``samples``' spectral envelope toward ``target_bands``' timbre.
+
+    A gentle, clamped, smoothed matching EQ (per-band log-gain = target − source)
+    is interpolated across the spectrum and applied in the STFT domain, keeping
+    phase and length. No-op when the target envelope is missing (old embeddings)
+    or the audio is too short.
+    """
+    if not target_bands or samples.size < _STFT_SIZE:
+        return samples.astype(np.float32, copy=False)
+    target = np.asarray(target_bands, dtype=np.float64)
+    if target.size != _ENVELOPE_BANDS:
+        return samples.astype(np.float32, copy=False)
+    source_bands = _spectral_envelope_bands(samples, sample_rate)
+    if source_bands is None:
+        return samples.astype(np.float32, copy=False)
+    source = np.asarray(source_bands, dtype=np.float64)
+
+    gain_db = (target - source) * (20.0 / math.log(10.0))
+    gain_db = _smooth_curve(gain_db, 2)
+    gain_db = np.clip(gain_db, -_ENVELOPE_MAX_GAIN_DB, _ENVELOPE_MAX_GAIN_DB)
+    linear = 10.0 ** (gain_db / 20.0)
+
+    edges = _envelope_band_edges(sample_rate)
+    centers = np.sqrt(edges[:-1] * edges[1:])
+    freqs = np.fft.rfftfreq(_STFT_SIZE, d=1.0 / sample_rate)
+    bin_gain = np.interp(
+        np.log(np.maximum(freqs, 1.0)),
+        np.log(centers),
+        linear,
+        left=float(linear[0]),
+        right=float(linear[-1]),
+    ).astype(np.complex64)
+
+    stft = _stft(samples, _STFT_SIZE, _STFT_HOP)
+    stft *= bin_gain[:, None]
+    shaped = _istft(stft, _STFT_SIZE, _STFT_HOP)
+    return _resample_to_length(shaped, samples.size)
 
 
 def _melo_language(language: str) -> str:

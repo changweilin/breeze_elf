@@ -56,6 +56,8 @@ const els = {
   ttsUpload: document.querySelector("#tts-upload"),
   ttsFile: document.querySelector("#tts-file"),
   ttsText: document.querySelector("#tts-text"),
+  ttsBase: document.querySelector("#tts-base"),
+  ttsSpeed: document.querySelector("#tts-speed"),
   ttsRun: document.querySelector("#tts-run"),
   ttsResultWrap: document.querySelector("#tts-result-wrap"),
   ttsResult: document.querySelector("#tts-result"),
@@ -66,6 +68,7 @@ const els = {
   singFile: document.querySelector("#sing-file"),
   singScore: document.querySelector("#sing-score"),
   singTonic: document.querySelector("#sing-tonic"),
+  singSpeed: document.querySelector("#sing-speed"),
   singRun: document.querySelector("#sing-run"),
   singResultWrap: document.querySelector("#sing-result-wrap"),
   singResult: document.querySelector("#sing-result"),
@@ -801,10 +804,19 @@ async function runTts() {
   await runExclusive("合成語音中…", async (signal) => {
     await waitForModelReady();
     setStatus("合成語音中…", "live");
+    const body = { voiceId: state.selectedId, text };
+    const baseHz = positiveNumber(els.ttsBase.value);
+    if (baseHz) {
+      body.baseHz = baseHz;
+    }
+    const speed = positiveNumber(els.ttsSpeed.value);
+    if (speed) {
+      body.speed = speed;
+    }
     const response = await fetch("/api/voice/tts", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ voiceId: state.selectedId, text }),
+      body: JSON.stringify(body),
       signal,
     });
     const data = await response.json().catch(() => ({}));
@@ -922,6 +934,10 @@ async function runSing() {
     const body = { voiceId: state.selectedId, notes };
     if (Number.isFinite(tonic) && tonic > 0) {
       body.tonicHz = tonic;
+    }
+    const speed = positiveNumber(els.singSpeed.value);
+    if (speed) {
+      body.speed = speed;
     }
     const response = await fetch("/api/voice/sing", {
       method: "POST",
@@ -1144,6 +1160,13 @@ function setStatus(text, mode = "") {
   els.status.textContent = text;
   els.status.classList.toggle("live", mode === "live");
   els.status.classList.toggle("error", mode === "error");
+}
+
+// Parse a 基音 Hz / 速度 input: a finite positive number, or null when blank /
+// invalid so the field falls back to its server-side default (auto / 1.0×).
+function positiveNumber(value) {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
 function formatDuration(seconds) {

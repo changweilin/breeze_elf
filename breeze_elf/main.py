@@ -145,6 +145,8 @@ class VoiceTtsRequest(BaseModel):
     voiceId: str = Field(min_length=1)
     text: str = Field(min_length=1, max_length=2000)
     language: str | None = None
+    baseHz: float | None = Field(default=None, ge=50.0, le=600.0)
+    speed: float | None = Field(default=None, ge=0.25, le=4.0)
 
 
 class VoiceOutputSaveRequest(BaseModel):
@@ -166,6 +168,21 @@ class VoiceSingRequest(BaseModel):
     notes: list[VoiceSingNote] = Field(min_length=1, max_length=1000)
     tonicHz: float | None = None
     useMeasuredHz: bool = False
+    speed: float | None = Field(default=None, ge=0.25, le=4.0)
+
+
+class TranscriptAnalyzeRequest(BaseModel):
+    """Re-analyze a recorded transcript's per-character 音準 from its audio.
+
+    The blocks carry each character's *absolute* start/end seconds (as produced
+    live and persisted in the 逐字稿), so the offline pass can re-measure pitch
+    straight from the saved WAV with the more accurate YIN tracker and a single
+    global 主音, fixing the octave / tonic drift the real-time pass can have.
+    """
+
+    audioBase64: str = Field(min_length=1)
+    sampleRate: int | None = None
+    blocks: list[TranscriptBlock] = Field(default_factory=list, max_length=4000)
 
 
 @dataclass
@@ -219,10 +236,70 @@ class VoiceLoadState:
             }
 
 
+@dataclass
+class AnalyzeState:
+    """Thread-safe progress for the offline 逐字稿 音準 re-analysis pass.
+
+    Like :class:`VoiceLoadState` the work runs in an executor thread while the
+    frontend polls a status endpoint to drive a real progress bar; unlike it,
+    the job can be re-run (after ``done``/``error``) and carries its result.
+    """
+
+    status: str = "idle"  # idle | running | done | error
+    progress: float = 0.0
+    stage: str = ""
+    error: str | None = None
+    result: dict[str, Any] | None = None
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def begin(self) -> bool:
+        with self.lock:
+            if self.status == "running":
+                return False
+            self.status = "running"
+            self.progress = 0.0
+            self.stage = "準備中"
+            self.error = None
+            self.result = None
+            return True
+
+    def report(self, fraction: float, stage: str) -> None:
+        with self.lock:
+            self.progress = max(0.0, min(1.0, float(fraction)))
+            self.stage = stage
+
+    def finish(self, result: dict[str, Any]) -> None:
+        with self.lock:
+            self.status = "done"
+            self.progress = 1.0
+            self.stage = "完成"
+            self.error = None
+            self.result = result
+
+    def fail(self, message: str) -> None:
+        with self.lock:
+            self.status = "error"
+            self.error = message
+            self.result = None
+
+    def snapshot(self, *, include_result: bool = False) -> dict[str, Any]:
+        with self.lock:
+            data = {
+                "status": self.status,
+                "progress": round(self.progress, 3),
+                "stage": self.stage,
+                "error": self.error,
+            }
+            if include_result and self.status == "done":
+                data["result"] = self.result
+            return data
+
+
 settings = get_settings()
 asr_engine = build_asr_from_env(settings)
 voice_engine = build_voice_from_env(settings)
 voice_load_state = VoiceLoadState()
+analyze_state = AnalyzeState()
 
 
 @asynccontextmanager
@@ -233,6 +310,8 @@ async def lifespan(app: FastAPI):
     app.state.voice = voice_engine
     app.state.voice_load = voice_load_state
     app.state.voice_load_task = None
+    app.state.analyze = analyze_state
+    app.state.analyze_task = None
     app.state.asr_queue = ASRQueue(asr_engine, settings.asr_concurrency)
     await app.state.asr_queue.start()
 
@@ -429,6 +508,41 @@ async def voice_status() -> JSONResponse:
     return JSONResponse({"ok": True, **snapshot, **meta})
 
 
+def _run_transcript_analysis(
+    samples: np.ndarray, sample_rate: int, blocks: list[dict[str, Any]]
+) -> None:
+    try:
+        result = _analyze_blocks_pitch(samples, sample_rate, blocks, analyze_state.report)
+    except Exception as exc:  # noqa: BLE001 - surface any failure to the poller
+        LOGGER.exception("Transcript pitch analysis failed")
+        analyze_state.fail(str(exc))
+    else:
+        analyze_state.finish(result)
+
+
+@app.post("/api/transcript/analyze")
+async def analyze_transcript(payload: TranscriptAnalyzeRequest) -> JSONResponse:
+    samples, sample_rate = _decode_wav_payload(payload.audioBase64)
+    if samples.size == 0:
+        raise HTTPException(status_code=400, detail="audio payload is empty")
+    blocks = [block.model_dump() for block in payload.blocks]
+    if not blocks:
+        raise HTTPException(status_code=400, detail="no transcript blocks to analyze")
+
+    # One pass at a time; a poll on the status endpoint drives the progress bar.
+    if analyze_state.begin():
+        loop = asyncio.get_running_loop()
+        app.state.analyze_task = loop.run_in_executor(
+            None, _run_transcript_analysis, samples, sample_rate, blocks
+        )
+    return JSONResponse({"ok": True, **analyze_state.snapshot()})
+
+
+@app.get("/api/transcript/analyze/status")
+async def analyze_transcript_status() -> JSONResponse:
+    return JSONResponse({"ok": True, **analyze_state.snapshot(include_result=True)})
+
+
 @app.get("/api/voices")
 async def list_saved_voices() -> JSONResponse:
     voices = [voice.to_public() for voice in list_voices(_voice_storage_dir())]
@@ -555,10 +669,14 @@ async def save_voice_output_endpoint(payload: VoiceOutputSaveRequest) -> JSONRes
 async def voice_tts(payload: VoiceTtsRequest) -> JSONResponse:
     embedding = _require_embedding(payload.voiceId)
     language = (payload.language or settings.voice_language).strip() or settings.voice_language
+    speed = payload.speed or 1.0
     loop = asyncio.get_running_loop()
     try:
         result = await loop.run_in_executor(
-            None, voice_engine.synthesize, payload.text, language, embedding
+            None,
+            lambda: voice_engine.synthesize(
+                payload.text, language, embedding, base_hz=payload.baseHz, speed=speed
+            ),
         )
     except Exception as exc:
         LOGGER.exception("Voice synthesis failed")
@@ -579,11 +697,14 @@ async def voice_sing(payload: VoiceSingRequest) -> JSONResponse:
     if not singable:
         raise HTTPException(status_code=400, detail="no singable notes (need 簡譜 or hz)")
     tonic = payload.tonicHz or 0.0
+    speed = payload.speed or 1.0
     loop = asyncio.get_running_loop()
     try:
         result = await loop.run_in_executor(
             None,
-            lambda: voice_engine.synthesize_song(notes, tonic, embedding, payload.useMeasuredHz),
+            lambda: voice_engine.synthesize_song(
+                notes, tonic, embedding, payload.useMeasuredHz, speed=speed
+            ),
         )
     except Exception as exc:
         LOGGER.exception("Voice singing failed")
@@ -978,6 +1099,20 @@ def _character_payload(
     seg: SegmentAnalysis,
     tonic: float,
 ) -> dict[str, Any]:
+    return _analyzed_character_payload(
+        char, window.start_seconds + start, window.start_seconds + end, seg, tonic
+    )
+
+
+def _analyzed_character_payload(
+    char: str,
+    start: float,
+    end: float,
+    seg: SegmentAnalysis,
+    tonic: float,
+) -> dict[str, Any]:
+    """Per-character timing, pitch, slide, tuning, and intensity, against a
+    given 主音 (``tonic``). Shared by the live window pass and the offline pass."""
     median = seg.median_hz
     start_hz = seg.start_hz or median
     end_hz = seg.end_hz or median
@@ -986,8 +1121,8 @@ def _character_payload(
     is_glide = glide != single and (_JIANPU_GLIDE_UP in glide or _JIANPU_GLIDE_DOWN in glide)
     return {
         "char": char,
-        "startSeconds": round(window.start_seconds + start, 3),
-        "endSeconds": round(window.start_seconds + end, 3),
+        "startSeconds": round(start, 3),
+        "endSeconds": round(end, 3),
         "durationSeconds": round(max(0.0, end - start), 3),
         "hz": _round_pitch(median),
         "minHz": _round_pitch(seg.min_hz),
@@ -1003,6 +1138,80 @@ def _character_payload(
         "intensityStart": _round_intensity(seg.intensity_start),
         "intensityEnd": _round_intensity(seg.intensity_end),
     }
+
+
+def _analyze_blocks_pitch(
+    samples: np.ndarray,
+    sample_rate: int,
+    blocks: list[dict[str, Any]],
+    progress: Callable[[float, str], None],
+) -> dict[str, Any]:
+    """Re-measure every character's pitch from the audio, then rebuild the 簡譜
+    against a single global 主音 so it stays consistent across the whole piece."""
+    total = sum(len(block.get("characters") or []) for block in blocks) or 1
+    done = 0
+    measured: list[list[tuple[str, float, float, SegmentAnalysis]]] = []
+    all_medians: list[float] = []
+
+    progress(0.02, "分析音高")
+    for block in blocks:
+        block_measured: list[tuple[str, float, float, SegmentAnalysis]] = []
+        for character in block.get("characters") or []:
+            done += 1
+            char = str(character.get("char") or "").strip()
+            start = character.get("startSeconds")
+            end = character.get("endSeconds")
+            if char and start is not None and end is not None:
+                start = float(start)
+                end = float(end)
+                seg = _segment_pitch(samples, sample_rate, start, end)
+                block_measured.append((char, start, end, seg))
+                if seg.median_hz:
+                    all_medians.append(seg.median_hz)
+            if done % 8 == 0 or done == total:
+                progress(0.02 + 0.88 * (done / total), f"分析音高 {done}/{total}")
+        measured.append(block_measured)
+
+    tonic = float(np.median(all_medians)) if all_medians else 0.0
+    progress(0.92, "計算主音與簡譜")
+
+    out_blocks: list[dict[str, Any]] = []
+    for block, block_measured in zip(blocks, measured):
+        characters = [
+            _analyzed_character_payload(char, start, end, seg, tonic)
+            for char, start, end, seg in block_measured
+        ]
+        out_blocks.append(
+            {
+                "text": block.get("text") or "",
+                "startSeconds": block.get("startSeconds"),
+                "endSeconds": block.get("endSeconds"),
+                "segmentKind": block.get("segmentKind") or "",
+                "pitch": _block_pitch_from_audio(samples, sample_rate, block),
+                "characters": characters,
+            }
+        )
+
+    progress(1.0, "完成")
+    return {
+        "blocks": out_blocks,
+        "tonicHz": round(tonic, 1) if tonic else None,
+        "characterCount": len(all_medians),
+    }
+
+
+def _block_pitch_from_audio(
+    samples: np.ndarray, sample_rate: int, block: dict[str, Any]
+) -> dict[str, Any] | None:
+    start = block.get("startSeconds")
+    end = block.get("endSeconds")
+    if start is None or end is None:
+        return None
+    begin = max(0, int(float(start) * sample_rate))
+    finish = min(samples.size, int(math.ceil(float(end) * sample_rate)))
+    if finish - begin < sample_rate // 20:
+        return None
+    return _pitch_summary_payload(summarize_pitch(samples[begin:finish], sample_rate))
 
 
 def _split_words_to_chars(

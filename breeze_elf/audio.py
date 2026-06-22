@@ -246,8 +246,16 @@ def summarize_pitch(
     max_hz: float = 500.0,
     rms_threshold: float = 0.01,
     confidence_threshold: float = 0.35,
+    yin_threshold: float = 0.15,
     max_points: int = 80,
 ) -> PitchSummary:
+    """Per-frame f0 track via the YIN algorithm (cumulative mean normalized
+    difference).
+
+    YIN picks the *first* period dip rather than the largest correlation peak,
+    so it avoids the octave / sub-harmonic errors plain autocorrelation makes —
+    the main cause of the 逐字稿 音準 drifting by an octave on some syllables.
+    """
     if sample_rate <= 0:
         raise ValueError("sample_rate must be positive")
     if frame_ms <= 0:
@@ -264,7 +272,6 @@ def summarize_pitch(
     if samples.size < frame_samples or frame_samples <= max_lag:
         return PitchSummary(None, None, None, 0.0, ())
 
-    analysis_window = np.hanning(frame_samples)
     points: list[PitchPoint] = []
     hz_values: list[float] = []
     frame_count = 0
@@ -277,24 +284,12 @@ def summarize_pitch(
         if rms < rms_threshold:
             continue
 
-        autocorr = np.correlate(frame * analysis_window, frame * analysis_window, mode="full")
-        autocorr = autocorr[frame_samples - 1 :]
-        energy = float(autocorr[0])
-        search_end = min(max_lag, autocorr.size - 1)
-        if energy <= 0 or search_end <= min_lag:
+        hz, confidence = _yin_pitch(frame, sample_rate, min_lag, max_lag, yin_threshold)
+        if hz <= 0 or confidence < confidence_threshold:
+            continue
+        if hz < min_hz or hz > max_hz:
             continue
 
-        search = autocorr[min_lag : search_end + 1]
-        lag = min_lag + int(np.argmax(search))
-        confidence = float(autocorr[lag] / energy)
-        if confidence < confidence_threshold:
-            continue
-
-        refined_lag = _parabolic_lag(autocorr, lag)
-        if refined_lag <= 0:
-            continue
-
-        hz = sample_rate / refined_lag
         hz_values.append(hz)
         points.append(
             PitchPoint(
@@ -441,6 +436,68 @@ def analyze_segment(
         intensity_start=calculate_rms(samples[:half]),
         intensity_end=calculate_rms(samples[half:]),
     )
+
+
+def _yin_pitch(
+    frame: np.ndarray,
+    sample_rate: int,
+    min_lag: int,
+    max_lag: int,
+    threshold: float,
+) -> tuple[float, float]:
+    """Estimate one frame's f0 with YIN. Returns ``(hz, confidence)``.
+
+    ``confidence`` is ``1 - d'(tau)`` at the chosen period (≈1 for a clean
+    periodic frame, ≈0 for noise), so callers can gate on it like the old
+    autocorrelation confidence.
+    """
+    n = frame.size
+    max_lag = min(max_lag, n - 1)
+    if max_lag <= min_lag:
+        return 0.0, 0.0
+
+    # Raw autocorrelation r[tau] for tau in [0, max_lag] via FFT (fast).
+    size = 1
+    while size < 2 * n:
+        size <<= 1
+    spectrum = np.fft.rfft(frame, size)
+    autocorr = np.fft.irfft(spectrum * np.conj(spectrum), size)[: max_lag + 1]
+
+    # Exact difference function d[tau] = A[tau] + B[tau] - 2 r[tau], where A/B are
+    # the energies of the two (shrinking) windows compared at lag tau.
+    squared = frame * frame
+    prefix = np.concatenate(([0.0], np.cumsum(squared)))
+    total = prefix[n]
+    taus = np.arange(max_lag + 1)
+    energy_head = prefix[n - taus]
+    energy_tail = total - prefix[taus]
+    difference = np.maximum(energy_head + energy_tail - 2.0 * autocorr, 0.0)
+
+    # Cumulative mean normalized difference: d'[tau] = d[tau]*tau / sum_{1..tau} d.
+    cmnd = np.ones(max_lag + 1, dtype=np.float64)
+    running = np.cumsum(difference[1:])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cmnd[1:] = difference[1:] * taus[1:] / running
+    cmnd[~np.isfinite(cmnd)] = 1.0
+
+    window = cmnd[min_lag : max_lag + 1]
+    if window.size == 0:
+        return 0.0, 0.0
+
+    # Absolute threshold: the first local minimum that dips below ``threshold``;
+    # falling back to the global minimum keeps a (lower-confidence) estimate.
+    is_local_min = np.ones(window.size, dtype=bool)
+    is_local_min[1:] &= window[1:] <= window[:-1]
+    is_local_min[:-1] &= window[:-1] <= window[1:]
+    candidates = np.where((window < threshold) & is_local_min)[0]
+    best = int(candidates[0]) if candidates.size else int(np.argmin(window))
+    best_lag = min_lag + best
+
+    refined = _parabolic_lag(cmnd, best_lag)
+    if refined <= 0:
+        return 0.0, 0.0
+    confidence = float(max(0.0, min(1.0, 1.0 - cmnd[best_lag])))
+    return sample_rate / refined, confidence
 
 
 def _parabolic_lag(autocorr: np.ndarray, lag: int) -> float:

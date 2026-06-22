@@ -1152,9 +1152,28 @@
         white-space: nowrap;
       }
 
-      #sing-tonic {
-        flex: 0 0 7rem;
-        max-width: 7rem;
+      /* 基音 Hz + 速度: two inputs side by side, no descriptive copy. */
+      .voice-params {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      .voice-param {
+        flex: 1 1 0;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+        font-size: 0.82rem;
+        font-weight: 680;
+        color: var(--muted);
+      }
+
+      .voice-param .voice-input {
+        width: 100%;
+        flex: none;
+        max-width: none;
         min-height: 40px;
       }
 
@@ -1328,9 +1347,19 @@
         <div class="bar">
           <div class="bar-actions">
             <button id="pitch" class="mini" type="button" aria-pressed="false" aria-label="顯示音高模式" title="顯示每段文字的音高與簡譜">音高</button>
+            <button id="analyze" class="mini" type="button" disabled aria-label="重新計算音準" title="用更精準的演算法重新計算每個字的音高(後續計算,有進度條)">校準音準</button>
             <button id="copy" class="mini" type="button" disabled>複製</button>
             <button id="download" class="mini" type="button" disabled>下載</button>
             <button id="save" class="mini" type="button" disabled>遠端儲存</button>
+          </div>
+        </div>
+        <div id="analyze-progress" class="voice-progress" hidden aria-live="polite">
+          <div class="vp-head">
+            <span id="analyze-progress-label">重新計算音準中</span>
+            <span id="analyze-progress-pct"></span>
+          </div>
+          <div class="progress-track">
+            <div id="analyze-progress-bar" class="progress-fill indeterminate"></div>
           </div>
         </div>
         <div id="lines"></div>
@@ -1446,6 +1475,14 @@
         <button id="tts-upload" type="button">⤵ 上傳文字檔(.txt)</button>
         <input id="tts-file" class="visually-hidden" type="file" accept=".txt,text/plain" />
         <textarea id="tts-text" class="voice-textarea" maxlength="2000" rows="3" placeholder="輸入想說的話,或上傳文字檔…"></textarea>
+        <div class="voice-params">
+          <label class="voice-param">基音 Hz
+            <input id="tts-base" type="number" min="80" max="500" step="1" class="voice-input" placeholder="自動" />
+          </label>
+          <label class="voice-param">速度
+            <input id="tts-speed" type="number" min="0.5" max="2" step="0.05" class="voice-input" placeholder="1.0" />
+          </label>
+        </div>
         <button id="tts-run" type="button" class="primary" disabled>用目標聲音念出來</button>
         <div id="tts-result-wrap" class="voice-result" hidden>
           <audio id="tts-result" class="voice-audio" controls preload="metadata"></audio>
@@ -1464,10 +1501,14 @@
         <button id="sing-upload" type="button">⤵ 上傳逐字稿 JSON</button>
         <input id="sing-file" class="visually-hidden" type="file" accept="application/json,.json" />
         <textarea id="sing-score" class="voice-textarea" rows="6" placeholder="小 1 0.4&#10;星 2 0.4&#10;星 3 0.4&#10;眨 3 0.4"></textarea>
-        <label class="voice-fav" for="sing-tonic">
-          主音 Hz(可留空,預設用目標聲音音高)
-          <input id="sing-tonic" type="number" min="80" max="600" step="1" class="voice-input" placeholder="自動" />
-        </label>
+        <div class="voice-params">
+          <label class="voice-param">基音 Hz
+            <input id="sing-tonic" type="number" min="80" max="600" step="1" class="voice-input" placeholder="自動" />
+          </label>
+          <label class="voice-param">速度
+            <input id="sing-speed" type="number" min="0.5" max="2" step="0.05" class="voice-input" placeholder="1.0" />
+          </label>
+        </div>
         <button id="sing-run" type="button" class="primary" disabled>用目標聲音唱出來</button>
         <div id="sing-result-wrap" class="voice-result" hidden>
           <audio id="sing-result" class="voice-audio" controls preload="metadata"></audio>
@@ -1547,7 +1588,7 @@
       </div>
     </dialog>
 
-    <script src="./app.js?v=19" type="module"></script>
-    <script src="./voice.js?v=11" type="module"></script>
+    <script src="./app.js?v=20" type="module"></script>
+    <script src="./voice.js?v=12" type="module"></script>
   </body>
 </html>

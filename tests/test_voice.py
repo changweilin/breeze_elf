@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 import pathlib
@@ -112,6 +113,38 @@ class MockEngineTests(unittest.TestCase):
         # 1 (220 Hz) + rest + 5 (sol, ~330 Hz) => roughly a second of audio.
         self.assertGreater(result.samples.size / result.sample_rate, 0.8)
         self.assertGreater(float(np.max(np.abs(result.samples))), 0.1)
+
+    def test_extract_embedding_includes_timbre_bands(self):
+        payload = json.loads(self.engine.extract_embedding(_tone(200.0), 16_000).decode())
+        self.assertEqual(payload["version"], 2)
+        self.assertIsInstance(payload["bands"], list)
+        self.assertEqual(len(payload["bands"]), 28)
+
+    def test_synthesize_speed_shortens_and_lengthens_without_pitch_change(self):
+        embedding = self.engine.extract_embedding(_tone(180.0), 16_000)
+        normal = self.engine.synthesize("你好世界一二三", "zh", embedding)
+        fast = self.engine.synthesize("你好世界一二三", "zh", embedding, speed=2.0)
+        slow = self.engine.synthesize("你好世界一二三", "zh", embedding, speed=0.5)
+        self.assertLess(fast.samples.size, normal.samples.size)
+        self.assertGreater(slow.samples.size, normal.samples.size)
+        # Tempo only — the median pitch is unchanged by the speed multiplier.
+        self.assertAlmostEqual(_median_hz(fast.samples), _median_hz(normal.samples), delta=20.0)
+
+    def test_synthesize_base_hz_sets_voice_register(self):
+        embedding = self.engine.extract_embedding(_tone(150.0), 16_000)
+        low = self.engine.synthesize("啊啊啊啊", "zh", embedding, base_hz=110.0)
+        high = self.engine.synthesize("啊啊啊啊", "zh", embedding, base_hz=260.0)
+        self.assertGreater(_median_hz(high.samples), _median_hz(low.samples) + 20)
+
+    def test_synthesize_song_speed_shortens_audio(self):
+        embedding = self.engine.extract_embedding(_tone(200.0), 16_000)
+        notes = [
+            {"char": "do", "jianpu": "1", "durationSeconds": 0.5},
+            {"char": "sol", "jianpu": "5", "durationSeconds": 0.5},
+        ]
+        normal = self.engine.synthesize_song(notes, 220.0, embedding)
+        fast = self.engine.synthesize_song(notes, 220.0, embedding, speed=2.0)
+        self.assertLess(fast.samples.size, normal.samples.size)
 
     def test_synthesize_song_uses_target_pitch_when_no_tonic(self):
         # With tonic_hz<=0 the mock falls back to the saved voice's median pitch.
@@ -373,6 +406,55 @@ class VoiceApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(data["ok"])
         self.assertEqual(data["kind"], "tts")
         self.assertTrue((pathlib.Path(self._tmp.name) / data["filename"]).exists())
+
+    async def test_transcript_analyze_recomputes_pitch_with_global_tonic(self):
+        sample_rate = 16_000
+
+        def syllable(hz: float, seconds: float = 0.4) -> np.ndarray:
+            axis = np.arange(int(sample_rate * seconds), dtype=np.float64) / sample_rate
+            tone = 0.4 * np.sin(2 * np.pi * hz * axis) + 0.2 * np.sin(2 * np.pi * 2 * hz * axis)
+            return tone.astype(np.float32)
+
+        gap = np.zeros(int(sample_rate * 0.1), dtype=np.float32)
+        pieces, characters, start = [], [], 0.0
+        for hz in (220.0, 330.0, 440.0):  # 1, 5, then 4 (octave up) against tonic 330
+            pieces.append(syllable(hz))
+            characters.append(
+                {"char": "音", "startSeconds": round(start, 3), "endSeconds": round(start + 0.4, 3)}
+            )
+            start += 0.5
+            pieces.append(gap)
+        audio_b64 = base64.b64encode(
+            encode_wav(np.concatenate(pieces), sample_rate)
+        ).decode("ascii")
+        block = main.TranscriptBlock(
+            text="音音音", startSeconds=0.0, endSeconds=round(start, 3), characters=characters
+        )
+
+        started = await main.analyze_transcript(
+            main.TranscriptAnalyzeRequest(
+                audioBase64=audio_b64, sampleRate=sample_rate, blocks=[block]
+            )
+        )
+        self.assertTrue(json.loads(started.body)["ok"])
+
+        result = None
+        for _ in range(200):
+            status = json.loads((await main.analyze_transcript_status()).body)
+            if status["status"] == "done":
+                result = status["result"]
+                break
+            if status["status"] == "error":
+                self.fail(status["error"])
+            await asyncio.sleep(0.02)
+        self.assertIsNotNone(result)
+        self.assertAlmostEqual(result["tonicHz"], 330.0, delta=4.0)
+        chars = result["blocks"][0]["characters"]
+        self.assertEqual(len(chars), 3)
+        self.assertAlmostEqual(chars[0]["hz"], 220.0, delta=4.0)
+        self.assertAlmostEqual(chars[2]["hz"], 440.0, delta=4.0)
+        # 330 Hz is the tonic → 簡譜 "1" (do).
+        self.assertEqual(chars[1]["jianpu"], "1")
 
     async def test_save_output_rejects_empty_audio(self):
         from fastapi import HTTPException

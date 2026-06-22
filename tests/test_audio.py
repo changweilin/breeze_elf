@@ -152,6 +152,23 @@ class AudioTests(unittest.TestCase):
         self.assertEqual(summary.voiced_ratio, 0.0)
         self.assertEqual(summary.points, ())
 
+    def test_summarize_pitch_is_robust_to_harmonics(self):
+        # A harmonic-rich tone (strong 2nd/3rd harmonics) is exactly what makes
+        # plain autocorrelation report an octave error; YIN must track the true
+        # fundamental, not a harmonic or sub-harmonic.
+        sample_rate = 16_000
+        time_axis = np.arange(round(sample_rate * 0.6), dtype=np.float64) / sample_rate
+        for f0 in (110.0, 147.0, 220.0, 262.0):
+            tone = (
+                0.6 * np.sin(2 * np.pi * f0 * time_axis)
+                + 0.9 * np.sin(2 * np.pi * 2 * f0 * time_axis)
+                + 0.7 * np.sin(2 * np.pi * 3 * f0 * time_axis)
+            ).astype(np.float32)
+            tone *= 0.3 / float(np.max(np.abs(tone)))
+            summary = summarize_pitch(tone, sample_rate)
+            self.assertIsNotNone(summary.median_hz)
+            self.assertAlmostEqual(summary.median_hz, f0, delta=3.0)
+
     def test_silence_gate(self):
         buffer = AudioWindowBuffer(
             sample_rate=4,
