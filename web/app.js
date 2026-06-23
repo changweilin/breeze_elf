@@ -85,18 +85,18 @@ const DEMO_EVENTS = [
   },
   {
     delay: 1850,
-    partial: "麥克風、WebSocket 與遠端儲存都維持凍結。",
+    partial: "麥克風、WebSocket 與雲端儲存都維持凍結。",
     rms: 0.05,
     stats: { asrMs: 22, segmentKind: "utterance" },
   },
   {
     delay: 2750,
-    final: "\n麥克風、WebSocket 與遠端儲存都維持凍結，只呈現操作流程。",
+    final: "\n麥克風、WebSocket 與雲端儲存都維持凍結，只呈現操作流程。",
     startSeconds: 1.85,
     endSeconds: 2.75,
     pitch: demoPitch(162, [154, 158, 166, 172, 160, 150]),
     characters: demoCharacters(
-      "麥克風、WebSocket 與遠端儲存都維持凍結，只呈現操作流程。",
+      "麥克風、WebSocket 與雲端儲存都維持凍結，只呈現操作流程。",
       1.85,
       2.75,
       ["5̣", "6̣", "1", "2", "3", "2", "1", "6̣"],
@@ -1446,7 +1446,7 @@ function applyRuntimeMode() {
   els.backend.textContent = "GitHub Actions 示意 · 隱私功能凍結";
   els.save.textContent = "儲存凍結";
   els.save.setAttribute("title", "示意模式不會寫入遠端主機");
-  els.save.setAttribute("aria-label", "遠端儲存已凍結");
+  els.save.setAttribute("aria-label", "雲端儲存已凍結");
   els.stats.textContent = "示意模式";
   setStatus("示意");
   setTranscriptActions(false);
@@ -1885,12 +1885,19 @@ els.download.addEventListener("click", async () => {
     );
   // The structured .json (簡譜/timing) is what the 簡譜唱歌 page reads, so a
   // downloaded transcript can be uploaded there directly.
+  // The structured .json (簡譜/timing) is what the 簡譜唱歌 page reads, so a
+  // downloaded transcript can be uploaded there directly.
   const downloadJson = () =>
     downloadBlobAs(
       new Blob([JSON.stringify(buildTranscriptDocument(state.transcript), null, 2)], {
         type: "application/json;charset=utf-8",
       }),
       `breeze-elf-${stamp}.json`,
+    );
+  const downloadCsv = () =>
+    downloadBlobAs(
+      new Blob([buildPitchCsv()], { type: "text/csv;charset=utf-8" }),
+      `breeze-elf-${stamp}-基頻分析.csv`,
     );
 
   // Plain text only → a single file, no need to ask.
@@ -1900,14 +1907,14 @@ els.download.addEventListener("click", async () => {
     return;
   }
 
-  const keys = await pickItems({
-    title: "下載逐字稿",
-    storageKey: "transcript-download",
-    items: [
-      { key: "txt", label: "逐字稿文字 (.txt)" },
-      { key: "json", label: "簡譜 JSON (.json)" },
-    ],
-  });
+  const items = [
+    { key: "txt", label: "逐字稿文字 (.txt)" },
+    { key: "json", label: "簡譜 JSON (.json)" },
+  ];
+  if (hasAnalysis()) {
+    items.push({ key: "csv", label: "基頻分析 (.csv)" });
+  }
+  const keys = await pickItems({ title: "下載逐字稿", storageKey: "transcript-download", items });
   if (!keys || keys.length === 0) {
     return;
   }
@@ -1917,11 +1924,14 @@ els.download.addEventListener("click", async () => {
   if (keys.includes("json")) {
     downloadJson();
   }
+  if (keys.includes("csv")) {
+    downloadCsv();
+  }
   flashStats("已下載");
 });
 els.save.addEventListener("click", async () => {
   if (DEMO_MODE) {
-    flashStats("示意模式不會遠端儲存");
+    flashStats("示意模式不會雲端儲存");
     return;
   }
 
@@ -1931,33 +1941,35 @@ els.save.addEventListener("click", async () => {
   }
 
   // When the transcript has 簡譜/timing, ask which parts to save (the text is
-  // always written; the 簡譜 JSON is optional). Selection is remembered.
+  // always written; the 簡譜 JSON and 基頻分析 CSV are optional). Remembered.
   let includeJianpu = true;
+  let includeCsv = false;
   if (hasStructuredTranscript()) {
-    const keys = await pickItems({
-      title: "遠端儲存逐字稿",
-      storageKey: "transcript-save",
-      items: [
-        { key: "text", label: "逐字稿文字", locked: true },
-        { key: "jianpu", label: "簡譜 / 音階資料" },
-      ],
-    });
+    const items = [
+      { key: "text", label: "逐字稿文字", locked: true },
+      { key: "jianpu", label: "簡譜 / 音階資料" },
+    ];
+    if (hasAnalysis()) {
+      items.push({ key: "csv", label: "基頻分析 (.csv)" });
+    }
+    const keys = await pickItems({ title: "雲端儲存逐字稿", storageKey: "transcript-save", items });
     if (!keys) {
       return;
     }
     includeJianpu = keys.includes("jianpu");
+    includeCsv = keys.includes("csv");
   }
 
   state.savingRemote = true;
   setTranscriptActions(true);
   window.clearTimeout(state.statsTimer);
   const previousStats = els.stats.textContent;
-  els.stats.textContent = "遠端儲存中";
+  els.stats.textContent = "雲端儲存中";
 
   try {
     // The transcript save carries the transcript text plus, when chosen, its
-    // 簡譜/timing. Omitting `blocks` entirely tells the server to write txt only
-    // (sending [] would still emit an empty .json).
+    // 簡譜/timing and 基頻分析 CSV. Omitting `blocks` entirely tells the server to
+    // write txt only (sending [] would still emit an empty .json).
     const payload = {
       text,
       title: transcriptTitle(text),
@@ -1965,6 +1977,9 @@ els.save.addEventListener("click", async () => {
     };
     if (includeJianpu) {
       payload.blocks = serializeBlocksForSave();
+    }
+    if (includeCsv) {
+      payload.pitchCsv = buildPitchCsv();
     }
 
     const response = await fetch("/api/transcripts", {
@@ -1974,15 +1989,22 @@ els.save.addEventListener("click", async () => {
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok || !data.ok) {
-      throw new Error(data.detail || "遠端儲存失敗");
+      throw new Error(data.detail || "雲端儲存失敗");
     }
-    const suffix = data.jsonFilename ? "(含簡譜)" : "";
+    const parts = [];
+    if (data.jsonFilename) {
+      parts.push("簡譜");
+    }
+    if (data.csvFilename) {
+      parts.push("基頻分析");
+    }
+    const suffix = parts.length ? `(含${parts.join("、")})` : "";
     flashStats(
-      data.filename ? `已遠端儲存逐字稿 ${data.filename}${suffix}` : "已遠端儲存逐字稿",
+      data.filename ? `已雲端儲存逐字稿 ${data.filename}${suffix}` : "已雲端儲存逐字稿",
       previousStats,
     );
   } catch (error) {
-    flashStats(error.message || "遠端儲存失敗", previousStats);
+    flashStats(error.message || "雲端儲存失敗", previousStats);
   } finally {
     state.savingRemote = false;
     setTranscriptActions(Boolean(state.transcript.trim()));
@@ -2009,7 +2031,7 @@ els.audioDownload.addEventListener("click", () => {
 
 els.audioSave.addEventListener("click", async () => {
   if (DEMO_MODE) {
-    flashStats("示意模式不會遠端儲存");
+    flashStats("示意模式不會雲端儲存");
     return;
   }
   if (!state.audioBytes || state.savingAudio) {
@@ -2020,7 +2042,7 @@ els.audioSave.addEventListener("click", async () => {
   setAudioActions();
   window.clearTimeout(state.statsTimer);
   const previousStats = els.stats.textContent;
-  els.stats.textContent = "音檔遠端儲存中";
+  els.stats.textContent = "音檔雲端儲存中";
 
   try {
     const audioBase64 = await encodeRecordedAudioBase64();
@@ -2034,14 +2056,14 @@ els.audioSave.addEventListener("click", async () => {
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok || !data.ok) {
-      throw new Error(data.detail || "遠端儲存失敗");
+      throw new Error(data.detail || "雲端儲存失敗");
     }
     flashStats(
-      data.filename ? `已遠端儲存音檔 ${data.filename}` : "已遠端儲存音檔",
+      data.filename ? `已雲端儲存音檔 ${data.filename}` : "已雲端儲存音檔",
       previousStats,
     );
   } catch (error) {
-    flashStats(error.message || "遠端儲存失敗", previousStats);
+    flashStats(error.message || "雲端儲存失敗", previousStats);
   } finally {
     state.savingAudio = false;
     setAudioActions();
@@ -2065,6 +2087,36 @@ function hasStructuredTranscript() {
   return state.transcriptBlocks.some(
     (block) => (Array.isArray(block.characters) && block.characters.length > 0) || block.pitch,
   );
+}
+
+// True once 後處理 has produced 基頻分析 data (spectrogram + time series).
+function hasAnalysis() {
+  return state.analysisSpectra.some((spectro) => spectro && Array.isArray(spectro.times));
+}
+
+// Build the 基頻分析 CSV: one row per time point with 時間/基頻/強度/文字.
+function buildPitchCsv() {
+  const rows = ["time_seconds,hz,intensity,text"];
+  state.transcriptBlocks.forEach((block, index) => {
+    const spectro = state.analysisSpectra[index];
+    if (!spectro || !Array.isArray(spectro.times)) {
+      return;
+    }
+    const base = Number.isFinite(block.startSeconds) ? block.startSeconds : 0;
+    const f0 = Array.isArray(spectro.f0) ? spectro.f0 : [];
+    const intensity = Array.isArray(spectro.intensity) ? spectro.intensity : [];
+    const text = Array.isArray(spectro.text) ? spectro.text : [];
+    spectro.times.forEach((time, i) => {
+      const hz = f0[i] == null ? "" : f0[i];
+      const level = intensity[i] == null ? "" : intensity[i];
+      rows.push(`${(base + time).toFixed(3)},${hz},${level},${csvCell(text[i] || "")}`);
+    });
+  });
+  return rows.join("\n");
+}
+
+function csvCell(value) {
+  return /[",\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
 }
 
 // Build the structured transcript document. Mirrors the remote-save payload (plus

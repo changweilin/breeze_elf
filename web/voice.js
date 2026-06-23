@@ -66,6 +66,8 @@ const els = {
   // 簡譜 singing
   singUpload: document.querySelector("#sing-upload"),
   singFile: document.querySelector("#sing-file"),
+  singAnalysisUpload: document.querySelector("#sing-analysis-upload"),
+  singAnalysisFile: document.querySelector("#sing-analysis-file"),
   singScore: document.querySelector("#sing-score"),
   singTonic: document.querySelector("#sing-tonic"),
   singSpeed: document.querySelector("#sing-speed"),
@@ -95,6 +97,10 @@ const state = {
   ttsResultUrl: "",
   singResultB64: "",
   singResultUrl: "",
+  // Rich notes from a loaded 基頻分析 (with per-syllable pitch contour + 氣音);
+  // used verbatim while the score textarea still matches what we generated.
+  analysisNotes: null,
+  analysisScoreText: "",
 };
 
 // --------------------------------------------------------------------------- //
@@ -787,7 +793,7 @@ async function convertFromBlob(blob) {
       throw new Error(data.detail || "轉換失敗");
     }
     showConvertResult(audioBase64, data.audioBase64);
-    setStatus("轉換完成,可試聽後打包下載或打包遠端儲存");
+    setStatus("轉換完成,可試聽後打包下載或打包雲端儲存");
   });
 }
 
@@ -824,7 +830,7 @@ async function runTts() {
       throw new Error(data.detail || "合成失敗");
     }
     showResult("tts", data.audioBase64);
-    setStatus("合成完成,可試聽後下載或遠端儲存");
+    setStatus("合成完成,可試聽後下載或雲端儲存");
   });
 }
 
@@ -888,6 +894,10 @@ async function loadTranscriptFile(file) {
     return;
   }
   els.singScore.value = lines.join("\n");
+  // This is a 簡譜 score (glides ride along in the jianpu token, e.g. 3↗5); drop
+  // any rich 基頻分析 notes so singing uses the 簡譜, not stale measured data.
+  state.analysisNotes = null;
+  state.analysisScoreText = "";
   // Keep 主音 empty so the song defaults to the *target* voice's pitch — that is
   // what makes it sung in the chosen voice. The 簡譜 is relative, so the melody is
   // preserved and just transposed into the target's range. Auto-filling the
@@ -899,6 +909,209 @@ async function loadTranscriptFile(file) {
   setStatus(`已載入逐字稿「${file.name}」,共 ${lines.length} 個音,將以目標聲音音高演唱`);
 }
 
+// Load a 基頻分析 CSV (time,hz,intensity,text) and turn it into rich notes that
+// keep the recording's expression: each voiced run carries its pitch *contour*
+// (so syllables rise/fall — 抑揚頓挫 — and glides slide), runs with energy but no
+// pitch become 氣音 (breath) notes, and quiet runs become rests. The textarea
+// shows a readable version; singing uses the rich notes verbatim (state.analysisNotes).
+async function loadAnalysisFile(file) {
+  if (!file) {
+    return;
+  }
+  let rows;
+  try {
+    rows = parsePitchCsv(await file.text());
+  } catch {
+    setStatus("不是有效的基頻分析 CSV", "error");
+    return;
+  }
+  if (!rows.length) {
+    setStatus("基頻分析 CSV 沒有資料", "error");
+    return;
+  }
+
+  const median = (values) => {
+    if (!values.length) return 0;
+    const sorted = values.slice().sort((a, b) => a - b);
+    return sorted[Math.floor(sorted.length / 2)];
+  };
+  const tonic = median(rows.map((r) => r.hz).filter((hz) => Number.isFinite(hz) && hz > 0));
+  const voicedIntensity = median(
+    rows.filter((r) => Number.isFinite(r.hz) && r.hz > 0).map((r) => r.intensity),
+  );
+  const breathThreshold = Math.max(0.008, 0.15 * voicedIntensity);
+  const deltas = [];
+  for (let i = 1; i < rows.length; i += 1) {
+    const dt = rows[i].time - rows[i - 1].time;
+    if (dt > 0 && dt < 1) {
+      deltas.push(dt);
+    }
+  }
+  const binStep = deltas.length ? median(deltas) : 0.02;
+  const category = (row) =>
+    Number.isFinite(row.hz) && row.hz > 0 ? "voiced" : row.intensity >= breathThreshold ? "breath" : "rest";
+
+  const notes = [];
+  let index = 0;
+  while (index < rows.length) {
+    const kind = category(rows[index]);
+    let end = index;
+    const hzs = [];
+    const intensities = [];
+    const chars = {};
+    while (end < rows.length && category(rows[end]) === kind) {
+      const row = rows[end];
+      if (Number.isFinite(row.hz) && row.hz > 0) {
+        hzs.push(row.hz);
+      }
+      intensities.push(row.intensity || 0);
+      const char = (row.text || "").trim();
+      if (char) {
+        chars[char] = (chars[char] || 0) + 1;
+      }
+      end += 1;
+    }
+    const span = rows[end - 1].time - rows[index].time + binStep;
+    const domChar = Object.keys(chars).sort((a, b) => chars[b] - chars[a])[0] || "";
+    if (kind === "voiced") {
+      const contour = subsampleContour(hzs, 8);
+      notes.push({
+        char: domChar || "啦",
+        kind: "voiced",
+        contour,
+        hz: contour.length ? contour[Math.floor(contour.length / 2)] : 0,
+        durationSeconds: Math.max(0.12, span),
+      });
+    } else if (kind === "breath") {
+      notes.push({
+        char: domChar,
+        kind: "breath",
+        intensity: median(intensities),
+        durationSeconds: Math.max(0.05, span),
+      });
+    } else if (span >= 0.12) {
+      notes.push({ char: "-", kind: "rest", durationSeconds: span });
+    }
+    index = end;
+  }
+  const pitched = notes.filter((note) => note.kind === "voiced");
+  if (!pitched.length) {
+    setStatus("基頻分析裡找不到可唱的音", "error");
+    return;
+  }
+
+  const scoreText = notes
+    .map((note) => {
+      if (note.kind === "breath") {
+        return `氣 - ${note.durationSeconds.toFixed(2)}`;
+      }
+      if (note.kind === "rest") {
+        return `- - ${note.durationSeconds.toFixed(2)}`;
+      }
+      const jianpu = hzToJianpu(note.hz, tonic || note.hz);
+      return `${note.char} ${jianpu} ${note.durationSeconds.toFixed(2)} ${Math.round(note.hz)}`;
+    })
+    .join("\n");
+  els.singScore.value = scoreText;
+  state.analysisNotes = notes;
+  state.analysisScoreText = scoreText;
+  els.singTonic.value = tonic ? String(Math.round(tonic)) : "";
+  els.singTonic.placeholder = "自動";
+  refreshButtons();
+  setStatus(
+    `已載入基頻分析「${file.name}」,共 ${pitched.length} 音(含滑音/氣音),將依實測音高演唱`,
+  );
+}
+
+// Pick up to ``maxPoints`` values evenly across the contour (keep the shape).
+function subsampleContour(values, maxPoints) {
+  if (values.length <= maxPoints) {
+    return values.slice();
+  }
+  const out = [];
+  for (let i = 0; i < maxPoints; i += 1) {
+    out.push(values[Math.round((i * (values.length - 1)) / (maxPoints - 1))]);
+  }
+  return out;
+}
+
+function parsePitchCsv(textData) {
+  const lines = textData.split(/\r?\n/).filter((line) => line.length);
+  if (!lines.length) {
+    return [];
+  }
+  let start = 0;
+  if (/time/i.test(lines[0]) && /hz/i.test(lines[0])) {
+    start = 1; // skip the header row
+  }
+  const rows = [];
+  for (let i = start; i < lines.length; i += 1) {
+    const cells = splitCsvLine(lines[i]);
+    const time = Number.parseFloat(cells[0]);
+    if (!Number.isFinite(time)) {
+      continue;
+    }
+    const hz = Number.parseFloat(cells[1]);
+    const intensity = Number.parseFloat(cells[2]);
+    rows.push({
+      time,
+      hz: Number.isFinite(hz) ? hz : null,
+      intensity: Number.isFinite(intensity) ? intensity : 0,
+      text: (cells[3] || "").trim(),
+    });
+  }
+  return rows;
+}
+
+function splitCsvLine(line) {
+  const cells = [];
+  let current = "";
+  let quoted = false;
+  for (let i = 0; i < line.length; i += 1) {
+    const char = line[i];
+    if (quoted) {
+      if (char === '"' && line[i + 1] === '"') {
+        current += '"';
+        i += 1;
+      } else if (char === '"') {
+        quoted = false;
+      } else {
+        current += char;
+      }
+    } else if (char === ",") {
+      cells.push(current);
+      current = "";
+    } else if (char === '"') {
+      quoted = true;
+    } else {
+      current += char;
+    }
+  }
+  cells.push(current);
+  return cells;
+}
+
+const JIANPU_DEGREES = ["1", "#1", "2", "#2", "3", "4", "#4", "5", "#5", "6", "#6", "7"];
+
+// Hz → 簡譜 relative to a tonic (mirrors audio.hz_to_jianpu); octaves use the
+// ASCII '/, marks that parseScore / the server already understand.
+function hzToJianpu(hz, tonicHz) {
+  if (!hz || !tonicHz || hz <= 0 || tonicHz <= 0) {
+    return "-";
+  }
+  const semitones = Math.round(12 * Math.log2(hz / tonicHz));
+  const octave = Math.floor(semitones / 12);
+  const degree = ((semitones % 12) + 12) % 12;
+  const digit = JIANPU_DEGREES[degree];
+  if (octave > 0) {
+    return digit + "'".repeat(octave);
+  }
+  if (octave < 0) {
+    return digit + ",".repeat(-octave);
+  }
+  return digit;
+}
+
 function parseScore(text) {
   const notes = [];
   for (const raw of text.split(/\r?\n/)) {
@@ -908,10 +1121,14 @@ function parseScore(text) {
     }
     const parts = line.split(/\s+/);
     const duration = parts[2] ? Number.parseFloat(parts[2]) : null;
+    // Optional 4th column = measured Hz (from a loaded 基頻分析); when present it
+    // overrides the 簡譜 so the note follows the actual recorded pitch.
+    const hz = parts[3] ? Number.parseFloat(parts[3]) : null;
     notes.push({
       char: parts[0] || "",
       jianpu: parts[1] || "",
       durationSeconds: Number.isFinite(duration) ? duration : null,
+      hz: Number.isFinite(hz) && hz > 0 ? hz : null,
     });
   }
   return notes;
@@ -922,9 +1139,25 @@ async function runSing() {
     setStatus("請先在聲音庫選擇或新增一個目標聲音", "error");
     return;
   }
-  const notes = parseScore(els.singScore.value);
-  if (!notes.some((note) => note.jianpu && note.jianpu !== "0")) {
-    setStatus("沒有可唱的簡譜,請先上傳逐字稿或輸入簡譜", "error");
+  // Use the loaded 基頻分析's rich notes (contour + 氣音) verbatim while the score
+  // textarea is unchanged; once it is edited, fall back to parsing the 簡譜.
+  let notes;
+  let useMeasured;
+  if (state.analysisNotes && els.singScore.value === state.analysisScoreText) {
+    notes = state.analysisNotes;
+    useMeasured = true;
+  } else {
+    notes = parseScore(els.singScore.value);
+    useMeasured = notes.some((note) => note.hz && note.hz > 0);
+  }
+  const singable = notes.some(
+    (note) =>
+      (Array.isArray(note.contour) && note.contour.length > 0) ||
+      (note.hz && note.hz > 0) ||
+      (note.jianpu && note.jianpu !== "0" && note.jianpu !== "-"),
+  );
+  if (!singable) {
+    setStatus("沒有可唱的內容,請先上傳逐字稿/基頻分析或輸入簡譜", "error");
     return;
   }
   const tonic = Number.parseFloat(els.singTonic.value);
@@ -934,6 +1167,9 @@ async function runSing() {
     const body = { voiceId: state.selectedId, notes };
     if (Number.isFinite(tonic) && tonic > 0) {
       body.tonicHz = tonic;
+    }
+    if (useMeasured) {
+      body.useMeasuredHz = true;
     }
     const speed = positiveNumber(els.singSpeed.value);
     if (speed) {
@@ -950,7 +1186,7 @@ async function runSing() {
       throw new Error(data.detail || "唱歌合成失敗");
     }
     showResult("sing", data.audioBase64);
-    setStatus("歌聲完成,可試聽後下載或遠端儲存");
+    setStatus("歌聲完成,可試聽後下載或雲端儲存");
   });
 }
 
@@ -986,7 +1222,7 @@ function showResult(kind, audioBase64) {
 }
 
 // 聲音轉換 shows the original input clip next to the converted one so they can be
-// compared. Per-clip 下載/遠端儲存 live in each player's ⋮ menu; the buttons below
+// compared. Per-clip 下載/雲端儲存 live in each player's ⋮ menu; the buttons below
 // act on both as a 打包 (bundle).
 function showConvertResult(sourceBase64, convertedBase64) {
   if (state.cvSourceUrl) {
@@ -1026,13 +1262,13 @@ async function saveAudioRemote(audioBase64, kind, { text } = {}) {
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok || !data.ok) {
-    throw new Error(data.detail || "遠端儲存失敗");
+    throw new Error(data.detail || "雲端儲存失敗");
   }
   return data.filename;
 }
 
 // Save one clip with button-disable + status feedback (used by the single-clip
-// 遠端儲存 actions in the TTS/sing players and the convert ⋮ menus).
+// 雲端儲存 actions in the TTS/sing players and the convert ⋮ menus).
 async function saveSingleOutput(audioBase64, kind, button, { text } = {}) {
   if (!audioBase64) {
     return;
@@ -1040,12 +1276,12 @@ async function saveSingleOutput(audioBase64, kind, button, { text } = {}) {
   if (button) {
     button.disabled = true;
   }
-  setStatus("遠端儲存中…", "live");
+  setStatus("雲端儲存中…", "live");
   try {
     const filename = await saveAudioRemote(audioBase64, kind, { text });
-    setStatus(`已遠端儲存:${filename}`);
+    setStatus(`已雲端儲存:${filename}`);
   } catch (error) {
-    setStatus(error?.message || "遠端儲存失敗", "error");
+    setStatus(error?.message || "雲端儲存失敗", "error");
   } finally {
     if (button) {
       button.disabled = false;
@@ -1101,13 +1337,13 @@ async function bundleDownloadConvert() {
   setStatus("已下載所選音檔");
 }
 
-// 打包遠端儲存 — ask which clips to include, then save the selected ones.
+// 打包雲端儲存 — ask which clips to include, then save the selected ones.
 async function bundleSaveConvert() {
   if (!state.cvResultB64) {
     return;
   }
   const keys = await pickItems({
-    title: "打包遠端儲存",
+    title: "打包雲端儲存",
     storageKey: "voice-convert-save",
     items: convertBundleItems(),
   });
@@ -1115,7 +1351,7 @@ async function bundleSaveConvert() {
     return;
   }
   els.cvBundleSave.disabled = true;
-  setStatus("打包遠端儲存中…", "live");
+  setStatus("打包雲端儲存中…", "live");
   try {
     const names = [];
     if (keys.includes("source") && state.cvSourceB64) {
@@ -1124,9 +1360,9 @@ async function bundleSaveConvert() {
     if (keys.includes("converted")) {
       names.push(await saveAudioRemote(state.cvResultB64, "convert"));
     }
-    setStatus(names.length ? `已遠端儲存:${names.join("、")}` : "未選擇任何項目");
+    setStatus(names.length ? `已雲端儲存:${names.join("、")}` : "未選擇任何項目");
   } catch (error) {
-    setStatus(error?.message || "打包遠端儲存失敗", "error");
+    setStatus(error?.message || "打包雲端儲存失敗", "error");
   } finally {
     els.cvBundleSave.disabled = false;
   }
@@ -1398,6 +1634,12 @@ els.singFile.addEventListener("change", (event) => {
   const file = event.target.files?.[0];
   event.target.value = "";
   void loadTranscriptFile(file);
+});
+els.singAnalysisUpload.addEventListener("click", () => els.singAnalysisFile.click());
+els.singAnalysisFile.addEventListener("change", (event) => {
+  const file = event.target.files?.[0];
+  event.target.value = "";
+  void loadAnalysisFile(file);
 });
 els.singScore.addEventListener("input", refreshButtons);
 els.singRun.addEventListener("click", runSing);

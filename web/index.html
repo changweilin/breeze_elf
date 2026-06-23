@@ -327,11 +327,12 @@
         box-shadow: 0 1px 2px var(--shadow);
       }
 
+      /* Two stacked rows: 顯示頁籤 on top, 後處理/複製/下載/雲端儲存 below. */
       .bar {
         display: flex;
-        justify-content: space-between;
-        align-items: center;
-        gap: 12px;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 8px;
         padding: 11px 12px;
         border-bottom: 1px solid var(--line);
         color: var(--muted);
@@ -340,12 +341,15 @@
       }
 
       .bar-actions {
-        display: flex;
-        align-items: center;
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
         gap: 8px;
+        width: 100%;
+      }
+
+      .bar-actions > * {
         min-width: 0;
-        flex: 1;
-        justify-content: flex-end;
+        width: 100%;
       }
 
       .mini {
@@ -367,10 +371,9 @@
         background: var(--warn);
       }
 
-      /* 逐字稿顯示頁籤:文字 / 文字+簡譜 / 基頻分析 */
+      /* 逐字稿顯示頁籤(上排,等寬填滿):文字 / 文字+簡譜 / 基頻分析 */
       .view-tabs {
-        display: inline-flex;
-        flex: 0 0 auto;
+        display: flex;
         gap: 2px;
         padding: 3px;
         border: 1px solid var(--line);
@@ -379,6 +382,8 @@
       }
 
       .view-tab {
+        flex: 1 1 0;
+        min-width: 0;
         min-height: 30px;
         padding: 0 9px;
         border: 0;
@@ -827,14 +832,16 @@
         flex: none;
       }
 
+      /* 取消 / 確認 split the row into equal left-right halves. */
       .pick-actions {
         display: flex;
-        justify-content: flex-end;
         gap: 8px;
       }
 
-      .pick-actions .mini {
-        min-width: 4rem;
+      .pick-actions > button {
+        flex: 1 1 0;
+        min-width: 0;
+        min-height: 40px;
       }
 
       .about-head {
@@ -1388,16 +1395,6 @@
           font-size: 1.12rem;
         }
 
-        .bar-actions {
-          display: grid;
-          grid-template-columns: repeat(4, minmax(0, 1fr));
-          width: 100%;
-        }
-
-        .bar-actions > * {
-          min-width: 0;
-        }
-
         .stats {
           max-width: 8.5rem;
         }
@@ -1472,7 +1469,7 @@
             <button id="analyze" class="mini" type="button" disabled aria-label="後處理:重新計算音階與基頻分析" title="後處理:用更精準的演算法重新計算每個字的音階與簡譜,並產生基頻分析(後續計算,有進度條)">後處理</button>
             <button id="copy" class="mini" type="button" disabled>複製</button>
             <button id="download" class="mini" type="button" disabled>下載</button>
-            <button id="save" class="mini" type="button" disabled>遠端儲存</button>
+            <button id="save" class="mini" type="button" disabled>雲端儲存</button>
           </div>
         </div>
         <div id="analyze-progress" class="voice-progress" hidden aria-live="polite">
@@ -1492,7 +1489,7 @@
         <audio id="recording" controls preload="metadata"></audio>
         <div class="audio-actions">
           <button id="audio-download" class="mini" type="button" disabled>下載音檔</button>
-          <button id="audio-save" class="mini" type="button" disabled>遠端儲存音檔</button>
+          <button id="audio-save" class="mini" type="button" disabled>雲端儲存音檔</button>
         </div>
       </section>
 
@@ -1565,7 +1562,7 @@
                 <button class="icon-btn player-menu-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-label="原始音檔功能選單" title="功能選單">⋮</button>
                 <div class="player-menu-list" role="menu" hidden>
                   <button id="cv-src-download" type="button" role="menuitem">下載</button>
-                  <button id="cv-src-save" type="button" role="menuitem">遠端儲存</button>
+                  <button id="cv-src-save" type="button" role="menuitem">雲端儲存</button>
                 </div>
               </div>
             </div>
@@ -1578,7 +1575,7 @@
                 <button class="icon-btn player-menu-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-label="轉換音檔功能選單" title="功能選單">⋮</button>
                 <div class="player-menu-list" role="menu" hidden>
                   <button id="cv-download" type="button" role="menuitem">下載</button>
-                  <button id="cv-save" type="button" role="menuitem">遠端儲存</button>
+                  <button id="cv-save" type="button" role="menuitem">雲端儲存</button>
                 </div>
               </div>
             </div>
@@ -1586,7 +1583,7 @@
           </div>
           <div class="voice-result-actions">
             <button id="cv-bundle-download" type="button" class="mini">打包下載</button>
-            <button id="cv-bundle-save" type="button" class="mini">打包遠端儲存</button>
+            <button id="cv-bundle-save" type="button" class="mini">打包雲端儲存</button>
           </div>
         </div>
       </section>
@@ -1610,7 +1607,7 @@
           <audio id="tts-result" class="voice-audio" controls preload="metadata"></audio>
           <div class="voice-result-actions">
             <button id="tts-download" type="button" class="mini">下載</button>
-            <button id="tts-save" type="button" class="mini">遠端儲存</button>
+            <button id="tts-save" type="button" class="mini">雲端儲存</button>
           </div>
         </div>
       </section>
@@ -1618,10 +1615,14 @@
       <section id="vpanel-sing" class="voice-card vpanel" hidden>
         <h2>簡譜唱歌</h2>
         <p class="voice-hint">
-          上傳逐字稿(含音高的 .json),或直接編輯下面的簡譜,用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」唱出來。每行一個字:<code>字 簡譜 秒數</code>(例:<code>小 1 0.4</code>;休止用 <code>- 0 0.3</code>;高八度加 <code>'</code>、低八度加 <code>,</code>)。
+          上傳逐字稿(含音高的 .json)或基頻分析(.csv,依實測音高演唱),或直接編輯下面的簡譜,用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」唱出來。每行一個字:<code>字 簡譜 秒數</code>(例:<code>小 1 0.4</code>;休止用 <code>- 0 0.3</code>;高八度加 <code>'</code>、低八度加 <code>,</code>;第四欄填 Hz 則依實測音高)。
         </p>
-        <button id="sing-upload" type="button">⤵ 上傳逐字稿 JSON</button>
+        <div class="voice-source">
+          <button id="sing-upload" type="button">⤵ 上傳逐字稿 JSON</button>
+          <button id="sing-analysis-upload" type="button">⤵ 載入基頻分析 (.csv)</button>
+        </div>
         <input id="sing-file" class="visually-hidden" type="file" accept="application/json,.json" />
+        <input id="sing-analysis-file" class="visually-hidden" type="file" accept="text/csv,.csv" />
         <textarea id="sing-score" class="voice-textarea" rows="6" placeholder="小 1 0.4&#10;星 2 0.4&#10;星 3 0.4&#10;眨 3 0.4"></textarea>
         <div class="voice-params">
           <label class="voice-param">基音 Hz
@@ -1636,7 +1637,7 @@
           <audio id="sing-result" class="voice-audio" controls preload="metadata"></audio>
           <div class="voice-result-actions">
             <button id="sing-download" type="button" class="mini">下載</button>
-            <button id="sing-save" type="button" class="mini">遠端儲存</button>
+            <button id="sing-save" type="button" class="mini">雲端儲存</button>
           </div>
         </div>
       </section>
@@ -1721,7 +1722,7 @@
       </form>
     </dialog>
 
-    <script src="./app.js?v=21" type="module"></script>
-    <script src="./voice.js?v=13" type="module"></script>
+    <script src="./app.js?v=22" type="module"></script>
+    <script src="./voice.js?v=15" type="module"></script>
   </body>
 </html>

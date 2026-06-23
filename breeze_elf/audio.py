@@ -360,12 +360,17 @@ def compute_spectrogram(
 
     mags = np.empty((len(starts), nkeep), dtype=np.float64)
     f0: list[float | None] = []
+    intensity: list[float] = []
+    times: list[float] = []
     for index, start in enumerate(starts):
-        segment = samples[start : start + n_fft]
+        raw = samples[start : start + n_fft]
+        segment = raw
         if segment.size < n_fft:
             segment = np.pad(segment, (0, n_fft - segment.size))
         segment = segment.astype(np.float64)
         mags[index] = np.abs(np.fft.rfft(segment * window))[keep]
+        intensity.append(round(calculate_rms(raw), 5))
+        times.append(round((start + n_fft / 2) / sample_rate, 3))
 
         hz: float | None = None
         centered = segment - segment.mean()
@@ -402,6 +407,8 @@ def compute_spectrogram(
         "f0MaxHz": float(f0_max_hz),
         "magnitudes": base64.b64encode(np.ascontiguousarray(quant).tobytes()).decode("ascii"),
         "f0": f0,
+        "intensity": intensity,
+        "times": times,
     }
 
 

@@ -152,6 +152,34 @@ class AudioTests(unittest.TestCase):
         self.assertEqual(summary.voiced_ratio, 0.0)
         self.assertEqual(summary.points, ())
 
+    def test_compute_spectrogram_returns_aligned_series(self):
+        from breeze_elf.audio import compute_spectrogram
+
+        sample_rate = 16_000
+        axis = np.arange(round(sample_rate * 0.8), dtype=np.float64) / sample_rate
+        tone = (0.4 * np.sin(2 * np.pi * 220 * axis)).astype(np.float32)
+        spectro = compute_spectrogram(tone, sample_rate)
+
+        self.assertIsNotNone(spectro)
+        bins = spectro["timeBins"]
+        # f0 / intensity / times all share the spectrogram's time axis.
+        self.assertEqual(len(spectro["f0"]), bins)
+        self.assertEqual(len(spectro["intensity"]), bins)
+        self.assertEqual(len(spectro["times"]), bins)
+        self.assertEqual(len(spectro["magnitudes"]), 0 if bins == 0 else len(spectro["magnitudes"]))
+        # times are non-decreasing; the voiced f0 tracks 220 Hz.
+        self.assertTrue(all(b >= a for a, b in zip(spectro["times"], spectro["times"][1:])))
+        voiced = [hz for hz in spectro["f0"] if hz]
+        self.assertTrue(voiced)
+        self.assertAlmostEqual(float(np.median(voiced)), 220.0, delta=4.0)
+
+    def test_compute_spectrogram_marks_silence_unvoiced(self):
+        from breeze_elf.audio import compute_spectrogram
+
+        spectro = compute_spectrogram(np.zeros(8_000, dtype=np.float32), 16_000)
+        self.assertIsNotNone(spectro)
+        self.assertTrue(all(hz is None for hz in spectro["f0"]))
+
     def test_summarize_pitch_is_robust_to_harmonics(self):
         # A harmonic-rich tone (strong 2nd/3rd harmonics) is exactly what makes
         # plain autocorrelation report an octave error; YIN must track the true

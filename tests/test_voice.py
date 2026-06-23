@@ -12,9 +12,12 @@ import numpy as np
 from breeze_elf import main
 from breeze_elf.voice import (
     MockVoiceEngine,
+    _breath_sound,
     _fit_duration,
+    _glide_semitones,
     _pitch_shift,
     _resample_rate,
+    _resolve_song_notes,
     _song_base,
     _trim_silence,
 )
@@ -145,6 +148,54 @@ class MockEngineTests(unittest.TestCase):
         normal = self.engine.synthesize_song(notes, 220.0, embedding)
         fast = self.engine.synthesize_song(notes, 220.0, embedding, speed=2.0)
         self.assertLess(fast.samples.size, normal.samples.size)
+
+    def test_glide_semitones_reads_arrows_and_endpoints(self):
+        self.assertEqual(_glide_semitones({"jianpu": "3↗5"}), (4.0, 7.0))
+        self.assertEqual(_glide_semitones({"jianpuStart": "1", "jianpuEnd": "5"}), (0.0, 7.0))
+        self.assertIsNone(_glide_semitones({"jianpu": "3"}))  # steady note, not a glide
+
+    def test_resolve_song_notes_builds_contour_kind_and_breath(self):
+        glide = _resolve_song_notes([{"char": "啦", "jianpu": "1↗5", "durationSeconds": 0.5}], 220.0, False)
+        self.assertEqual(glide[0]["kind"], "voiced")
+        self.assertEqual(len(glide[0]["contour"]), 2)
+        self.assertAlmostEqual(glide[0]["contour"][0], 220.0, delta=2.0)
+        self.assertAlmostEqual(glide[0]["contour"][1], 220.0 * 2 ** (7 / 12), delta=2.0)
+
+        measured = _resolve_song_notes(
+            [{"char": "啦", "contour": [200, 260, 320], "durationSeconds": 0.5}], 0.0, True
+        )
+        self.assertEqual(measured[0]["contour"], [200.0, 260.0, 320.0])
+
+        breath = _resolve_song_notes([{"kind": "breath", "intensity": 0.2, "durationSeconds": 0.2}], 0.0, True)
+        self.assertEqual(breath[0]["kind"], "breath")
+        rest = _resolve_song_notes([{"char": "-", "jianpu": "0", "durationSeconds": 0.2}], 220.0, False)
+        self.assertEqual(rest[0]["kind"], "rest")
+
+    def test_synthesize_song_follows_rising_contour(self):
+        # A rising measured contour must actually rise in pitch (抑揚頓挫), not sit
+        # flat like a single-pitch 簡譜 note.
+        embedding = self.engine.extract_embedding(_tone(200.0), 16_000)
+        notes = [{"char": "啦", "kind": "voiced", "contour": [180, 240, 320], "durationSeconds": 0.9}]
+        result = self.engine.synthesize_song(notes, 0.0, embedding, True)
+        samples = result.samples
+        third = samples.size // 3
+        head = _median_hz(samples[:third])
+        tail = _median_hz(samples[-third:])
+        self.assertGreater(tail, head + 20)
+
+    def test_synthesize_song_renders_breath_note_audibly(self):
+        embedding = self.engine.extract_embedding(_tone(200.0), 16_000)
+        notes = [
+            {"char": "啦", "jianpu": "1", "durationSeconds": 0.4},
+            {"char": "h", "kind": "breath", "intensity": 0.3, "durationSeconds": 0.3},
+        ]
+        result = self.engine.synthesize_song(notes, 220.0, embedding, False)
+        self.assertGreater(float(np.max(np.abs(result.samples))), 0.05)
+
+    def test_breath_sound_is_noisy_and_unpitched(self):
+        breath = _breath_sound(8_000, 0.3, 16_000)
+        self.assertEqual(breath.size, 8_000)
+        self.assertGreater(float(np.max(np.abs(breath))), 0.05)
 
     def test_synthesize_song_uses_target_pitch_when_no_tonic(self):
         # With tonic_hz<=0 the mock falls back to the saved voice's median pitch.
@@ -449,12 +500,21 @@ class VoiceApiTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.02)
         self.assertIsNotNone(result)
         self.assertAlmostEqual(result["tonicHz"], 330.0, delta=4.0)
-        chars = result["blocks"][0]["characters"]
+        block = result["blocks"][0]
+        chars = block["characters"]
         self.assertEqual(len(chars), 3)
         self.assertAlmostEqual(chars[0]["hz"], 220.0, delta=4.0)
         self.assertAlmostEqual(chars[2]["hz"], 440.0, delta=4.0)
         # 330 Hz is the tonic → 簡譜 "1" (do).
         self.assertEqual(chars[1]["jianpu"], "1")
+
+        # 基頻分析: spectrogram carries aligned f0 / intensity / text per time bin.
+        spectro = block["spectrogram"]
+        bins = spectro["timeBins"]
+        for field in ("f0", "intensity", "times", "text"):
+            self.assertEqual(len(spectro[field]), bins)
+        self.assertIn("音", spectro["text"])  # time bins tagged with the sounding 文字
+        self.assertTrue(any(hz for hz in spectro["f0"]))
 
     async def test_save_output_rejects_empty_audio(self):
         from fastapi import HTTPException

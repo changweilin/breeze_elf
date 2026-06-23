@@ -17,6 +17,7 @@ class StoredTranscript:
     size_bytes: int
     json_filename: str | None = None
     audio_filename: str | None = None
+    csv_filename: str | None = None
 
 
 def save_transcript(
@@ -28,6 +29,7 @@ def save_transcript(
     structured: dict[str, Any] | None = None,
     audio: bytes | None = None,
     audio_ext: str = "wav",
+    pitch_csv: str | None = None,
 ) -> StoredTranscript:
     """Persist a transcript and, when provided, its 簡譜/timing metadata and audio.
 
@@ -67,6 +69,12 @@ def save_transcript(
         audio_path.write_bytes(audio)
         audio_filename = audio_path.name
 
+    csv_filename: str | None = None
+    if pitch_csv:
+        csv_path = directory / f"{stem}.csv"
+        csv_path.write_text(pitch_csv, encoding="utf-8")
+        csv_filename = csv_path.name
+
     return StoredTranscript(
         id=stem,
         filename=target.name,
@@ -74,6 +82,7 @@ def save_transcript(
         size_bytes=len(payload),
         json_filename=json_filename,
         audio_filename=audio_filename,
+        csv_filename=csv_filename,
     )
 
 

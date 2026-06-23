@@ -124,6 +124,8 @@ class TranscriptSaveRequest(BaseModel):
     blocks: list[TranscriptBlock] | None = None
     sampleRate: int | None = None
     audioBase64: str | None = None
+    # Optional 基頻分析 export (time,hz,intensity,text rows) saved as a sibling .csv.
+    pitchCsv: str | None = Field(default=None, max_length=8_000_000)
 
 
 class VoiceCreateRequest(BaseModel):
@@ -162,6 +164,14 @@ class VoiceSingNote(BaseModel):
     jianpu: str | None = Field(default=None, max_length=16)
     hz: float | None = None
     durationSeconds: float | None = None
+    # 滑音 (glide) endpoints + measured pitch contour / 氣音 support.
+    jianpuStart: str | None = Field(default=None, max_length=16)
+    jianpuEnd: str | None = Field(default=None, max_length=16)
+    startHz: float | None = None
+    endHz: float | None = None
+    contour: list[float] | None = Field(default=None, max_length=64)
+    kind: str | None = Field(default=None, max_length=12)
+    intensity: float | None = None
 
 
 class VoiceSingRequest(BaseModel):
@@ -401,6 +411,7 @@ async def create_remote_transcript(payload: TranscriptSaveRequest) -> JSONRespon
     structured = _structured_payload(payload)
     audio = _decode_audio(payload.audioBase64)
 
+    pitch_csv = payload.pitchCsv.strip() if payload.pitchCsv else None
     try:
         stored = save_transcript(
             payload.text,
@@ -408,6 +419,7 @@ async def create_remote_transcript(payload: TranscriptSaveRequest) -> JSONRespon
             title=payload.title,
             structured=structured,
             audio=audio,
+            pitch_csv=pitch_csv or None,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -422,6 +434,7 @@ async def create_remote_transcript(payload: TranscriptSaveRequest) -> JSONRespon
             "filename": stored.filename,
             "jsonFilename": stored.json_filename,
             "audioFilename": stored.audio_filename,
+            "csvFilename": stored.csv_filename,
             "createdAt": stored.created_at,
             "sizeBytes": stored.size_bytes,
         }
@@ -685,17 +698,29 @@ async def voice_tts(payload: VoiceTtsRequest) -> JSONResponse:
     return JSONResponse({"ok": True, **_audio_response(result)})
 
 
+def _note_has_pitch(note: dict[str, Any]) -> bool:
+    """A note can be sung when it carries a pitch in any form (single Hz, a
+    contour, glide endpoints, or a parseable 簡譜). Breath/rest notes do not."""
+    if (note.get("hz") or 0) > 0:
+        return True
+    contour = note.get("contour")
+    if isinstance(contour, list) and any((hz or 0) > 0 for hz in contour):
+        return True
+    if (note.get("startHz") or 0) > 0 and (note.get("endHz") or 0) > 0:
+        return True
+    for token in (note.get("jianpu"), note.get("jianpuStart"), note.get("jianpuEnd")):
+        if token and jianpu_to_semitones(token) is not None:
+            return True
+    return False
+
+
 @app.post("/api/voice/sing")
 async def voice_sing(payload: VoiceSingRequest) -> JSONResponse:
     embedding = _require_embedding(payload.voiceId)
     if not hasattr(voice_engine, "synthesize_song"):
         raise HTTPException(status_code=400, detail="singing not supported by this engine")
     notes = [note.model_dump() for note in payload.notes]
-    singable = any(
-        (note.get("hz") or 0) > 0 or jianpu_to_semitones(note.get("jianpu")) is not None
-        for note in notes
-    )
-    if not singable:
+    if not any(_note_has_pitch(note) for note in notes):
         raise HTTPException(status_code=400, detail="no singable notes (need 簡譜 or hz)")
     tonic = payload.tonicHz or 0.0
     speed = payload.speed or 1.0
@@ -1220,9 +1245,28 @@ def _block_spectrogram(
     if finish - begin < sample_rate // 50:
         return None
     payload = compute_spectrogram(samples[begin:finish], sample_rate)
-    if payload is not None:
-        payload["durationSeconds"] = round((finish - begin) / sample_rate, 3)
+    if payload is None:
+        return None
+    payload["durationSeconds"] = round((finish - begin) / sample_rate, 3)
+    # Tag each time bin with the character sounding then (per-point 文字 for the
+    # 基頻分析 / CSV), using the block's character timings (absolute seconds).
+    slice_start = begin / sample_rate
+    spans = [
+        (float(c["startSeconds"]), float(c["endSeconds"]), str(c.get("char") or ""))
+        for c in (block.get("characters") or [])
+        if c.get("startSeconds") is not None and c.get("endSeconds") is not None
+    ]
+    payload["text"] = [
+        _char_at_time(spans, slice_start + relative) for relative in payload.get("times", [])
+    ]
     return payload
+
+
+def _char_at_time(spans: list[tuple[float, float, str]], moment: float) -> str:
+    for start, end, char in spans:
+        if start <= moment < end:
+            return char
+    return ""
 
 
 def _block_pitch_from_audio(

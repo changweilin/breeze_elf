@@ -738,66 +738,209 @@ def _synthesize_voice(text: str, sample_rate: int, base_hz: float) -> np.ndarray
     return np.concatenate(pieces).astype(np.float32)
 
 
+def _clamp_voice_hz(value: float) -> float:
+    return float(min(_MAX_VOICE_HZ, max(_MIN_VOICE_HZ, value)))
+
+
+def _glide_semitones(note: dict) -> tuple[float, float] | None:
+    """Read a 簡譜 glide as ``(start, end)`` semitones, or ``None`` if it is not a
+    glide. Accepts explicit ``jianpuStart``/``jianpuEnd`` or a combined token like
+    ``3↗5`` / ``5↘1``."""
+    from .audio import jianpu_to_semitones
+
+    start_token = note.get("jianpuStart")
+    end_token = note.get("jianpuEnd")
+    token = str(note.get("jianpu") or "")
+    for arrow in (_JIANPU_GLIDE_UP, _JIANPU_GLIDE_DOWN):
+        if arrow in token:
+            left, right = token.split(arrow, 1)
+            start_token = start_token or left
+            end_token = end_token or right
+            break
+    start = jianpu_to_semitones(start_token) if start_token else None
+    end = jianpu_to_semitones(end_token) if end_token else None
+    if start is not None and end is not None and abs(start - end) > 1e-6:
+        return start, end
+    return None
+
+
+def _resolve_contour(note: dict, tonic_hz: float, use_measured_hz: bool) -> list[float] | None:
+    """Resolve a note's pitch *curve* in Hz (≥1 point), or ``None`` for a rest.
+
+    Measured singing follows the recorded contour (``contour`` list, or
+    ``startHz``/``endHz``, or a single ``hz``) so the syllable keeps its
+    抑揚頓挫; 簡譜 singing follows the degree(s), rendering a glide (``3↗5``) as a
+    two-point slide and an ordinary degree as a single sustained pitch.
+    """
+    measured = note.get("hz")
+    measured = float(measured) if measured else 0.0
+
+    if use_measured_hz:
+        contour = note.get("contour")
+        if isinstance(contour, (list, tuple)):
+            points = [_clamp_voice_hz(float(hz)) for hz in contour if hz and float(hz) > 0]
+            if points:
+                return points
+        start, end = note.get("startHz"), note.get("endHz")
+        if start and end and float(start) > 0 and float(end) > 0:
+            return [_clamp_voice_hz(float(start)), _clamp_voice_hz(float(end))]
+        if measured > 0:
+            return [_clamp_voice_hz(measured)]
+        return None
+
+    glide = _glide_semitones(note)
+    if glide is not None and tonic_hz > 0:
+        return [_clamp_voice_hz(tonic_hz * 2.0 ** (semi / 12.0)) for semi in glide]
+    from .audio import jianpu_to_semitones
+
+    semitones = jianpu_to_semitones(note.get("jianpu"))
+    if semitones is not None and tonic_hz > 0:
+        return [_clamp_voice_hz(tonic_hz * 2.0 ** (semitones / 12.0))]
+    if measured > 0:
+        return [_clamp_voice_hz(measured)]
+    return None
+
+
 def _resolve_song_notes(
     notes: list[dict], tonic_hz: float, use_measured_hz: bool
 ) -> list[dict]:
-    """Turn ``{char, jianpu, hz, durationSeconds}`` notes into ``{char, freq,
-    duration}`` ones.
+    """Turn UI notes into resolved ``{char, freq, contour, duration, kind,
+    intensity}`` notes.
 
-    Pitch comes from the 簡譜 degree relative to ``tonic_hz`` (quantized,
-    in-tune singing); when ``use_measured_hz`` is set, or the 簡譜 is missing,
-    the measured ``hz`` is used instead. Unparseable / rest notes get
-    ``freq=None`` so the synthesizer renders silence for that beat.
+    ``kind`` is ``voiced`` (pitched, follows ``contour``), ``breath`` (an
+    unvoiced 氣音 with energy but no pitch), or ``rest`` (silence). ``contour`` is
+    the pitch curve in Hz; ``freq`` is its first point for callers that want a
+    single pitch.
     """
-    from .audio import jianpu_to_semitones
-
     resolved: list[dict] = []
     for note in notes:
         char = str(note.get("char") or "").strip()
-        hz = note.get("hz")
-        measured = float(hz) if hz else 0.0
-        freq: float | None = None
-        if use_measured_hz and measured > 0:
-            freq = measured
-        else:
-            semitones = jianpu_to_semitones(note.get("jianpu"))
-            if semitones is not None and tonic_hz > 0:
-                freq = tonic_hz * (2.0 ** (semitones / 12.0))
-            elif measured > 0:
-                freq = measured
+        duration = note.get("durationSeconds")
+        kind = str(note.get("kind") or "").strip().lower()
+
+        if kind == "breath":
+            resolved.append(
+                {
+                    "char": char or "h",
+                    "freq": None,
+                    "contour": None,
+                    "duration": duration,
+                    "kind": "breath",
+                    "intensity": float(note.get("intensity") or 0.0),
+                }
+            )
+            continue
+
+        contour = _resolve_contour(note, tonic_hz, use_measured_hz)
         resolved.append(
-            {"char": char or "a", "freq": freq, "duration": note.get("durationSeconds")}
+            {
+                "char": char or "a",
+                "freq": contour[0] if contour else None,
+                "contour": contour,
+                "duration": duration,
+                "kind": "voiced" if contour else "rest",
+                "intensity": float(note.get("intensity") or 0.0),
+            }
         )
     return resolved
 
 
+def _note_contour(note: dict) -> list[float] | None:
+    contour = note.get("contour")
+    if isinstance(contour, (list, tuple)) and contour:
+        points = [float(hz) for hz in contour if hz and float(hz) > 0]
+        if points:
+            return points
+    freq = note.get("freq")
+    return [float(freq)] if freq and float(freq) > 0 else None
+
+
+def _contour_freqs(contour: list[float], count: int) -> np.ndarray:
+    """Per-sample target frequency interpolated across the note's contour."""
+    points = np.asarray([_clamp_voice_hz(hz) for hz in contour], dtype=np.float64)
+    if points.size <= 1 or count <= 1:
+        return np.full(max(1, count), points[0] if points.size else _DEFAULT_VOICE_HZ)
+    source = np.linspace(0.0, 1.0, points.size)
+    target = np.linspace(0.0, 1.0, count)
+    return np.interp(target, source, points)
+
+
+def _contour_steps(contour: list[float], k: int) -> list[float]:
+    points = np.asarray(contour, dtype=np.float64)
+    if k <= 1 or points.size <= 1:
+        return [float(points[0])] * max(1, k)
+    centers = (np.arange(k) + 0.5) / k
+    source = np.linspace(0.0, 1.0, points.size)
+    return [float(value) for value in np.interp(centers, source, points)]
+
+
+def _window_ramp(count: int, ramp: int) -> np.ndarray:
+    window = np.ones(count, dtype=np.float32)
+    edge = min(ramp, count // 2)
+    if edge > 0:
+        up = np.linspace(0.0, 1.0, edge, dtype=np.float32)
+        window[:edge] = up
+        window[count - edge :] = up[::-1]
+    return window
+
+
+def _breath_sound(count: int, intensity: float, sample_rate: int) -> np.ndarray:
+    """Unvoiced 氣音: shaped noise at a level set by the measured intensity.
+
+    Used for time points that carry energy but no pitch (breaths, fricatives),
+    so the re-sung voice keeps that texture instead of going silent."""
+    if count <= 0:
+        return np.zeros(0, dtype=np.float32)
+    noise = np.random.standard_normal(count).astype(np.float32)
+    if count >= 3:  # gentle low-pass so it is breathy, not harsh white noise
+        noise = np.convolve(noise, np.array([0.25, 0.5, 0.25], dtype=np.float32), mode="same")
+    shaped = noise * _syllable_envelope(count, sample_rate)
+    peak = float(np.max(np.abs(shaped)))
+    if peak > 1e-9:
+        shaped = shaped / peak
+    level = float(min(0.6, max(0.15, 0.15 + 2.0 * max(0.0, intensity))))
+    return (shaped * level).astype(np.float32)
+
+
+def _note_seconds(note: dict, default: float = 0.45) -> float:
+    duration = note.get("duration")
+    seconds = float(duration) if duration else default
+    return max(0.12, min(2.5, seconds))
+
+
 def _synthesize_song(notes: list[dict], sample_rate: int) -> np.ndarray:
-    """Sing a sequence of notes as sustained, vibrato'd vowels (one per note)."""
+    """Sing notes as vibrato'd vowels following each note's pitch contour, with
+    unvoiced 氣音 for breath notes."""
     nyquist = sample_rate / 2.0
     gap = np.zeros(max(1, int(sample_rate * 0.02)), dtype=np.float32)
     pieces: list[np.ndarray] = []
     for position, note in enumerate(notes[:400]):
-        duration = note.get("duration")
-        seconds = float(duration) if duration else 0.45
-        seconds = max(0.12, min(2.0, seconds))
+        seconds = _note_seconds(note)
         count = max(1, int(sample_rate * seconds))
 
-        freq = note.get("freq")
-        if not freq or freq <= 0:
+        if note.get("kind") == "breath":
+            pieces.append(_breath_sound(count, float(note.get("intensity") or 0.0), sample_rate))
+            if position != len(notes) - 1:
+                pieces.append(gap)
+            continue
+
+        contour = _note_contour(note)
+        if contour is None:
             pieces.append(np.zeros(count, dtype=np.float32))
             continue
-        freq = float(min(_MAX_VOICE_HZ, max(_MIN_VOICE_HZ, freq)))
 
+        freqs = _contour_freqs(contour, count)
+        center = float(np.median(freqs))
         axis = np.arange(count, dtype=np.float64) / sample_rate
         # Vibrato that eases in over the first ~180 ms — sounds sung, not synthy.
         vibrato = 0.012 * np.sin(2 * np.pi * 5.2 * axis) * np.clip(axis / 0.18, 0.0, 1.0)
-        phase = 2 * np.pi * np.cumsum(freq * (1.0 + vibrato)) / sample_rate
+        phase = 2 * np.pi * np.cumsum(freqs * (1.0 + vibrato)) / sample_rate
 
-        max_harmonic = max(1, min(48, int((nyquist * 0.92) / freq)))
+        max_harmonic = max(1, min(48, int((nyquist * 0.92) / center)))
         harmonics = np.arange(1, max_harmonic + 1, dtype=np.float64)
         char = note.get("char") or "a"
         formants = _VOWEL_FORMANTS[ord(char[0]) % len(_VOWEL_FORMANTS)]
-        amplitudes = _formant_response(harmonics * freq, formants) / harmonics
+        amplitudes = _formant_response(harmonics * center, formants) / harmonics
         tone = np.zeros(count, dtype=np.float64)
         for harmonic, amplitude in zip(harmonics, amplitudes):
             tone += amplitude * np.sin(harmonic * phase)
@@ -821,6 +964,59 @@ _MAX_SING_SHIFT_SEMITONES = 24.0
 _MAX_SUNG_SYLLABLES = 120
 # Floor for a sung note so syllables sustain instead of sounding clipped/abrupt.
 _MIN_SUNG_SECONDS = 0.3
+
+
+def _clamp_sing_shift(semitones: float) -> float:
+    return float(max(-_MAX_SING_SHIFT_SEMITONES, min(_MAX_SING_SHIFT_SEMITONES, semitones)))
+
+
+def _sing_contour_os(
+    syllable: np.ndarray,
+    source_hz: float,
+    contour: list[float],
+    count: int,
+    sample_rate: int,
+) -> np.ndarray:
+    """Pitch a spoken syllable onto a target pitch *contour* (not a flat note).
+
+    The syllable is time-fitted to the note, then overlapping windows are each
+    pitch-shifted to follow successive points of the contour and blended back
+    (granular-style), so the re-sung syllable rises/falls like the original —
+    the 抑揚頓挫 a single median pitch throws away."""
+    fitted = _fit_duration(syllable, count)
+    if source_hz <= 0 or not contour:
+        return fitted
+
+    min_segment = max(1, int(sample_rate * 0.08))
+    max_steps = max(1, count // min_segment)
+    steps_wanted = len(contour) if len(contour) > 1 else 1
+    k = int(min(max(1, steps_wanted), max_steps, 8))
+    if k <= 1:
+        target = contour[0]
+        if target <= 0:
+            return fitted
+        return _pitch_shift(fitted, _clamp_sing_shift(12.0 * math.log2(target / source_hz)))
+
+    steps = _contour_steps(contour, k)
+    bounds = np.linspace(0, count, k + 1).astype(int)
+    overlap = max(1, int(sample_rate * 0.015))
+    out = np.zeros(count, dtype=np.float32)
+    weight = np.zeros(count, dtype=np.float32)
+    for index in range(k):
+        start = max(0, int(bounds[index]) - overlap)
+        end = min(count, int(bounds[index + 1]) + overlap)
+        segment = fitted[start:end]
+        if segment.size == 0:
+            continue
+        target = steps[index]
+        semitones = _clamp_sing_shift(12.0 * math.log2(target / source_hz)) if target > 0 else 0.0
+        shifted = _resample_to_length(_pitch_shift(segment, semitones), end - start)
+        window = _window_ramp(end - start, overlap)
+        out[start:end] += shifted * window
+        weight[start:end] += window
+    voiced = weight > 1e-6
+    out[voiced] /= weight[voiced]
+    return out.astype(np.float32)
 
 
 def _trim_silence(samples: np.ndarray) -> np.ndarray:
@@ -942,14 +1138,19 @@ def _sing_with_os_voice(notes: list[dict]) -> tuple[np.ndarray, int] | None:
 
     pieces: list[np.ndarray] = []
     for note in notes:
-        duration = note.get("duration")
-        seconds = float(duration) if duration else 0.45
-        seconds = max(_MIN_SUNG_SECONDS, min(2.5, seconds))
-        count = max(1, int(rate * seconds))
+        kind = note.get("kind")
+        seconds = note.get("duration")
+        seconds = float(seconds) if seconds else 0.45
+        if kind == "breath":
+            # Breaths can be short — don't stretch them to the sung-note floor.
+            count = max(1, int(rate * max(0.05, min(2.5, seconds))))
+            pieces.append(_breath_sound(count, float(note.get("intensity") or 0.0), rate))
+            continue
 
-        freq = note.get("freq")
+        count = max(1, int(rate * max(_MIN_SUNG_SECONDS, min(2.5, seconds))))
+        contour = _note_contour(note)
         char = str(note.get("char") or "").strip()
-        if not freq or freq <= 0:
+        if contour is None:
             pieces.append(np.zeros(count, dtype=np.float32))  # rest
             continue
         entry = cache.get(char) or fallback
@@ -958,11 +1159,8 @@ def _sing_with_os_voice(notes: list[dict]) -> tuple[np.ndarray, int] | None:
             pieces.append(_synthesize_song([note], rate))
             continue
         syllable, source_hz = entry
-        target = float(min(_MAX_VOICE_HZ, max(_MIN_VOICE_HZ, freq)))
-        semitones = 12.0 * math.log2(target / source_hz) if source_hz > 0 else 0.0
-        semitones = max(-_MAX_SING_SHIFT_SEMITONES, min(_MAX_SING_SHIFT_SEMITONES, semitones))
-        pitched = _pitch_shift(syllable, semitones)
-        pieces.append(_apply_edge_fade(_fit_duration(pitched, count), rate))
+        sung = _sing_contour_os(syllable, source_hz, contour, count, rate)
+        pieces.append(_apply_edge_fade(sung, rate))
 
     if not pieces:
         return None

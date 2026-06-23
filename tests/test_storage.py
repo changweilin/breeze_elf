@@ -95,7 +95,18 @@ class StorageTests(unittest.TestCase):
             stored = save_transcript("只有文字", tmp)
             self.assertIsNone(stored.json_filename)
             self.assertIsNone(stored.audio_filename)
+            self.assertIsNone(stored.csv_filename)
             self.assertEqual(list(Path(tmp).glob("*")), [Path(tmp) / stored.filename])
+
+    def test_save_transcript_writes_pitch_csv_sibling(self):
+        csv = "time_seconds,hz,intensity,text\n0.020,220.0,0.05,天\n0.040,,0.01,\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            stored = save_transcript("天氣", tmp, title="note", pitch_csv=csv)
+            self.assertEqual(stored.csv_filename, f"{stored.id}.csv")
+            self.assertEqual(
+                (Path(tmp) / stored.csv_filename).read_text(encoding="utf-8"),
+                csv,
+            )
 
 
 if __name__ == "__main__":
