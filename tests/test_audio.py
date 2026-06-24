@@ -7,6 +7,8 @@ from breeze_elf.audio import (
     AudioWindowBuffer,
     analyze_segment,
     calculate_rms,
+    estimate_noise_floor,
+    extend_voiced_span,
     hz_to_jianpu,
     jianpu_glide,
     jianpu_to_semitones,
@@ -266,6 +268,36 @@ class AudioTests(unittest.TestCase):
         self.assertEqual(windows[0].samples.size, 7)
         self.assertTrue(windows[0].is_speech)
 
+    def test_utterance_buffer_force_split_cuts_at_quiet_dip(self):
+        # A continuous phrase longer than the cap is split at the quiet dip in its
+        # tail region (a syllable gap), not hard-cut through the sound, and the
+        # remainder carries over so no samples are lost.
+        sample_rate = 1_000
+        buffer = AudioUtteranceBuffer(
+            sample_rate=sample_rate,
+            frame_ms=100,  # 100-sample frames
+            pre_roll_ms=0,
+            end_silence_ms=10_000,  # never ends on silence here
+            max_segment_seconds=1.0,  # cap at 10 frames
+            rms_threshold=0.05,
+        )
+        pcm = np.full(1_000, 10_000, dtype="<i2")
+        pcm[800:900] = 100  # a quiet dip in the tail region
+
+        windows = buffer.append_pcm16(pcm.tobytes())
+
+        self.assertEqual(len(windows), 1)
+        self.assertEqual(windows[0].start_seconds, 0.0)
+        cut = windows[0].samples.size
+        self.assertGreaterEqual(cut, 800)  # cut lands inside the quiet dip [800, 900)
+        self.assertLess(cut, 900)
+        self.assertLess(calculate_rms(windows[0].samples[-20:]), 0.05)  # ends quiet, not mid-note
+
+        tail = buffer.flush()
+        self.assertEqual(len(tail), 1)
+        self.assertEqual(cut + tail[0].samples.size, 1_000)  # contiguous carry, no samples lost
+        self.assertAlmostEqual(tail[0].start_seconds, cut / 1_000, places=6)
+
     def test_utterance_buffer_flushes_active_speech(self):
         buffer = AudioUtteranceBuffer(
             sample_rate=10,
@@ -281,6 +313,59 @@ class AudioTests(unittest.TestCase):
         self.assertEqual(len(windows), 1)
         self.assertEqual(windows[0].start_seconds, 0.0)
         self.assertEqual(windows[0].samples.size, 3)
+
+
+class BoundaryExtensionTests(unittest.TestCase):
+    def test_estimate_noise_floor_picks_quiet_frames(self):
+        sample_rate = 16_000
+        quiet = np.full(8_000, 0.003, dtype=np.float32)
+        loud = np.full(8_000, 0.2, dtype=np.float32)
+        samples = np.concatenate([quiet, loud])
+
+        floor = estimate_noise_floor(samples, sample_rate)
+
+        self.assertAlmostEqual(floor, 0.003, delta=0.001)
+
+    def test_extend_voiced_span_grows_through_subthreshold_onset(self):
+        # silence (room tone) | unvoiced onset (sub-threshold, above floor) | loud
+        # voiced | silence — the span must reach back over the onset but stop at the
+        # silence on both sides.
+        sample_rate = 16_000
+        silence = np.full(1_600, 0.002, dtype=np.float32)
+        onset = np.full(1_600, 0.012, dtype=np.float32)
+        voiced = np.full(3_200, 0.3, dtype=np.float32)
+        tail = np.full(1_600, 0.002, dtype=np.float32)
+        samples = np.concatenate([silence, onset, voiced, tail])
+
+        start, end = extend_voiced_span(
+            samples,
+            sample_rate,
+            3_200,
+            6_400,
+            floor_sample=0,
+            ceil_sample=samples.size,
+            noise_floor=0.002,
+        )
+
+        self.assertEqual(start, 1_600)  # grew back to the onset, stopped at silence
+        self.assertEqual(end, 6_400)  # trailing silence → no growth
+
+    def test_extend_voiced_span_respects_neighbour_bounds(self):
+        sample_rate = 16_000
+        samples = np.full(8_000, 0.05, dtype=np.float32)  # all above the floor
+
+        start, end = extend_voiced_span(
+            samples,
+            sample_rate,
+            3_000,
+            5_000,
+            floor_sample=2_000,
+            ceil_sample=6_000,
+            noise_floor=0.002,
+        )
+
+        self.assertGreaterEqual(start, 2_000)
+        self.assertLessEqual(end, 6_000)
 
 
 class JianpuParseTests(unittest.TestCase):

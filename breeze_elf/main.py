@@ -30,6 +30,8 @@ from .audio import (
     SegmentAnalysis,
     analyze_segment,
     compute_spectrogram,
+    estimate_noise_floor,
+    extend_voiced_span,
     hz_to_jianpu,
     jianpu_glide,
     jianpu_to_semitones,
@@ -87,6 +89,13 @@ COMMON_SILENCE_HALLUCINATION_FRAGMENTS = (
 HALLUCINATION_TEXT_TRANSLATION = str.maketrans({"讚": "贊", "赞": "贊"})
 _JIANPU_GLIDE_UP = "↗"
 _JIANPU_GLIDE_DOWN = "↘"
+# How many leading characters of a *disjoint* VAD utterance may be trimmed as a
+# boundary duplicate. Disjoint utterances never share speech, so the only real
+# overlap is the pre-roll re-included when a >max_segment 字句 is force-split; that
+# is at most ``vad_pre_roll_ms`` of audio (a couple of 字). Capping the trim here
+# keeps a repeated 歌詞 (a chorus, or the same short line sung twice) from being
+# mistaken for an overlap and dropped.
+_VAD_BOUNDARY_OVERLAP_CHARS = 6
 
 
 class TranscriptCharacter(BaseModel):
@@ -810,6 +819,10 @@ class StreamState:
     transcript: str = ""
     dropped_windows: int = 0
     started_at: float = field(default_factory=time.monotonic)
+    # End (absolute seconds) of the last speech segment that reached the dedupe,
+    # so the next utterance can tell a disjoint segment (real repeat → keep) from
+    # a force-split continuation that re-includes the pre-roll (overlap → trim).
+    last_segment_end: float | None = None
 
 
 @app.websocket("/ws/audio")
@@ -988,6 +1001,11 @@ async def _process_windows(
                 )
                 continue
 
+            # Remember where the previous speech segment ended before advancing,
+            # so the dedupe can tell a disjoint utterance from a force-split one.
+            prev_segment_end = state.last_segment_end
+            state.last_segment_end = window.end_seconds
+
             asr_queue_wait_ms = 0
             try:
                 asr_samples = prepare_asr_audio(
@@ -1034,7 +1052,11 @@ async def _process_windows(
                         pitch=pitch,
                     )
                 )
-                novel_text = _novel_text(state.transcript, result.text)
+                novel_text = _novel_text(
+                    state.transcript,
+                    result.text,
+                    max_overlap_chars=_dedupe_overlap_cap(window, prev_segment_end),
+                )
                 if novel_text:
                     state.transcript = f"{state.transcript}{novel_text}".strip()
                     await send_json(
@@ -1198,11 +1220,20 @@ def _analyzed_character_payload(
     }
 
 
-def _padded_char_spans(block: dict[str, Any]) -> list[tuple[str, float, float]]:
-    """Each 字's analysis window grown by an attack (before its onset) and a
-    release (after its tail), so 基頻 covers the whole 字 including its start and
-    decay. The growth is capped at half the gap to each neighbour (and to the
-    block edges), so adjacent 字 never overlap / merge."""
+def _padded_char_spans(
+    block: dict[str, Any],
+    samples: np.ndarray | None = None,
+    sample_rate: int = 0,
+    noise_floor: float = 0.0,
+) -> list[tuple[str, float, float]]:
+    """Each 字's analysis window grown outward so 基頻/簡譜 cover the whole 字.
+
+    The base growth is a fixed attack (before its onset) and release (after its
+    tail). When the block audio is supplied, the window is grown *further* through
+    any adjacent sub-threshold-but-structured audio — an unvoiced consonant or a
+    breath that the live RMS VAD clipped — using :func:`extend_voiced_span`. Both
+    are capped at half the gap to each neighbour (and to the block edges), so
+    adjacent 字 never overlap / merge."""
     attack = settings.char_attack_ms / 1000.0
     release = settings.char_release_ms / 1000.0
     chars = [
@@ -1212,20 +1243,36 @@ def _padded_char_spans(block: dict[str, Any]) -> list[tuple[str, float, float]]:
     ]
     block_start = block.get("startSeconds")
     block_end = block.get("endSeconds")
+    have_audio = samples is not None and sample_rate > 0 and samples.size > 0
     spans: list[tuple[str, float, float]] = []
     for index, (char, start, end) in enumerate(chars):
         prev_end = chars[index - 1][2] if index > 0 else None
         next_start = chars[index + 1][1] if index < len(chars) - 1 else None
-        left = min(attack, max(0.0, start - prev_end) / 2.0) if prev_end is not None else attack
-        right = (
-            min(release, max(0.0, next_start - end) / 2.0) if next_start is not None else release
-        )
-        new_start = max(0.0, start - left)
-        new_end = end + right
+        # Leftmost / rightmost second this 字 may claim: the neighbour midpoints,
+        # then the block edges. Both the fixed pad and the content walk obey it.
+        floor_seconds = (start + prev_end) / 2.0 if prev_end is not None else 0.0
+        ceil_seconds = (end + next_start) / 2.0 if next_start is not None else end + release
         if block_start is not None:
-            new_start = max(new_start, float(block_start))
+            floor_seconds = max(floor_seconds, float(block_start))
         if block_end is not None:
-            new_end = min(new_end, float(block_end))
+            ceil_seconds = min(ceil_seconds, float(block_end))
+        floor_seconds = max(0.0, floor_seconds)
+
+        new_start = max(floor_seconds, start - attack)
+        new_end = min(ceil_seconds, end + release)
+        if have_audio:
+            grown_start, grown_end = extend_voiced_span(
+                samples,
+                sample_rate,
+                round(start * sample_rate),
+                round(end * sample_rate),
+                floor_sample=round(floor_seconds * sample_rate),
+                ceil_sample=round(ceil_seconds * sample_rate),
+                noise_floor=noise_floor,
+                energy_margin=settings.char_voiceless_margin,
+            )
+            new_start = min(new_start, grown_start / sample_rate)
+            new_end = max(new_end, grown_end / sample_rate)
         spans.append((char, new_start, max(new_start, new_end)))
     return spans
 
@@ -1244,13 +1291,16 @@ def _analyze_blocks_pitch(
     done = 0
     measured: list[list[tuple[str, float, float, SegmentAnalysis]]] = []
     all_medians: list[float] = []
+    # Room-tone floor for the content-aware boundary growth (task: cover the
+    # sub-threshold-but-字詞 audio the live RMS VAD clipped).
+    noise_floor = estimate_noise_floor(samples, sample_rate)
 
-    # Pass 1 (0.02–0.5): measure every character's pitch from its (attack/release
-    # padded) audio slice so the 基頻 covers the 字's onset and tail.
+    # Pass 1 (0.02–0.5): measure every character's pitch from its (attack/release +
+    # content-grown) audio slice so the 基頻 covers the 字's onset and tail.
     progress(0.02, "分析音高")
     for block in blocks:
         block_measured: list[tuple[str, float, float, SegmentAnalysis]] = []
-        for char, start, end in _padded_char_spans(block):
+        for char, start, end in _padded_char_spans(block, samples, sample_rate, noise_floor):
             done += 1
             seg = _segment_pitch(samples, sample_rate, start, end)
             block_measured.append((char, start, end, seg))
@@ -1278,7 +1328,7 @@ def _analyze_blocks_pitch(
                 "segmentKind": block.get("segmentKind") or "",
                 "pitch": _block_pitch_from_audio(samples, sample_rate, block),
                 "characters": characters,
-                "spectrogram": _block_spectrogram(samples, sample_rate, block),
+                "spectrogram": _block_spectrogram(samples, sample_rate, block, noise_floor),
             }
         )
         spectro_done = (block_index + 1) / block_total
@@ -1293,7 +1343,7 @@ def _analyze_blocks_pitch(
 
 
 def _block_spectrogram(
-    samples: np.ndarray, sample_rate: int, block: dict[str, Any]
+    samples: np.ndarray, sample_rate: int, block: dict[str, Any], noise_floor: float = 0.0
 ) -> dict[str, Any] | None:
     start = block.get("startSeconds")
     end = block.get("endSeconds")
@@ -1311,7 +1361,10 @@ def _block_spectrogram(
     # 基頻分析 / CSV), using the attack/release-padded character windows (absolute
     # seconds) so brief 字 still claim a bin and the lyric reads completely.
     slice_start = begin / sample_rate
-    spans = [(start, end, char) for char, start, end in _padded_char_spans(block)]
+    spans = [
+        (start, end, char)
+        for char, start, end in _padded_char_spans(block, samples, sample_rate, noise_floor)
+    ]
     payload["text"] = [
         _char_at_time(spans, slice_start + relative) for relative in payload.get("times", [])
     ]
@@ -1429,7 +1482,25 @@ def _normalize_hallucination_text(text: str) -> str:
     )
 
 
-def _novel_text(transcript: str, current: str) -> str:
+def _dedupe_overlap_cap(window: AudioWindow, prev_segment_end: float | None) -> int | None:
+    """Decide how aggressively this segment may be deduped against the transcript.
+
+    ``None`` (the overlapping ``window`` segmenter) keeps the full dedupe: those
+    windows literally re-cover the previous window's audio, so a verbatim repeat
+    is an artefact to drop. Disjoint VAD utterances never share speech, so a
+    repeat there is a real 歌詞 — they get ``0`` (no dedupe). The one exception is
+    a >max_segment 字句 force-split, where the continuation overlaps the previous
+    segment by the re-included pre-roll; that small boundary duplicate is trimmed.
+    """
+    if window.kind != "utterance":
+        return None
+    overlaps_previous = (
+        prev_segment_end is not None and window.start_seconds < prev_segment_end - 1e-3
+    )
+    return _VAD_BOUNDARY_OVERLAP_CHARS if overlaps_previous else 0
+
+
+def _novel_text(transcript: str, current: str, *, max_overlap_chars: int | None = None) -> str:
     current = " ".join(current.split())
     if not current:
         return ""
@@ -1439,16 +1510,21 @@ def _novel_text(transcript: str, current: str) -> str:
     tail = transcript[-160:]
     normalized_tail = _normalize_for_dedupe(tail)
     normalized_current = _normalize_for_dedupe(current)
-    if normalized_current and normalized_current in normalized_tail:
+    # Only the overlapping ``window`` segmenter (no cap) can emit a window whose new
+    # audio is silence and so repeats the previous text verbatim — drop it. A capped
+    # (disjoint VAD) segment that happens to match recent text is a real 歌詞 repeat.
+    if max_overlap_chars is None and normalized_current and normalized_current in normalized_tail:
         return ""
 
-    overlap_end = _overlap_end_index(tail, current)
+    overlap_end = _overlap_end_index(tail, current, max_overlap_chars=max_overlap_chars)
     if overlap_end is not None:
         return current[overlap_end:].lstrip(" ，,。.!?！？")
     return f" {current}"
 
 
-def _overlap_end_index(tail: str, current: str) -> int | None:
+def _overlap_end_index(
+    tail: str, current: str, *, max_overlap_chars: int | None = None
+) -> int | None:
     tail_chars = _dedupe_chars(tail)
     current_chars = _dedupe_chars(current)
     if not tail_chars or not current_chars:
@@ -1456,6 +1532,10 @@ def _overlap_end_index(tail: str, current: str) -> int | None:
 
     min_overlap = _min_overlap_size(tail_chars, current_chars)
     max_overlap = min(len(tail_chars), len(current_chars))
+    if max_overlap_chars is not None:
+        max_overlap = min(max_overlap, max_overlap_chars)
+    if max_overlap < min_overlap:
+        return None
     normalized_tail = "".join(char for char, _ in tail_chars)
     normalized_current = "".join(char for char, _ in current_chars)
     for size in range(max_overlap, min_overlap - 1, -1):

@@ -583,6 +583,78 @@ def analyze_segment(
     )
 
 
+def estimate_noise_floor(
+    samples: np.ndarray,
+    sample_rate: int,
+    *,
+    frame_ms: float = 20.0,
+    percentile: float = 10.0,
+) -> float:
+    """The room-tone RMS: the ``percentile``-th quietest short frame.
+
+    Word edges (unvoiced consonants, aspiration) sit *below* the speech threshold
+    but clearly *above* this floor, so :func:`extend_voiced_span` can tell them
+    apart from true silence."""
+    if sample_rate <= 0 or samples.size == 0:
+        return 0.0
+    frame = max(1, round(sample_rate * frame_ms / 1000.0))
+    if samples.size < frame:
+        return calculate_rms(samples)
+    starts = range(0, samples.size - frame + 1, frame)
+    rms = np.array([calculate_rms(samples[start : start + frame]) for start in starts])
+    if rms.size == 0:
+        return calculate_rms(samples)
+    return float(np.percentile(rms, percentile))
+
+
+def extend_voiced_span(
+    samples: np.ndarray,
+    sample_rate: int,
+    start_sample: int,
+    end_sample: int,
+    *,
+    floor_sample: int,
+    ceil_sample: int,
+    noise_floor: float,
+    frame_ms: float = 10.0,
+    energy_margin: float = 1.6,
+) -> tuple[int, int]:
+    """Grow ``[start_sample, end_sample]`` outward through audio that still belongs
+    to the 字.
+
+    The live VAD onsets/offsets a segment on an RMS *speech* threshold, so a 字's
+    leading unvoiced consonant (s/sh/f/h…) or trailing breath — loud enough to be
+    word structure but quieter than the threshold — gets clipped. Here, during
+    post-processing, each edge is walked one short frame at a time and kept while
+    its RMS stays above ``noise_floor * energy_margin`` (above room tone), stopping
+    at the first truly silent frame or at ``[floor_sample, ceil_sample]`` (the
+    neighbour midpoints / block edges, so adjacent 字 never merge)."""
+    n = samples.size
+    floor_sample = max(0, floor_sample)
+    ceil_sample = min(n, ceil_sample)
+    start_sample = max(floor_sample, min(start_sample, n))
+    end_sample = max(start_sample, min(end_sample, ceil_sample))
+    if n == 0:
+        return start_sample, end_sample
+
+    frame = max(1, round(sample_rate * frame_ms / 1000.0))
+    threshold = max(noise_floor * energy_margin, 1e-6)
+
+    new_start = start_sample
+    while new_start - frame >= floor_sample:
+        if calculate_rms(samples[new_start - frame : new_start]) < threshold:
+            break
+        new_start -= frame
+
+    new_end = end_sample
+    while new_end + frame <= ceil_sample:
+        if calculate_rms(samples[new_end : new_end + frame]) < threshold:
+            break
+        new_end += frame
+
+    return new_start, new_end
+
+
 def _yin_pitch(
     frame: np.ndarray,
     sample_rate: int,
@@ -781,6 +853,13 @@ class AudioWindowBuffer:
         return windows
 
 
+# When a held phrase forces a max-segment split, the cut is searched within this
+# fraction of the segment (its tail region) so the head stays close to the cap yet
+# still ends at a quiet point rather than through a sung note.
+_SPLIT_SEARCH_LO = 0.75
+_SPLIT_SEARCH_HI = 0.98
+
+
 class AudioUtteranceBuffer:
     def __init__(
         self,
@@ -872,7 +951,7 @@ class AudioUtteranceBuffer:
             self._remember_pre_roll(frame)
 
         if self._segment_sample_count >= self.max_segment_samples:
-            emitted = self._flush_active(remember_tail=True)
+            emitted = self._force_split()
 
         return emitted
 
@@ -887,6 +966,28 @@ class AudioUtteranceBuffer:
         if len(self._pre_roll) > self.pre_roll_frames:
             del self._pre_roll[: len(self._pre_roll) - self.pre_roll_frames]
 
+    def _build_window(self, chunks: list[np.ndarray], start_sample: int) -> AudioWindow:
+        samples = np.concatenate(chunks).astype(np.float32, copy=False)
+        end_sample = start_sample + samples.size
+        window = AudioWindow(
+            index=self._next_index,
+            start_seconds=start_sample / self.sample_rate,
+            end_seconds=end_sample / self.sample_rate,
+            samples=samples,
+            rms=calculate_rms(samples),
+            is_speech=True,
+            kind="utterance",
+        )
+        self._next_index += 1
+        return window
+
+    def _reset_segment(self) -> None:
+        self._segment_chunks = []
+        self._segment_start_sample = None
+        self._segment_sample_count = 0
+        self._silence_frames = 0
+        self._pre_roll = []
+
     def _flush_active(self, remember_tail: bool) -> AudioWindow | None:
         if not self._segment_chunks or self._segment_start_sample is None:
             return None
@@ -896,26 +997,73 @@ class AudioUtteranceBuffer:
             if remember_tail and self.pre_roll_frames
             else []
         )
-        samples = np.concatenate(self._segment_chunks).astype(np.float32, copy=False)
-        rms = calculate_rms(samples)
-        start_sample = self._segment_start_sample
-        end_sample = start_sample + samples.size
-        window = AudioWindow(
-            index=self._next_index,
-            start_seconds=start_sample / self.sample_rate,
-            end_seconds=end_sample / self.sample_rate,
-            samples=samples,
-            rms=rms,
-            is_speech=True,
-            kind="utterance",
-        )
-        self._next_index += 1
-
-        self._segment_chunks = []
-        self._segment_start_sample = None
-        self._segment_sample_count = 0
-        self._silence_frames = 0
-        self._pre_roll = []
+        window = self._build_window(self._segment_chunks, self._segment_start_sample)
+        self._reset_segment()
         for chunk in tail:
             self._remember_pre_roll(chunk)
         return window
+
+    def _force_split(self) -> AudioWindow | None:
+        """Flush at the max-segment cap, but cut at the quietest recent frame (a
+        syllable / word gap) instead of through whatever sound is playing, and carry
+        the remainder over as the start of the next utterance.
+
+        The live VAD never ends a continuously sung phrase (no 700 ms silence), so it
+        previously hard-cut at exactly the cap — clipping a held note mid-sound and
+        leaving the 歌詞 unfinished. Splitting at a quiet point keeps each piece a
+        whole phrase and lets the carried-over tail finish the line in the next block.
+        """
+        if not self._segment_chunks or self._segment_start_sample is None:
+            return None
+
+        samples = np.concatenate(self._segment_chunks).astype(np.float32, copy=False)
+        cut = self._best_split_sample(samples)
+        if cut <= 0 or cut >= samples.size:
+            return self._flush_active(remember_tail=True)
+
+        start_sample = self._segment_start_sample
+        head = samples[:cut]
+        tail = samples[cut:]
+        window = self._build_window([head], start_sample)
+
+        # The tail continues contiguously (no overlap), so it is a clean new segment.
+        # Re-chunk it into frame-sized pieces so the silence / pre-roll bookkeeping
+        # (which counts in frames) keeps working.
+        self._segment_chunks = [
+            tail[index : index + self.frame_samples].copy()
+            for index in range(0, tail.size, self.frame_samples)
+        ] or [tail.copy()]
+        self._segment_start_sample = start_sample + int(cut)
+        self._segment_sample_count = int(tail.size)
+        self._silence_frames = 0
+        return window
+
+    def _best_split_sample(self, samples: np.ndarray) -> int:
+        """Sample to cut at when force-splitting: the *latest* point in the segment's
+        tail region quiet enough to be a syllable / word gap (so the head stays close
+        to the cap), or the deepest dip there when a held phrase never falls that
+        quiet. Probed on a fine (~25 ms) window so short, legato dips that straddle
+        frame boundaries are still found."""
+        n = samples.size
+        if n < self.frame_samples * 4:
+            return n
+        lo = int(n * _SPLIT_SEARCH_LO)
+        hi = int(n * _SPLIT_SEARCH_HI)
+        probe = max(1, self.frame_samples // 4)
+        hop = max(1, probe // 2)
+        quiet_threshold = max(self.rms_threshold * 1.5, calculate_rms(samples) * 0.5)
+
+        latest_gap: int | None = None
+        min_center = lo
+        min_rms: float | None = None
+        position = lo
+        while position <= hi:
+            value = calculate_rms(samples[position : position + probe])
+            center = position + probe // 2
+            if value <= quiet_threshold:
+                latest_gap = center
+            if min_rms is None or value < min_rms:
+                min_rms = value
+                min_center = center
+            position += hop
+        return latest_gap if latest_gap is not None else min_center

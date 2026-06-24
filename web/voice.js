@@ -119,6 +119,11 @@ const state = {
   // 簡譜唱歌 state: one editable sentence per row, each with its 文字 + 簡譜 (and
   // per-character durations / glide positions carried from the loaded 逐字稿).
   singBlocks: [],
+  // 段落試唱: a dedicated player + the button currently showing ⏸, so trying one
+  // 段落 never clobbers the full-song result player.
+  segmentSingPlayer: null,
+  segmentSingButton: null,
+  segmentSingUrl: "",
 };
 
 // --------------------------------------------------------------------------- //
@@ -165,6 +170,7 @@ document.addEventListener("breeze:page", (event) => {
     void initVoicePage();
   } else {
     stopSamplePlayback();
+    stopSegmentSing();
     closeAllPlayerMenus();
     void stopActiveRecording("切換頁面");
   }
@@ -176,6 +182,7 @@ const subtabs = Array.from(document.querySelectorAll("#page-voice .subtab"));
 
 function showVoicePanel(panel) {
   closeAllPlayerMenus();
+  stopSegmentSing();
   document.querySelectorAll("#page-voice .vpanel").forEach((element) => {
     element.hidden = element.id !== `vpanel-${panel}`;
   });
@@ -1013,6 +1020,13 @@ function renderSingBlocks() {
 
     fields.append(jianpu, lyric);
 
+    const play = makeSegmentSingButton(() => ({
+      notes: buildSingNotes([block]),
+      useMeasured: false,
+      tonicHz: Number.parseFloat(els.singTonic.value),
+      speed: positiveNumber(els.singSpeed.value),
+    }));
+
     const del = document.createElement("button");
     del.type = "button";
     del.className = "sing-block-del";
@@ -1020,12 +1034,18 @@ function renderSingBlocks() {
     del.title = "刪除這一句";
     del.setAttribute("aria-label", del.title);
     del.addEventListener("click", () => {
+      stopSegmentSing();
       state.singBlocks.splice(index, 1);
       renderSingBlocks();
       refreshButtons();
     });
 
-    row.append(fields, del);
+    // 段落播放鍵在上、刪除鍵在下,上下並排在這一句的右側。
+    const actions = document.createElement("div");
+    actions.className = "sing-block-actions";
+    actions.append(play, del);
+
+    row.append(fields, actions);
     host.append(row);
   });
 }
@@ -1255,7 +1275,15 @@ function renderPitchRelation(rows) {
     figure.className = "pitch-para";
     const head = document.createElement("figcaption");
     head.className = "pitch-para-head";
-    head.textContent = `段落 ${index + 1} · ${para[0].time.toFixed(1)}–${para[para.length - 1].time.toFixed(1)} 秒`;
+    const label = document.createElement("span");
+    label.textContent = `段落 ${index + 1} · ${para[0].time.toFixed(1)}–${para[para.length - 1].time.toFixed(1)} 秒`;
+    const play = makeSegmentSingButton(() => ({
+      notes: buildNotesFromRows(para).notes,
+      useMeasured: true,
+      tonicHz: state.pitchTonic,
+      speed: positiveNumber(els.pitchSpeed.value),
+    }));
+    head.append(label, play);
     const canvas = document.createElement("canvas");
     canvas.className = "pitch-canvas";
     canvas.setAttribute("role", "img");
@@ -1447,9 +1475,139 @@ function splitCsvLine(line) {
   return cells;
 }
 
+// ── 段落試唱 ─────────────────────────────────────────────────────────────────
+// Sing one 段落 (a 簡譜唱歌 sentence row, or a 基頻唱歌 paragraph) on its own,
+// played by a dedicated player so it never overwrites the full-song result.
+
+// True when at least one note carries a pitch (single hz, a contour, or a real
+// 簡譜) — mirrors the server's singable check so an empty 段落 fails fast.
+function notesAreSingable(notes) {
+  return (notes || []).some((note) => {
+    if ((note.hz || 0) > 0) {
+      return true;
+    }
+    if (Array.isArray(note.contour) && note.contour.some((hz) => (hz || 0) > 0)) {
+      return true;
+    }
+    return Boolean(note.jianpu) && note.jianpu !== "0" && note.jianpu !== "-";
+  });
+}
+
+function ensureSegmentSingPlayer() {
+  if (!state.segmentSingPlayer) {
+    const player = new Audio();
+    const reset = () => paintSegmentSingButton(null);
+    player.addEventListener("ended", reset);
+    player.addEventListener("error", reset);
+    state.segmentSingPlayer = player;
+  }
+  return state.segmentSingPlayer;
+}
+
+function paintSegmentSingButton(active) {
+  const previous = state.segmentSingButton;
+  if (previous && previous !== active) {
+    previous.classList.remove("playing", "loading");
+    previous.textContent = "▶";
+    previous.title = previous.dataset.idleTitle || "試唱這段";
+    previous.setAttribute("aria-label", previous.title);
+  }
+  state.segmentSingButton = active || null;
+}
+
+function stopSegmentSing() {
+  if (state.segmentSingPlayer) {
+    state.segmentSingPlayer.pause();
+  }
+  paintSegmentSingButton(null);
+}
+
+function makeSegmentSingButton(getJob) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "seg-sing";
+  button.textContent = "▶";
+  button.dataset.idleTitle = "試唱這段";
+  button.title = button.dataset.idleTitle;
+  button.setAttribute("aria-label", button.title);
+  button.addEventListener("click", () => void playSegmentSing(button, getJob()));
+  return button;
+}
+
+// Synthesize just ``notes`` (one 段落) and play it; clicking the same button again
+// stops. The synth runs through runExclusive (page lock + 中斷), playback does not.
+async function playSegmentSing(button, { notes, useMeasured, tonicHz, speed }) {
+  if (state.segmentSingButton === button) {
+    stopSegmentSing();
+    return;
+  }
+  stopSegmentSing();
+  if (!state.selectedId) {
+    setStatus("請先在聲音庫選擇或新增一個目標聲音", "error");
+    return;
+  }
+  if (!notesAreSingable(notes)) {
+    setStatus("這個段落沒有可唱的內容", "error");
+    return;
+  }
+
+  button.classList.add("loading");
+  button.textContent = "…";
+  let audioBase64 = "";
+  await runExclusive("合成這段歌聲中…", async (signal) => {
+    await waitForModelReady();
+    setStatus("段落試唱合成中…", "live");
+    const body = { voiceId: state.selectedId, notes };
+    if (Number.isFinite(tonicHz) && tonicHz > 0) {
+      body.tonicHz = tonicHz;
+    }
+    if (useMeasured) {
+      body.useMeasuredHz = true;
+    }
+    if (speed) {
+      body.speed = speed;
+    }
+    const response = await fetch("/api/voice/sing", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) {
+      throw new Error(data.detail || "段落試唱失敗");
+    }
+    audioBase64 = data.audioBase64;
+  });
+
+  button.classList.remove("loading");
+  button.textContent = "▶";
+  if (!audioBase64) {
+    return; // synth failed or was cancelled — runExclusive already set the status
+  }
+
+  const player = ensureSegmentSingPlayer();
+  if (state.segmentSingUrl) {
+    URL.revokeObjectURL(state.segmentSingUrl);
+  }
+  state.segmentSingUrl = URL.createObjectURL(base64ToBlob(audioBase64, "audio/wav"));
+  player.src = state.segmentSingUrl;
+  paintSegmentSingButton(button);
+  button.classList.add("playing");
+  button.textContent = "⏸";
+  button.title = "暫停試唱";
+  button.setAttribute("aria-label", button.title);
+  player.play().catch(() => {
+    stopSegmentSing();
+    setStatus("無法播放段落", "error");
+  });
+  setStatus("段落試唱中");
+}
+
 // Shared singing job: POST the notes to /api/voice/sing and show the result in
 // the named player. ``resultKind`` picks the panel ("sing" or "pitch").
 async function performSing({ notes, useMeasured, tonicHz, speed, resultKind }) {
+  stopSegmentSing();
   await runExclusive("合成歌聲中…", async (signal) => {
     await waitForModelReady();
     setStatus("唱歌合成中…", "live");

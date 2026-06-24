@@ -524,6 +524,39 @@
         transform: rotate(90deg);
       }
 
+      .seg-play {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 22px;
+        height: 22px;
+        padding: 0;
+        border: 1px solid var(--border, rgba(127, 127, 127, 0.3));
+        border-radius: 999px;
+        background: transparent;
+        color: var(--accent, #2f9e7f);
+        font-size: 0.72rem;
+        line-height: 1;
+        cursor: pointer;
+        flex: 0 0 auto;
+        transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+      }
+
+      .seg-play:hover {
+        background: color-mix(in srgb, var(--accent, #2f9e7f) 16%, transparent);
+      }
+
+      .seg-play:focus-visible {
+        outline: 2px solid var(--accent, #2f9e7f);
+        outline-offset: 1px;
+      }
+
+      .seg-play.playing {
+        background: var(--accent, #2f9e7f);
+        color: #fff;
+        border-color: var(--accent, #2f9e7f);
+      }
+
       .transcript-entry.jianpu .entry-main {
         display: block;
       }
@@ -1069,6 +1102,12 @@
         gap: 8px;
       }
 
+      /* 執行(念出來 / 唱出來)做成圖示鍵,與上傳鍵在同列右邊等寬並列。 */
+      .icon-run {
+        font-size: 1.15rem;
+        line-height: 1;
+      }
+
       .voice-audio {
         width: 100%;
         height: 38px;
@@ -1168,6 +1207,56 @@
         border-radius: 50%;
         background: transparent;
         color: var(--muted);
+      }
+
+      .sing-block-actions {
+        flex: none;
+        align-self: center;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      .seg-sing {
+        flex: none;
+        align-self: center;
+        box-sizing: border-box;
+        width: 1.9rem;
+        height: 1.9rem;
+        min-width: 0;
+        min-height: 0;
+        aspect-ratio: 1 / 1;
+        padding: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid var(--accent, var(--line));
+        border-radius: 50%;
+        background: transparent;
+        color: var(--accent, var(--ink));
+        font-size: 0.78rem;
+        line-height: 1;
+        cursor: pointer;
+        transition: background 120ms ease, color 120ms ease;
+      }
+
+      .seg-sing:hover {
+        background: color-mix(in srgb, var(--accent, #2f9e7f) 16%, transparent);
+      }
+
+      .seg-sing:focus-visible {
+        outline: 2px solid var(--accent, #2f9e7f);
+        outline-offset: 1px;
+      }
+
+      .seg-sing.playing {
+        background: var(--accent, #2f9e7f);
+        color: var(--panel, #fff);
+      }
+
+      .seg-sing.loading {
+        opacity: 0.7;
+        cursor: progress;
       }
 
       .voice-fav {
@@ -1441,10 +1530,20 @@
       }
 
       .pitch-para-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
         padding: 4px 8px;
         font-size: 0.72rem;
         color: var(--muted);
         border-bottom: 1px solid var(--line);
+      }
+
+      .pitch-para-head .seg-sing {
+        width: 1.7rem;
+        height: 1.7rem;
+        font-size: 0.72rem;
       }
 
       .pitch-canvas {
@@ -1737,8 +1836,11 @@
       </div>
 
       <section id="vpanel-convert" class="voice-card vpanel">
-        <h2>聲音轉換</h2>
-        <p class="voice-hint">錄一段或上傳你的聲音,系統會自動用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」重新詮釋。</p>
+        <div class="voice-card-title">
+          <h2>聲音轉換</h2>
+          <button class="voice-desc-toggle" type="button" aria-expanded="false" aria-label="顯示說明" title="顯示說明">i</button>
+        </div>
+        <p class="voice-hint voice-desc" hidden>錄一段或上傳你的聲音,系統會自動用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」重新詮釋。</p>
         <div class="voice-source">
           <button id="cv-record" type="button" class="primary" data-idle-label="● 錄音並轉換">● 錄音並轉換</button>
           <button id="cv-upload" type="button">⤵ 上傳並轉換</button>
@@ -1779,11 +1881,16 @@
       </section>
 
       <section id="vpanel-tts" class="voice-card vpanel" hidden>
-        <h2>文字轉換</h2>
-        <p class="voice-hint">輸入或上傳文字,用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」念出來。</p>
-        <button id="tts-upload" type="button">⤵ 上傳文字檔(.txt)</button>
+        <div class="voice-card-title">
+          <h2>文字轉換</h2>
+          <button class="voice-desc-toggle" type="button" aria-expanded="false" aria-label="顯示說明" title="顯示說明">i</button>
+        </div>
+        <p class="voice-hint voice-desc" hidden>輸入或上傳文字,用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」念出來。</p>
+        <div class="voice-source">
+          <button id="tts-upload" type="button">⤵ 上傳文字檔(.txt)</button>
+          <button id="tts-run" type="button" class="primary icon-run" title="用目標聲音念出來" aria-label="用目標聲音念出來" disabled>▶</button>
+        </div>
         <input id="tts-file" class="visually-hidden" type="file" accept=".txt,text/plain" />
-        <textarea id="tts-text" class="voice-textarea" maxlength="2000" rows="3" placeholder="輸入想說的話,或上傳文字檔…"></textarea>
         <div class="voice-params">
           <label class="voice-param">基音 Hz
             <input id="tts-base" type="number" min="80" max="500" step="1" class="voice-input" placeholder="自動" />
@@ -1792,7 +1899,7 @@
             <input id="tts-speed" type="number" min="0.5" max="2" step="0.05" class="voice-input" placeholder="1.0" />
           </label>
         </div>
-        <button id="tts-run" type="button" class="primary" disabled>用目標聲音念出來</button>
+        <textarea id="tts-text" class="voice-textarea" maxlength="2000" rows="3" placeholder="輸入想說的話,或上傳文字檔…"></textarea>
         <div id="tts-result-wrap" class="voice-result" hidden>
           <audio id="tts-result" class="voice-audio" controls preload="metadata"></audio>
           <div class="voice-result-actions">
@@ -1812,10 +1919,9 @@
         </p>
         <div class="voice-source">
           <button id="sing-upload" type="button">⤵ 上傳逐字稿 JSON</button>
+          <button id="sing-run" type="button" class="primary icon-run" title="用目標聲音唱出來" aria-label="用目標聲音唱出來" disabled>▶</button>
         </div>
         <input id="sing-file" class="visually-hidden" type="file" accept="application/json,.json" />
-        <div id="sing-blocks" class="sing-blocks"></div>
-        <button id="sing-add" type="button" class="mini">＋ 新增一句</button>
         <div class="voice-params">
           <label class="voice-param">基音 Hz
             <input id="sing-tonic" type="number" min="80" max="600" step="1" class="voice-input" placeholder="自動" />
@@ -1824,7 +1930,8 @@
             <input id="sing-speed" type="number" min="0.5" max="2" step="0.05" class="voice-input" placeholder="1.0" />
           </label>
         </div>
-        <button id="sing-run" type="button" class="primary" disabled>用目標聲音唱出來</button>
+        <div id="sing-blocks" class="sing-blocks"></div>
+        <button id="sing-add" type="button" class="mini">＋ 新增一句</button>
         <div id="sing-result-wrap" class="voice-result" hidden>
           <audio id="sing-result" class="voice-audio" controls preload="metadata"></audio>
           <div class="voice-result-actions">
@@ -1844,8 +1951,14 @@
         </p>
         <div class="voice-source">
           <button id="pitch-analysis-upload" type="button">⤵ 載入基頻分析 (.csv)</button>
+          <button id="pitch-run" type="button" class="primary icon-run" title="用目標聲音唱出來" aria-label="用目標聲音唱出來" disabled>▶</button>
         </div>
         <input id="pitch-analysis-file" class="visually-hidden" type="file" accept="text/csv,.csv" />
+        <div class="voice-params solo">
+          <label class="voice-param">速度
+            <input id="pitch-speed" type="number" min="0.5" max="2" step="0.05" class="voice-input" placeholder="1.0" />
+          </label>
+        </div>
         <p id="pitch-empty" class="voice-hint">尚未載入基頻分析。請點上方「載入基頻分析 (.csv)」,或先在逐字稿頁做「後處理」並匯出 CSV。</p>
         <div id="pitch-vis" class="pitch-vis" hidden>
           <div class="pitch-legend">
@@ -1856,12 +1969,6 @@
           </div>
           <div id="pitch-paras" class="pitch-paras"></div>
         </div>
-        <div class="voice-params solo">
-          <label class="voice-param">速度
-            <input id="pitch-speed" type="number" min="0.5" max="2" step="0.05" class="voice-input" placeholder="1.0" />
-          </label>
-        </div>
-        <button id="pitch-run" type="button" class="primary" disabled>用目標聲音唱出來</button>
         <div id="pitch-result-wrap" class="voice-result" hidden>
           <audio id="pitch-result" class="voice-audio" controls preload="metadata"></audio>
           <div class="voice-result-actions">
@@ -1951,7 +2058,7 @@
       </form>
     </dialog>
 
-    <script src="./app.js?v=23" type="module"></script>
-    <script src="./voice.js?v=20" type="module"></script>
+    <script src="./app.js?v=24" type="module"></script>
+    <script src="./voice.js?v=22" type="module"></script>
   </body>
 </html>

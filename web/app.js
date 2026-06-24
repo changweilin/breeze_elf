@@ -135,6 +135,12 @@ const state = {
   audioPreviewTimer: 0,
   audioDirty: false,
   audioStorageFailed: false,
+  // 段落播放: a dedicated player seeks the recorded WAV to a block's time range.
+  segmentPlayer: null,
+  segmentPlayIndex: null,
+  segmentPlayEnd: Infinity,
+  segmentAudioUrl: "",
+  segmentAudioUrlBytes: -1,
   savingRemote: false,
   savingAudio: false,
   analyzingPitch: false,
@@ -405,6 +411,11 @@ function renderTranscriptEntry(block, index) {
 
   const meta = document.createElement("span");
   meta.className = "entry-meta";
+  // 段落播放 of the original recording — available in 文字/簡譜/基頻 views alike.
+  const playButton = createSegmentPlayButton(block, index);
+  if (playButton) {
+    meta.append(playButton);
+  }
   const range = document.createElement("span");
   range.textContent = formatTimeRange(block.startSeconds, block.endSeconds);
   meta.append(range);
@@ -469,6 +480,123 @@ function toggleEntryDetails(index) {
     state.openBlocks.add(index);
   }
   renderTranscriptView();
+}
+
+// ── 段落播放 ────────────────────────────────────────────────────────────────
+// Each transcript block carries absolute start/end seconds, so playback just
+// seeks the recorded WAV and stops at the block's end. One shared player and a
+// single "currently playing" index keep the ▶/⏸ buttons in sync across views.
+
+function createSegmentPlayButton(block, index) {
+  if (!Number.isFinite(block.startSeconds)) {
+    return null;
+  }
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "seg-play";
+  button.dataset.segIndex = String(index);
+  paintSegmentButton(button, state.segmentPlayIndex === index);
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    toggleSegmentPlayback(block, index);
+  });
+  return button;
+}
+
+function paintSegmentButton(button, playing) {
+  button.textContent = playing ? "⏸" : "▶";
+  button.classList.toggle("playing", playing);
+  const title = playing ? "暫停這個段落" : "播放這個段落";
+  button.title = title;
+  button.setAttribute("aria-label", title);
+}
+
+function paintSegmentButtons() {
+  els.lines.querySelectorAll(".seg-play").forEach((button) => {
+    paintSegmentButton(button, Number(button.dataset.segIndex) === state.segmentPlayIndex);
+  });
+}
+
+function ensureSegmentPlayer() {
+  if (!state.segmentPlayer) {
+    const player = new Audio();
+    player.addEventListener("timeupdate", () => {
+      if (Number.isFinite(state.segmentPlayEnd) && player.currentTime >= state.segmentPlayEnd) {
+        stopSegmentPlayback();
+      }
+    });
+    player.addEventListener("ended", stopSegmentPlayback);
+    player.addEventListener("error", stopSegmentPlayback);
+    state.segmentPlayer = player;
+  }
+  return state.segmentPlayer;
+}
+
+// Reuse one object URL for the whole recording, rebuilt only when the audio grew.
+function segmentAudioUrl() {
+  if (state.segmentAudioUrl && state.segmentAudioUrlBytes === state.audioBytes) {
+    return state.segmentAudioUrl;
+  }
+  if (state.segmentAudioUrl) {
+    URL.revokeObjectURL(state.segmentAudioUrl);
+  }
+  state.segmentAudioUrl = URL.createObjectURL(recordedAudioBlob());
+  state.segmentAudioUrlBytes = state.audioBytes;
+  return state.segmentAudioUrl;
+}
+
+function stopSegmentPlayback() {
+  if (state.segmentPlayer) {
+    state.segmentPlayer.pause();
+  }
+  if (state.segmentPlayIndex !== null) {
+    state.segmentPlayIndex = null;
+    state.segmentPlayEnd = Infinity;
+    paintSegmentButtons();
+  }
+}
+
+function toggleSegmentPlayback(block, index) {
+  if (state.segmentPlayIndex === index) {
+    stopSegmentPlayback();
+    return;
+  }
+  stopSegmentPlayback();
+  if (!state.audioBytes) {
+    flashStats("沒有可播放的錄音");
+    return;
+  }
+  const start = Number(block.startSeconds);
+  if (!Number.isFinite(start)) {
+    flashStats("這個段落沒有時間資訊");
+    return;
+  }
+  const end = Number(block.endSeconds);
+  const player = ensureSegmentPlayer();
+  const url = segmentAudioUrl();
+  if (player.src !== url) {
+    player.src = url;
+  }
+  state.segmentPlayIndex = index;
+  state.segmentPlayEnd = Number.isFinite(end) && end > start ? end : Infinity;
+  paintSegmentButtons();
+
+  const begin = () => {
+    try {
+      player.currentTime = Math.max(0, start);
+    } catch {
+      /* seek attempted before metadata is ready — ignore and play from 0 */
+    }
+    player.play().catch(() => {
+      flashStats("無法播放段落");
+      stopSegmentPlayback();
+    });
+  };
+  if (player.readyState >= 1 /* HAVE_METADATA */) {
+    begin();
+  } else {
+    player.addEventListener("loadedmetadata", begin, { once: true });
+  }
 }
 
 function renderEntryDetails(block) {
@@ -912,6 +1040,10 @@ function bindViewTabs() {
 }
 
 function entryIndexFromEvent(event) {
+  // The 段落播放 button lives inside entry-main but drives its own action.
+  if (event.target.closest?.(".seg-play")) {
+    return null;
+  }
   const main = event.target.closest?.(".entry-main[role='button']");
   if (!main || !els.lines.contains(main)) {
     return null;
@@ -1336,6 +1468,12 @@ async function restoreAudioSession() {
 async function clearRecordedAudio() {
   window.clearTimeout(state.audioPersistTimer);
   state.audioPersistTimer = 0;
+  stopSegmentPlayback();
+  if (state.segmentAudioUrl) {
+    URL.revokeObjectURL(state.segmentAudioUrl);
+    state.segmentAudioUrl = "";
+    state.segmentAudioUrlBytes = -1;
+  }
   state.audioChunks = [];
   state.audioBytes = 0;
   state.audioDirty = false;

@@ -17,14 +17,17 @@ from breeze_elf.audio import (
     AudioWindow,
     AudioWindowBuffer,
     calculate_rms,
+    estimate_noise_floor,
     summarize_pitch,
 )
 from breeze_elf.main import (
     StreamState,
     _character_payloads,
+    _dedupe_overlap_cap,
     _handle_audio_payload,
     _handle_text_message,
     _novel_text,
+    _padded_char_spans,
     _should_drop_asr_result,
 )
 
@@ -318,6 +321,41 @@ class CharacterPayloadTests(unittest.TestCase):
         self.assertEqual(_character_payloads(window, (), 16_000, summary), [])
 
 
+class PaddedCharSpanTests(unittest.TestCase):
+    def test_spans_match_fixed_padding_without_audio(self):
+        block = {
+            "startSeconds": 0.0,
+            "endSeconds": 1.0,
+            "characters": [{"char": "好", "startSeconds": 0.4, "endSeconds": 0.6}],
+        }
+        spans = _padded_char_spans(block)
+        self.assertEqual(len(spans), 1)
+        _, start, end = spans[0]
+        # fixed attack 40ms / release 90ms (a lone 字 keeps the full pad)
+        self.assertAlmostEqual(start, 0.36, places=3)
+        self.assertAlmostEqual(end, 0.69, places=3)
+
+    def test_spans_grow_through_voiceless_onset_with_audio(self):
+        sample_rate = 16_000
+        silence = np.full(3_200, 0.002, dtype=np.float32)  # 0.0–0.2s room tone
+        onset = np.full(1_600, 0.012, dtype=np.float32)  # 0.2–0.3s unvoiced consonant
+        voiced = np.full(3_200, 0.3, dtype=np.float32)  # 0.3–0.5s loud vowel
+        tail = np.full(1_600, 0.002, dtype=np.float32)  # 0.5–0.6s silence
+        samples = np.concatenate([silence, onset, voiced, tail])
+        block = {
+            "startSeconds": 0.0,
+            "endSeconds": 0.6,
+            "characters": [{"char": "西", "startSeconds": 0.3, "endSeconds": 0.5}],
+        }
+        floor = estimate_noise_floor(samples, sample_rate)
+
+        _, start, end = _padded_char_spans(block, samples, sample_rate, floor)[0]
+
+        # fixed attack alone would only reach 0.26s; content growth reaches 0.2s.
+        self.assertAlmostEqual(start, 0.2, delta=0.02)
+        self.assertLess(start, 0.26)
+
+
 class NovelTextTests(unittest.TestCase):
     def test_novel_text_removes_overlap(self):
         self.assertEqual(_novel_text("今天 天氣很好", "天氣很好 我們出門"), "我們出門")
@@ -330,6 +368,49 @@ class NovelTextTests(unittest.TestCase):
 
     def test_novel_text_removes_overlap_with_spacing_difference(self):
         self.assertEqual(_novel_text("今天，天氣很好", "天氣 很好 我們出門"), "我們出門")
+
+    def test_novel_text_keeps_repeated_lyric_for_disjoint_utterance(self):
+        # A disjoint VAD utterance (cap 0) that repeats an earlier 歌詞 line must be
+        # kept — a sung chorus is a real repeat, not a window-overlap artefact.
+        self.assertEqual(_novel_text("好想你", "好想你", max_overlap_chars=0), " 好想你")
+        self.assertEqual(
+            _novel_text("天氣很好 我們出門", "天氣很好", max_overlap_chars=0),
+            " 天氣很好",
+        )
+
+    def test_novel_text_trims_force_split_boundary_overlap(self):
+        # A >max_segment force-split re-includes the pre-roll, so the continuation
+        # duplicates the previous segment's last few 字 — trim just that boundary.
+        self.assertEqual(
+            _novel_text("今天天氣很好", "很好我們出門去玩", max_overlap_chars=6),
+            "我們出門去玩",
+        )
+
+
+class DedupeOverlapCapTests(unittest.TestCase):
+    def _window(self, kind, start, end):
+        return AudioWindow(
+            index=0,
+            start_seconds=start,
+            end_seconds=end,
+            samples=np.zeros(1, dtype=np.float32),
+            rms=0.0,
+            is_speech=True,
+            kind=kind,
+        )
+
+    def test_window_segmenter_uses_full_dedupe(self):
+        self.assertIsNone(_dedupe_overlap_cap(self._window("window", 2.0, 4.0), 2.5))
+
+    def test_disjoint_utterance_disables_dedupe(self):
+        # Starts after the previous segment ended → real repeat, keep everything.
+        self.assertEqual(_dedupe_overlap_cap(self._window("utterance", 5.0, 7.0), 4.0), 0)
+        self.assertEqual(_dedupe_overlap_cap(self._window("utterance", 0.0, 2.0), None), 0)
+
+    def test_overlapping_continuation_trims_boundary(self):
+        # An overlapping continuation (force-split fallback / window-mode carry)
+        # starts before the previous segment ended → trim just that boundary.
+        self.assertEqual(_dedupe_overlap_cap(self._window("utterance", 11.7, 23.0), 12.0), 6)
 
 
 class SilenceHallucinationTests(unittest.TestCase):

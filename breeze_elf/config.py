@@ -50,12 +50,17 @@ class Settings:
     vad_frame_ms: int = 100
     vad_pre_roll_ms: int = 300
     vad_end_silence_ms: int = 700
-    vad_max_segment_seconds: float = 12.0
+    vad_max_segment_seconds: float = 18.0
     # Per-character VAD-style attack/release: each 字's analysis window is grown a
     # little before its onset and after its tail (so 基頻 covers the whole 字),
     # bounded by half the gap to its neighbours so adjacent 字 never merge.
     char_attack_ms: int = 40
     char_release_ms: int = 90
+    # Post-processing only: each 字's analysis window is also grown outward through
+    # adjacent audio that is below the speech threshold but above the room noise
+    # floor (an unvoiced consonant / breath) — kept while RMS stays above
+    # ``noise_floor * char_voiceless_margin`` — so 基頻/簡譜 cover the whole 字.
+    char_voiceless_margin: float = 1.6
     language: str = "zh"
     asr_model: str = "medium"
     asr_device: str = "auto"
@@ -94,9 +99,10 @@ def get_settings() -> Settings:
         vad_frame_ms=max(1, _int_env("BREEZE_VAD_FRAME_MS", 100)),
         vad_pre_roll_ms=max(0, _int_env("BREEZE_VAD_PRE_ROLL_MS", 300)),
         vad_end_silence_ms=max(1, _int_env("BREEZE_VAD_END_SILENCE_MS", 700)),
-        vad_max_segment_seconds=max(0.1, _float_env("BREEZE_VAD_MAX_SEGMENT_SECONDS", 12.0)),
+        vad_max_segment_seconds=max(0.1, _float_env("BREEZE_VAD_MAX_SEGMENT_SECONDS", 18.0)),
         char_attack_ms=max(0, _int_env("BREEZE_CHAR_ATTACK_MS", 40)),
         char_release_ms=max(0, _int_env("BREEZE_CHAR_RELEASE_MS", 90)),
+        char_voiceless_margin=max(1.0, _float_env("BREEZE_CHAR_VOICELESS_MARGIN", 1.6)),
         language=os.getenv("BREEZE_LANGUAGE", "zh"),
         asr_model=os.getenv("BREEZE_ASR_MODEL", "medium"),
         asr_device=os.getenv("BREEZE_ASR_DEVICE", "auto"),

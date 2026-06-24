@@ -125,7 +125,8 @@ Environment variables:
 | `BREEZE_VAD_FRAME_MS` | `100` | RMS VAD frame size. |
 | `BREEZE_VAD_PRE_ROLL_MS` | `300` | Audio kept before detected speech. |
 | `BREEZE_VAD_END_SILENCE_MS` | `700` | Silence required to finish an utterance. |
-| `BREEZE_VAD_MAX_SEGMENT_SECONDS` | `12.0` | Maximum utterance length before forced flush. |
+| `BREEZE_VAD_MAX_SEGMENT_SECONDS` | `18.0` | Max utterance length before a forced split. The split lands at the quietest recent frame (a syllable gap) so a long sung phrase is never cut mid-note. |
+| `BREEZE_CHAR_VOICELESS_MARGIN` | `1.6` | Post-processing only: grow each 字's window outward through audio above `noise_floor × margin` (an unvoiced consonant/breath) the live VAD clipped. |
 | `BREEZE_ASR_MODEL` | `medium` | Whisper model name. |
 | `BREEZE_ASR_DEVICE` | `auto` | `auto`, `cuda`, or `cpu`. |
 | `BREEZE_ASR_COMPUTE_TYPE` | `int8` | Compute type for custom ASR device values. |
