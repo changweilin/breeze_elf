@@ -1006,6 +1006,35 @@
         font-weight: 760;
       }
 
+      /* Section title row with a click-to-expand ⓘ for long 說明 */
+      .voice-card-title {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .voice-desc-toggle {
+        width: 24px;
+        height: 24px;
+        padding: 0;
+        border: 1px solid var(--line);
+        border-radius: 50%;
+        background: transparent;
+        color: var(--muted);
+        font-size: 0.82rem;
+        line-height: 1;
+        cursor: pointer;
+      }
+
+      .voice-desc-toggle[aria-expanded="true"] {
+        background: var(--panel-subtle);
+        color: var(--ink);
+      }
+
+      .voice-desc[hidden] {
+        display: none;
+      }
+
       .voice-card-head {
         display: flex;
         align-items: center;
@@ -1302,9 +1331,92 @@
         min-height: 40px;
       }
 
+      /* 基頻唱歌:single-column params row (only 速度 lives here) */
+      .voice-params.solo {
+        display: grid;
+        grid-template-columns: 1fr;
+      }
+
+      /* 基頻唱歌:基頻/強度/文字 關係視覺化 */
+      .pitch-vis {
+        margin: 4px 0 2px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        overflow: hidden;
+        background: #0b1020;
+      }
+
+      .pitch-vis[hidden] {
+        display: none;
+      }
+
+      .pitch-paras {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 0 8px 8px;
+      }
+
+      .pitch-para {
+        margin: 0;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        overflow: hidden;
+        background: #0b1020;
+      }
+
+      .pitch-para-head {
+        padding: 4px 8px;
+        font-size: 0.72rem;
+        color: var(--muted);
+        border-bottom: 1px solid var(--line);
+      }
+
+      .pitch-canvas {
+        display: block;
+        width: 100%;
+        height: 140px;
+      }
+
+      .pitch-legend {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        flex-wrap: wrap;
+        margin: 0;
+        padding: 7px 9px;
+        font-size: 0.72rem;
+        color: var(--muted);
+      }
+
+      .pitch-dot {
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        margin-right: 5px;
+        border-radius: 50%;
+        vertical-align: middle;
+      }
+
+      .pitch-dot.pitch {
+        background: #7df9ff;
+      }
+
+      .pitch-dot.intensity {
+        background: #f0a838;
+      }
+
+      .pitch-dot.text {
+        background: #e6edf3;
+      }
+
+      .pitch-legend-meta {
+        margin-left: auto;
+      }
+
       .subtabs {
         display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
+        grid-template-columns: repeat(4, minmax(0, 1fr));
         gap: 4px;
         padding: 4px;
         border: 1px solid var(--line);
@@ -1315,13 +1427,15 @@
       .subtab {
         min-height: 42px;
         min-width: 0;
+        padding: 0 2px;
         border: 0;
         border-radius: 8px;
         background: transparent;
         color: var(--muted);
         font: inherit;
         font-weight: 720;
-        font-size: 0.9rem;
+        font-size: 0.86rem;
+        white-space: nowrap;
         cursor: pointer;
       }
 
@@ -1542,8 +1656,9 @@
 
       <div class="subtabs" role="tablist" aria-label="變聲功能">
         <button class="subtab" type="button" data-panel="convert" role="tab" aria-selected="true">聲音轉換</button>
-        <button class="subtab" type="button" data-panel="tts" role="tab" aria-selected="false">文字轉語音</button>
+        <button class="subtab" type="button" data-panel="tts" role="tab" aria-selected="false">文字轉換</button>
         <button class="subtab" type="button" data-panel="sing" role="tab" aria-selected="false">簡譜唱歌</button>
+        <button class="subtab" type="button" data-panel="pitch" role="tab" aria-selected="false">基頻唱歌</button>
       </div>
 
       <section id="vpanel-convert" class="voice-card vpanel">
@@ -1589,7 +1704,7 @@
       </section>
 
       <section id="vpanel-tts" class="voice-card vpanel" hidden>
-        <h2>文字轉語音</h2>
+        <h2>文字轉換</h2>
         <p class="voice-hint">輸入或上傳文字,用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」念出來。</p>
         <button id="tts-upload" type="button">⤵ 上傳文字檔(.txt)</button>
         <input id="tts-file" class="visually-hidden" type="file" accept=".txt,text/plain" />
@@ -1613,16 +1728,17 @@
       </section>
 
       <section id="vpanel-sing" class="voice-card vpanel" hidden>
-        <h2>簡譜唱歌</h2>
-        <p class="voice-hint">
-          上傳逐字稿(含音高的 .json)或基頻分析(.csv,依實測音高演唱),或直接編輯下面的簡譜,用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」唱出來。每行一個字:<code>字 簡譜 秒數</code>(例:<code>小 1 0.4</code>;休止用 <code>- 0 0.3</code>;高八度加 <code>'</code>、低八度加 <code>,</code>;第四欄填 Hz 則依實測音高)。
+        <div class="voice-card-title">
+          <h2>簡譜唱歌</h2>
+          <button class="voice-desc-toggle" type="button" aria-expanded="false" aria-label="顯示說明" title="顯示說明">ⓘ</button>
+        </div>
+        <p class="voice-hint voice-desc" hidden>
+          上傳逐字稿(含音高的 .json),或直接編輯下面的簡譜,用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」唱出來。每行一個字:<code>字 簡譜 秒數</code>(例:<code>小 1 0.4</code>;休止用 <code>- 0 0.3</code>;高八度加 <code>'</code>、低八度加 <code>,</code>)。想依實測音高、抑揚頓挫演唱,請改用「基頻唱歌」。
         </p>
         <div class="voice-source">
           <button id="sing-upload" type="button">⤵ 上傳逐字稿 JSON</button>
-          <button id="sing-analysis-upload" type="button">⤵ 載入基頻分析 (.csv)</button>
         </div>
         <input id="sing-file" class="visually-hidden" type="file" accept="application/json,.json" />
-        <input id="sing-analysis-file" class="visually-hidden" type="file" accept="text/csv,.csv" />
         <textarea id="sing-score" class="voice-textarea" rows="6" placeholder="小 1 0.4&#10;星 2 0.4&#10;星 3 0.4&#10;眨 3 0.4"></textarea>
         <div class="voice-params">
           <label class="voice-param">基音 Hz
@@ -1638,6 +1754,43 @@
           <div class="voice-result-actions">
             <button id="sing-download" type="button" class="mini">下載</button>
             <button id="sing-save" type="button" class="mini">雲端儲存</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="vpanel-pitch" class="voice-card vpanel" hidden>
+        <div class="voice-card-title">
+          <h2>基頻唱歌</h2>
+          <button class="voice-desc-toggle" type="button" aria-expanded="false" aria-label="顯示說明" title="顯示說明">ⓘ</button>
+        </div>
+        <p class="voice-hint voice-desc" hidden>
+          載入「基頻分析(.csv)」後,下方會按段落完整呈現<strong>基頻</strong>(青色音高曲線)、<strong>強度</strong>(橘色填色)與<strong>文字</strong>(上方標記)的對應關係,再用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」依實測音高、抑揚頓挫與氣音重新唱出來。CSV 由逐字稿頁「後處理」後匯出。
+        </p>
+        <div class="voice-source">
+          <button id="pitch-analysis-upload" type="button">⤵ 載入基頻分析 (.csv)</button>
+        </div>
+        <input id="pitch-analysis-file" class="visually-hidden" type="file" accept="text/csv,.csv" />
+        <p id="pitch-empty" class="voice-hint">尚未載入基頻分析。請點上方「載入基頻分析 (.csv)」,或先在逐字稿頁做「後處理」並匯出 CSV。</p>
+        <div id="pitch-vis" class="pitch-vis" hidden>
+          <div class="pitch-legend">
+            <span><i class="pitch-dot pitch"></i>基頻</span>
+            <span><i class="pitch-dot intensity"></i>強度</span>
+            <span><i class="pitch-dot text"></i>文字</span>
+            <span id="pitch-vis-meta" class="pitch-legend-meta"></span>
+          </div>
+          <div id="pitch-paras" class="pitch-paras"></div>
+        </div>
+        <div class="voice-params solo">
+          <label class="voice-param">速度
+            <input id="pitch-speed" type="number" min="0.5" max="2" step="0.05" class="voice-input" placeholder="1.0" />
+          </label>
+        </div>
+        <button id="pitch-run" type="button" class="primary" disabled>用目標聲音唱出來</button>
+        <div id="pitch-result-wrap" class="voice-result" hidden>
+          <audio id="pitch-result" class="voice-audio" controls preload="metadata"></audio>
+          <div class="voice-result-actions">
+            <button id="pitch-download" type="button" class="mini">下載</button>
+            <button id="pitch-save" type="button" class="mini">雲端儲存</button>
           </div>
         </div>
       </section>
@@ -1723,6 +1876,6 @@
     </dialog>
 
     <script src="./app.js?v=22" type="module"></script>
-    <script src="./voice.js?v=15" type="module"></script>
+    <script src="./voice.js?v=18" type="module"></script>
   </body>
 </html>

@@ -13,11 +13,13 @@ from breeze_elf import main
 from breeze_elf.voice import (
     MockVoiceEngine,
     _breath_sound,
+    _estimate_median_hz,
     _fit_duration,
     _glide_semitones,
     _pitch_shift,
     _resample_rate,
     _resolve_song_notes,
+    _sing_contour_os,
     _song_base,
     _trim_silence,
 )
@@ -148,6 +150,72 @@ class MockEngineTests(unittest.TestCase):
         normal = self.engine.synthesize_song(notes, 220.0, embedding)
         fast = self.engine.synthesize_song(notes, 220.0, embedding, speed=2.0)
         self.assertLess(fast.samples.size, normal.samples.size)
+
+    def test_synthesize_song_duration_matches_note_lengths(self):
+        # The sung clip lines up in time with the notes: total length ≈ the sum of
+        # the note durations (no min-length floor / inter-note gaps stretching it).
+        embedding = self.engine.extract_embedding(_tone(200.0), 16_000)
+        notes = [
+            {"char": "do", "jianpu": "1", "durationSeconds": 0.5},
+            {"char": "mi", "jianpu": "3", "durationSeconds": 0.3},
+            {"char": "sol", "jianpu": "5", "durationSeconds": 0.4},
+        ]
+        result = self.engine.synthesize_song(notes, 220.0, embedding)
+        self.assertAlmostEqual(result.samples.size / result.sample_rate, 1.2, delta=0.03)
+
+    def test_synthesize_song_trims_head_and_tail_silence(self):
+        # Leading / trailing rests (head / tail 靜默) are dropped, inner timing kept.
+        embedding = self.engine.extract_embedding(_tone(200.0), 16_000)
+        notes = [
+            {"char": "-", "jianpu": "0", "durationSeconds": 0.5},
+            {"char": "do", "jianpu": "1", "durationSeconds": 0.4},
+            {"char": "-", "jianpu": "0", "durationSeconds": 0.5},
+        ]
+        result = self.engine.synthesize_song(notes, 220.0, embedding)
+        self.assertAlmostEqual(result.samples.size / result.sample_rate, 0.4, delta=0.05)
+
+    def test_trim_edge_rests_removes_only_head_and_tail(self):
+        from breeze_elf.voice import _trim_edge_rests
+
+        notes = [
+            {"kind": "rest"},
+            {"kind": "voiced"},
+            {"kind": "rest"},
+            {"kind": "voiced"},
+            {"kind": "rest"},
+        ]
+        trimmed = _trim_edge_rests(notes)
+        self.assertEqual([note["kind"] for note in trimmed], ["voiced", "rest", "voiced"])
+
+    def test_sing_contour_os_flattens_lexical_tone_to_steady_note(self):
+        # A spoken syllable with a big falling tone (260 → 150 Hz) should, when
+        # sung as a steady 簡譜 degree, come out roughly flat — the per-window
+        # retune levels the Chinese tone instead of letting it inflate the 高低落差.
+        rate = 22_050
+        count = int(rate * 0.4)
+        axis = np.arange(count) / rate
+        f0 = np.linspace(260.0, 150.0, count)
+        syllable = (0.5 * np.sin(2 * np.pi * np.cumsum(f0) / rate)).astype(np.float32)
+        source = _estimate_median_hz(syllable, rate)
+
+        sung = _sing_contour_os(syllable, source, [200.0], count, rate)
+        half = sung.size // 2
+        first = _estimate_median_hz(sung[:half], rate)
+        second = _estimate_median_hz(sung[half:], rate)
+        # The input's two halves differ by ~50 Hz; the steady note's must be far
+        # smaller, and the whole note sits near the 200 Hz target.
+        self.assertLess(abs(first - second), 25.0)
+        self.assertAlmostEqual(_estimate_median_hz(sung, rate), 200.0, delta=20.0)
+
+    def test_sing_contour_os_follows_rising_contour(self):
+        rate = 22_050
+        count = int(rate * 0.4)
+        syllable = _tone(200.0, rate, 0.4)
+        sung = _sing_contour_os(syllable, 200.0, [170.0, 250.0], count, rate)
+        half = sung.size // 2
+        self.assertLess(
+            _estimate_median_hz(sung[:half], rate), _estimate_median_hz(sung[half:], rate)
+        )
 
     def test_glide_semitones_reads_arrows_and_endpoints(self):
         self.assertEqual(_glide_semitones({"jianpu": "3↗5"}), (4.0, 7.0))

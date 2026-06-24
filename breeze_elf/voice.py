@@ -46,11 +46,24 @@ _MAX_SHIFT_SEMITONES = 12.0
 _STFT_SIZE = 1024
 _STFT_HOP = 256
 
-# Playback speed multiplier bounds for 文字轉語音 / 簡譜唱歌. The change is applied
+# Playback speed multiplier bounds for 文字轉換 / 簡譜唱歌. The change is applied
 # as a pitch-preserving time-stretch so the voice keeps its pitch and timbre and
 # only the tempo changes (speed > 1 → faster/shorter, < 1 → slower/longer).
 _MIN_SPEED = 0.5
 _MAX_SPEED = 2.0
+
+# Sung-note duration bounds. We keep each note as close to its requested length as
+# possible so the sung clip lines up in time with the original recording (only a
+# tiny floor to avoid zero-length notes and a generous ceiling for held notes);
+# earlier a 0.3 s floor + 2.5 s cap stretched/clipped notes and drifted the timing.
+_MIN_NOTE_SECONDS = 0.04
+_MAX_NOTE_SECONDS = 8.0
+
+# 簡譜 glide markers (rising / falling portamento between two degrees, e.g. 3↗5).
+# Mirrors the constants in :mod:`breeze_elf.audio`; defined here so the singing
+# engine can split a combined glide token without importing the private name.
+_JIANPU_GLIDE_UP = "↗"
+_JIANPU_GLIDE_DOWN = "↘"
 
 # Spectral-envelope (timbre) transfer for the mock engine. The reference voice's
 # average log-magnitude spectrum is summarized into a handful of log-spaced bands
@@ -226,9 +239,9 @@ class MockVoiceEngine:
         profile = _load_mock_embedding(embedding)
         if not tonic_hz or tonic_hz <= 0:
             tonic_hz = float(profile.get("medianHz") or _DEFAULT_VOICE_HZ)
-        resolved = _resolve_song_notes(notes, tonic_hz, use_measured_hz)
+        resolved = _trim_edge_rests(_resolve_song_notes(notes, tonic_hz, use_measured_hz))
         target_rms = float(profile.get("rms") or 0.0)
-        # Real words in the OS voice (the same voice 文字轉語音 uses), pitched to
+        # Real words in the OS voice (the same voice 文字轉換 uses), pitched to
         # the melody; falls back to the synthetic vowel voice when unavailable.
         samples, rate, is_real = _song_base(resolved, self.use_os_tts, self.sample_rate)
         samples = _match_loudness(samples, target_rms, default_peak=0.92 if is_real else 0.85)
@@ -412,7 +425,7 @@ class OpenVoiceEngine:
         self.load()
         if not tonic_hz or tonic_hz <= 0:
             tonic_hz = _DEFAULT_VOICE_HZ
-        resolved = _resolve_song_notes(notes, tonic_hz, use_measured_hz)
+        resolved = _trim_edge_rests(_resolve_song_notes(notes, tonic_hz, use_measured_hz))
         # Sing a real-word base in the OS voice so the tone-color converter has
         # actual speech to re-voice (far more natural than converting a synth
         # buzz); falls back to the synthetic voice when no OS voice is available.
@@ -438,7 +451,7 @@ class OpenVoiceEngine:
             from melo.api import TTS
         except Exception as exc:  # pragma: no cover - optional extra
             raise RuntimeError(
-                "文字轉語音需安裝 MeloTTS(`pip install git+https://github.com/myshell-ai/"
+                "文字轉換需安裝 MeloTTS(`pip install git+https://github.com/myshell-ai/"
                 "MeloTTS.git` 並下載 base_speakers/ses)。B→A 變聲不需要它。"
             ) from exc
 
@@ -898,30 +911,51 @@ def _breath_sound(count: int, intensity: float, sample_rate: int) -> np.ndarray:
     peak = float(np.max(np.abs(shaped)))
     if peak > 1e-9:
         shaped = shaped / peak
-    level = float(min(0.6, max(0.15, 0.15 + 2.0 * max(0.0, intensity))))
+    # Keep 氣音 subtle and proportional to the measured energy: a soft texture
+    # between sung notes, not a loud noise burst. (Earlier the floor was 0.15 and
+    # the slope 2.0, so even faint breaths blasted in as 奇怪短促的聲音.)
+    level = float(min(0.3, max(0.04, 1.2 * max(0.0, intensity))))
     return (shaped * level).astype(np.float32)
 
 
+def _clamp_note_seconds(seconds: float | None, default: float = 0.45) -> float:
+    value = float(seconds) if seconds else default
+    return max(_MIN_NOTE_SECONDS, min(_MAX_NOTE_SECONDS, value))
+
+
 def _note_seconds(note: dict, default: float = 0.45) -> float:
-    duration = note.get("duration")
-    seconds = float(duration) if duration else default
-    return max(0.12, min(2.5, seconds))
+    return _clamp_note_seconds(note.get("duration"), default)
+
+
+def _note_count(rate: int, seconds: float | None, default: float = 0.45) -> int:
+    """Samples for a note of ``seconds`` length — kept faithful so the sung clip
+    matches the original timing (only clamped to a tiny floor / generous cap)."""
+    return max(1, int(round(rate * _clamp_note_seconds(seconds, default))))
+
+
+def _trim_edge_rests(notes: list[dict]) -> list[dict]:
+    """Drop leading/trailing rest (silence) notes so the sung clip starts and ends
+    on sound — only head/tail 靜默 is removed; the inner timing is untouched."""
+    start = 0
+    end = len(notes)
+    while start < end and notes[start].get("kind") == "rest":
+        start += 1
+    while end > start and notes[end - 1].get("kind") == "rest":
+        end -= 1
+    return notes[start:end]
 
 
 def _synthesize_song(notes: list[dict], sample_rate: int) -> np.ndarray:
     """Sing notes as vibrato'd vowels following each note's pitch contour, with
-    unvoiced 氣音 for breath notes."""
+    unvoiced 氣音 for breath notes. Notes are concatenated back-to-back (no inserted
+    gaps) so the total length stays faithful to the requested note durations."""
     nyquist = sample_rate / 2.0
-    gap = np.zeros(max(1, int(sample_rate * 0.02)), dtype=np.float32)
     pieces: list[np.ndarray] = []
-    for position, note in enumerate(notes[:400]):
-        seconds = _note_seconds(note)
-        count = max(1, int(sample_rate * seconds))
+    for note in notes[:400]:
+        count = _note_count(sample_rate, note.get("duration"))
 
         if note.get("kind") == "breath":
             pieces.append(_breath_sound(count, float(note.get("intensity") or 0.0), sample_rate))
-            if position != len(notes) - 1:
-                pieces.append(gap)
             continue
 
         contour = _note_contour(note)
@@ -948,8 +982,6 @@ def _synthesize_song(notes: list[dict], sample_rate: int) -> np.ndarray:
         if peak > 1e-9:
             tone /= peak
         pieces.append((tone * _syllable_envelope(count, sample_rate)).astype(np.float32))
-        if position != len(notes) - 1:
-            pieces.append(gap)
 
     if not pieces:
         return np.zeros(1, dtype=np.float32)
@@ -962,8 +994,6 @@ _MAX_SING_SHIFT_SEMITONES = 24.0
 # Cap how many distinct syllables we shell out to the OS voice for, so a long
 # lyric with many unique characters can't spawn an unbounded number of renders.
 _MAX_SUNG_SYLLABLES = 120
-# Floor for a sung note so syllables sustain instead of sounding clipped/abrupt.
-_MIN_SUNG_SECONDS = 0.3
 
 
 def _clamp_sing_shift(semitones: float) -> float:
@@ -977,20 +1007,23 @@ def _sing_contour_os(
     count: int,
     sample_rate: int,
 ) -> np.ndarray:
-    """Pitch a spoken syllable onto a target pitch *contour* (not a flat note).
+    """Pitch a spoken syllable onto a target pitch *contour*.
 
     The syllable is time-fitted to the note, then overlapping windows are each
-    pitch-shifted to follow successive points of the contour and blended back
-    (granular-style), so the re-sung syllable rises/falls like the original —
-    the 抑揚頓挫 a single median pitch throws away."""
+    pitch-shifted to the contour and blended back (granular-style). Crucially each
+    window is retuned using *its own* measured pitch, not one median for the whole
+    syllable: that **flattens the spoken syllable's lexical tone** so a steady 簡譜
+    degree comes out steady (a Chinese tone otherwise rode on top, inflating the
+    高低落差), and a measured 基頻 contour is followed faithfully (抑揚頓挫)."""
     fitted = _fit_duration(syllable, count)
     if source_hz <= 0 or not contour:
         return fitted
 
-    min_segment = max(1, int(sample_rate * 0.08))
+    # Use several windows even for a steady note so the lexical tone gets levelled
+    # out window by window; keep windows long enough (~90 ms) to measure pitch.
+    min_segment = max(1, int(sample_rate * 0.09))
     max_steps = max(1, count // min_segment)
-    steps_wanted = len(contour) if len(contour) > 1 else 1
-    k = int(min(max(1, steps_wanted), max_steps, 8))
+    k = int(min(max(len(contour), 4), max_steps, 8))
     if k <= 1:
         target = contour[0]
         if target <= 0:
@@ -1009,7 +1042,14 @@ def _sing_contour_os(
         if segment.size == 0:
             continue
         target = steps[index]
-        semitones = _clamp_sing_shift(12.0 * math.log2(target / source_hz)) if target > 0 else 0.0
+        # Measure this window's own pitch so the shift lands it on the target;
+        # fall back to the whole-syllable median for windows too short to track.
+        seg_source = source_hz
+        if segment.size >= _STFT_SIZE:
+            measured = _estimate_median_hz(segment, sample_rate)
+            if measured > 0:
+                seg_source = measured
+        semitones = _clamp_sing_shift(12.0 * math.log2(target / seg_source)) if target > 0 else 0.0
         shifted = _resample_to_length(_pitch_shift(segment, semitones), end - start)
         window = _window_ramp(end - start, overlap)
         out[start:end] += shifted * window
@@ -1139,15 +1179,13 @@ def _sing_with_os_voice(notes: list[dict]) -> tuple[np.ndarray, int] | None:
     pieces: list[np.ndarray] = []
     for note in notes:
         kind = note.get("kind")
-        seconds = note.get("duration")
-        seconds = float(seconds) if seconds else 0.45
+        # Keep every note at its requested length so the sung clip matches the
+        # original timing (syllables are time-fitted, not stretched to a floor).
+        count = _note_count(rate, note.get("duration"))
         if kind == "breath":
-            # Breaths can be short — don't stretch them to the sung-note floor.
-            count = max(1, int(rate * max(0.05, min(2.5, seconds))))
             pieces.append(_breath_sound(count, float(note.get("intensity") or 0.0), rate))
             continue
 
-        count = max(1, int(rate * max(_MIN_SUNG_SECONDS, min(2.5, seconds))))
         contour = _note_contour(note)
         char = str(note.get("char") or "").strip()
         if contour is None:
