@@ -1294,6 +1294,10 @@ function renderPitchRelation(rows) {
   });
 }
 
+// VAD 範圍 overlay colour — the green band marking where a 字 is sounding (the VAD
+// word coverage, grown to include sub-threshold onsets/tails in 後處理).
+const VAD_RANGE_COLOR = "rgba(122, 232, 160, 0.92)";
+
 // Draw one paragraph: the pitch contour (cyan, log-Hz, broken at unvoiced gaps),
 // the intensity envelope (orange fill, own scale) and the per-syllable text (top,
 // with a faint time guide), on the paragraph's own time axis.
@@ -1389,6 +1393,32 @@ function drawPitchCanvas(canvas, rows, loHz, hiHz) {
     }
     i = j;
   }
+
+  // VAD 範圍:a green band along the top over the time spans where a 字 is sounding
+  // (text-present rows, grown to cover the 字's onset/tail by the 後處理 VAD
+  // extension); the gaps between bands are the rests / 氣音 / silences.
+  const vadBinW = plotW / Math.max(1, rows.length - 1);
+  ctx.fillStyle = VAD_RANGE_COLOR;
+  let vadStart = -1;
+  const flushVadBand = (end) => {
+    if (vadStart < 0) {
+      return;
+    }
+    const x0 = Math.max(padX, xOf(rows[vadStart].time) - vadBinW / 2);
+    const x1 = Math.min(cssWidth - padX, xOf(rows[end].time) + vadBinW / 2);
+    ctx.fillRect(x0, 1, Math.max(1, x1 - x0), 4);
+    vadStart = -1;
+  };
+  for (let k = 0; k < rows.length; k += 1) {
+    if ((rows[k].text || "").trim()) {
+      if (vadStart < 0) {
+        vadStart = k;
+      }
+    } else {
+      flushVadBand(k - 1);
+    }
+  }
+  flushVadBand(rows.length - 1);
 
   // Time axis end labels (absolute seconds, matching the paragraph header).
   ctx.fillStyle = "rgba(230, 237, 243, 0.55)";

@@ -53,6 +53,10 @@ const THEME_COLORS = {
 };
 const PITCH_MIN_HZ = 70;
 const PITCH_MAX_HZ = 500;
+// VAD 範圍 overlay colour — the green band on the 基頻分析 spectrogram marking the
+// time spans the system treats as 字詞 (a character sounding, after the 後處理 VAD
+// extension covers sub-threshold onsets/tails).
+const VAD_RANGE_COLOR = "rgba(122, 232, 160, 0.92)";
 // Transcript display tabs: 文字 / 文字+簡譜 / 基頻分析. Declared up here because
 // initialViewMode() (used in the state initializer below) reads it.
 const VIEW_MODES = ["text", "jianpu", "spectrum"];
@@ -884,14 +888,47 @@ function renderSpectrogram(spectro) {
   });
   ctx.stroke();
 
+  // VAD 範圍:a green band along the top edge over the time spans where a 字 is
+  // sounding (text-present bins, already grown to cover the 字's onset/tail by the
+  // 後處理 VAD extension); the gaps between bands are the rests / silences.
+  const texts = Array.isArray(spectro.text) ? spectro.text : [];
+  const bins = Math.max(f0.length, texts.length);
+  if (texts.length && bins > 1) {
+    const binW = width / (bins - 1);
+    ctx.fillStyle = VAD_RANGE_COLOR;
+    let runStart = -1;
+    const flushVadBand = (end) => {
+      if (runStart < 0) {
+        return;
+      }
+      const x0 = Math.max(0, (runStart / (bins - 1)) * width - binW / 2);
+      const x1 = Math.min(width, (end / (bins - 1)) * width + binW / 2);
+      ctx.fillRect(x0, 1, Math.max(1, x1 - x0), 4);
+      runStart = -1;
+    };
+    for (let i = 0; i < bins; i += 1) {
+      if ((texts[i] || "").toString().trim()) {
+        if (runStart < 0) {
+          runStart = i;
+        }
+      } else {
+        flushVadBand(i - 1);
+      }
+    }
+    flushVadBand(bins - 1);
+  }
+
   wrap.append(canvas);
   const legend = document.createElement("div");
   legend.className = "spectro-legend";
   const left = document.createElement("span");
   left.textContent = `0–${Math.round(maxHz)} Hz`;
+  const mid = document.createElement("span");
+  mid.className = "spectro-legend-vad";
+  mid.textContent = "▬ VAD範圍";
   const right = document.createElement("span");
   right.textContent = "基頻曲線";
-  legend.append(left, right);
+  legend.append(left, mid, right);
   wrap.append(legend);
   return wrap;
 }

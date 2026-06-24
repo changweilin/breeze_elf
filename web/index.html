@@ -430,6 +430,11 @@
         color: var(--muted);
       }
 
+      .spectro-legend-vad {
+        color: #4cc98a;
+        font-weight: 700;
+      }
+
       .spectro-empty {
         padding: 16px;
         font-size: 0.84rem;
@@ -1584,6 +1589,10 @@
         background: #e6edf3;
       }
 
+      .pitch-dot.vad {
+        background: #7ae8a0;
+      }
+
       .pitch-legend-meta {
         margin-left: auto;
       }
@@ -1965,6 +1974,7 @@
             <span><i class="pitch-dot pitch"></i>基頻</span>
             <span><i class="pitch-dot intensity"></i>強度</span>
             <span><i class="pitch-dot text"></i>文字</span>
+            <span><i class="pitch-dot vad"></i>VAD範圍</span>
             <span id="pitch-vis-meta" class="pitch-legend-meta"></span>
           </div>
           <div id="pitch-paras" class="pitch-paras"></div>
@@ -2058,7 +2068,7 @@
       </form>
     </dialog>
 
-    <script src="./app.js?v=24" type="module"></script>
-    <script src="./voice.js?v=22" type="module"></script>
+    <script src="./app.js?v=25" type="module"></script>
+    <script src="./voice.js?v=23" type="module"></script>
   </body>
 </html>
