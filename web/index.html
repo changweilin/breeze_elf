@@ -1014,14 +1014,25 @@
       }
 
       .voice-desc-toggle {
-        width: 24px;
-        height: 24px;
+        flex: none;
+        /* Match the title's height and stay a true circle: the global
+           button{min-height:48px} would otherwise stretch it into an ellipse. */
+        width: 1.45rem;
+        height: 1.45rem;
+        min-width: 0;
+        min-height: 0;
+        aspect-ratio: 1 / 1;
         padding: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
         border: 1px solid var(--line);
         border-radius: 50%;
         background: transparent;
         color: var(--muted);
-        font-size: 0.82rem;
+        font-size: 0.86rem;
+        font-style: italic;
+        font-weight: 700;
         line-height: 1;
         cursor: pointer;
       }
@@ -1093,6 +1104,70 @@
         width: 100%;
         resize: vertical;
         line-height: 1.5;
+      }
+
+      /* 簡譜唱歌:one sentence per row, with the 簡譜 (top) and 文字 (bottom) each
+         separately editable — mirrors the 逐字稿 簡譜 page. */
+      .sing-blocks {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .sing-block {
+        display: flex;
+        align-items: stretch;
+        gap: 8px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 6px;
+        background: var(--bg);
+      }
+
+      .sing-block-fields {
+        flex: 1 1 auto;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .sing-field {
+        width: 100%;
+        min-height: 34px;
+        padding: 6px 9px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--panel);
+        color: var(--ink);
+        font: inherit;
+      }
+
+      .sing-field.jianpu {
+        letter-spacing: 0.06em;
+        color: var(--accent, var(--ink));
+        font-weight: 700;
+      }
+
+      .sing-field.lyric {
+        font-size: 1.05rem;
+      }
+
+      .sing-block-del {
+        flex: none;
+        align-self: center;
+        width: 1.9rem;
+        height: 1.9rem;
+        min-width: 0;
+        min-height: 0;
+        aspect-ratio: 1 / 1;
+        padding: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 50%;
+        background: transparent;
+        color: var(--muted);
       }
 
       .voice-fav {
@@ -1730,16 +1805,17 @@
       <section id="vpanel-sing" class="voice-card vpanel" hidden>
         <div class="voice-card-title">
           <h2>簡譜唱歌</h2>
-          <button class="voice-desc-toggle" type="button" aria-expanded="false" aria-label="顯示說明" title="顯示說明">ⓘ</button>
+          <button class="voice-desc-toggle" type="button" aria-expanded="false" aria-label="顯示說明" title="顯示說明">i</button>
         </div>
         <p class="voice-hint voice-desc" hidden>
-          上傳逐字稿(含音高的 .json),或直接編輯下面的簡譜,用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」唱出來。每行一個字:<code>字 簡譜 秒數</code>(例:<code>小 1 0.4</code>;休止用 <code>- 0 0.3</code>;高八度加 <code>'</code>、低八度加 <code>,</code>)。想依實測音高、抑揚頓挫演唱,請改用「基頻唱歌」。
+          上傳逐字稿(含音高的 .json),或直接編輯下面的簡譜:<strong>一句一排</strong>,上排是<strong>簡譜</strong>(空格分隔,如 <code>1 1 5</code>;滑音用 <code>3↗5</code>;高八度加 <code>'</code>、低八度加 <code>,</code>),下排是<strong>文字</strong>(逐字),兩者可各自編輯,用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」唱出來。想依實測音高、抑揚頓挫演唱,請改用「基頻唱歌」。
         </p>
         <div class="voice-source">
           <button id="sing-upload" type="button">⤵ 上傳逐字稿 JSON</button>
         </div>
         <input id="sing-file" class="visually-hidden" type="file" accept="application/json,.json" />
-        <textarea id="sing-score" class="voice-textarea" rows="6" placeholder="小 1 0.4&#10;星 2 0.4&#10;星 3 0.4&#10;眨 3 0.4"></textarea>
+        <div id="sing-blocks" class="sing-blocks"></div>
+        <button id="sing-add" type="button" class="mini">＋ 新增一句</button>
         <div class="voice-params">
           <label class="voice-param">基音 Hz
             <input id="sing-tonic" type="number" min="80" max="600" step="1" class="voice-input" placeholder="自動" />
@@ -1761,7 +1837,7 @@
       <section id="vpanel-pitch" class="voice-card vpanel" hidden>
         <div class="voice-card-title">
           <h2>基頻唱歌</h2>
-          <button class="voice-desc-toggle" type="button" aria-expanded="false" aria-label="顯示說明" title="顯示說明">ⓘ</button>
+          <button class="voice-desc-toggle" type="button" aria-expanded="false" aria-label="顯示說明" title="顯示說明">i</button>
         </div>
         <p class="voice-hint voice-desc" hidden>
           載入「基頻分析(.csv)」後,下方會按段落完整呈現<strong>基頻</strong>(青色音高曲線)、<strong>強度</strong>(橘色填色)與<strong>文字</strong>(上方標記)的對應關係,再用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」依實測音高、抑揚頓挫與氣音重新唱出來。CSV 由逐字稿頁「後處理」後匯出。
@@ -1875,7 +1951,7 @@
       </form>
     </dialog>
 
-    <script src="./app.js?v=22" type="module"></script>
-    <script src="./voice.js?v=18" type="module"></script>
+    <script src="./app.js?v=23" type="module"></script>
+    <script src="./voice.js?v=20" type="module"></script>
   </body>
 </html>

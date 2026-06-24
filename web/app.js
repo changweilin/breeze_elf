@@ -2094,14 +2094,21 @@ function hasAnalysis() {
   return state.analysisSpectra.some((spectro) => spectro && Array.isArray(spectro.times));
 }
 
-// Build the 基頻分析 CSV: one row per time point with 時間/基頻/強度/文字.
+// Build the 基頻分析 CSV: one row per time point with 時間/基頻/強度/文字. Blocks
+// (段落) are separated by a blank line so 基頻唱歌 can segment by paragraph and
+// never mistakes a wide time bin in one block for a paragraph break.
 function buildPitchCsv() {
   const rows = ["time_seconds,hz,intensity,text"];
+  let emitted = false;
   state.transcriptBlocks.forEach((block, index) => {
     const spectro = state.analysisSpectra[index];
-    if (!spectro || !Array.isArray(spectro.times)) {
+    if (!spectro || !Array.isArray(spectro.times) || !spectro.times.length) {
       return;
     }
+    if (emitted) {
+      rows.push(""); // blank line = paragraph break between blocks
+    }
+    emitted = true;
     const base = Number.isFinite(block.startSeconds) ? block.startSeconds : 0;
     const f0 = Array.isArray(spectro.f0) ? spectro.f0 : [];
     const intensity = Array.isArray(spectro.intensity) ? spectro.intensity : [];

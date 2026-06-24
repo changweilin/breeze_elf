@@ -235,11 +235,18 @@ class MockVoiceEngine:
         embedding: bytes,
         use_measured_hz: bool = False,
         speed: float = 1.0,
+        target_median_hz: float = 0.0,
     ) -> VoiceAudio:
         profile = _load_mock_embedding(embedding)
-        if not tonic_hz or tonic_hz <= 0:
-            tonic_hz = float(profile.get("medianHz") or _DEFAULT_VOICE_HZ)
-        resolved = _trim_edge_rests(_resolve_song_notes(notes, tonic_hz, use_measured_hz))
+        # The original median is the requested 主音 (the recording's pitch); fall
+        # back to the voice's own pitch only for resolving relative 簡譜 degrees.
+        original_median = float(tonic_hz) if tonic_hz and tonic_hz > 0 else 0.0
+        resolve_tonic = original_median or float(profile.get("medianHz") or _DEFAULT_VOICE_HZ)
+        resolved = _trim_edge_rests(_resolve_song_notes(notes, resolve_tonic, use_measured_hz))
+        if not original_median:
+            original_median = _median_voiced_freq(resolved)  # supply it from the notes
+        target_median = float(target_median_hz) or float(profile.get("medianHz") or 0.0)
+        resolved = _correct_song_register(resolved, original_median, target_median)
         target_rms = float(profile.get("rms") or 0.0)
         # Real words in the OS voice (the same voice 文字轉換 uses), pitched to
         # the melody; falls back to the synthetic vowel voice when unavailable.
@@ -421,11 +428,15 @@ class OpenVoiceEngine:
         embedding: bytes,
         use_measured_hz: bool = False,
         speed: float = 1.0,
+        target_median_hz: float = 0.0,
     ) -> VoiceAudio:
         self.load()
-        if not tonic_hz or tonic_hz <= 0:
-            tonic_hz = _DEFAULT_VOICE_HZ
-        resolved = _trim_edge_rests(_resolve_song_notes(notes, tonic_hz, use_measured_hz))
+        original_median = float(tonic_hz) if tonic_hz and tonic_hz > 0 else 0.0
+        resolve_tonic = original_median or _DEFAULT_VOICE_HZ
+        resolved = _trim_edge_rests(_resolve_song_notes(notes, resolve_tonic, use_measured_hz))
+        if not original_median:
+            original_median = _median_voiced_freq(resolved)
+        resolved = _correct_song_register(resolved, original_median, float(target_median_hz))
         # Sing a real-word base in the OS voice so the tone-color converter has
         # actual speech to re-voice (far more natural than converting a synth
         # buzz); falls back to the synthetic voice when no OS voice is available.
@@ -777,40 +788,83 @@ def _glide_semitones(note: dict) -> tuple[float, float] | None:
     return None
 
 
+def _glide_position(note: dict) -> float:
+    """The glide's slide position (0–1) the 逐字稿 measured, or 0.5 (middle)."""
+    value = note.get("glideMid")
+    try:
+        position = float(value)
+    except (TypeError, ValueError):
+        return 0.5
+    return position if 0.0 < position < 1.0 else 0.5
+
+
+def _glide_contour(start_hz: float, end_hz: float, position: float = 0.5) -> list[float]:
+    """Portamento curve: hold ``start_hz``, slide, then hold ``end_hz``, with the
+    slide centred at ``position`` (a 0–1 fraction of the note).
+
+    The 逐字稿 finds the slide's real position from the pitch's rate of change, so
+    placing the move there reproduces the glide faithfully instead of always
+    sliding through the middle."""
+    p = position if (position and 0.0 < position < 1.0) else 0.5
+    p = min(0.85, max(0.15, p))
+    width = 0.18  # half-width of the slide window, as a fraction of the note
+    points = []
+    steps = 9
+    for k in range(steps):
+        frac = k / (steps - 1)
+        if frac <= p - width:
+            points.append(start_hz)
+        elif frac >= p + width:
+            points.append(end_hz)
+        else:
+            local = (frac - (p - width)) / (2.0 * width)
+            points.append(start_hz + (end_hz - start_hz) * local)
+    return points
+
+
 def _resolve_contour(note: dict, tonic_hz: float, use_measured_hz: bool) -> list[float] | None:
     """Resolve a note's pitch *curve* in Hz (≥1 point), or ``None`` for a rest.
 
     Measured singing follows the recorded contour (``contour`` list, or
     ``startHz``/``endHz``, or a single ``hz``) so the syllable keeps its
     抑揚頓挫; 簡譜 singing follows the degree(s), rendering a glide (``3↗5``) as a
-    two-point slide and an ordinary degree as a single sustained pitch.
+    portamento that holds the start, slides, then settles, and an ordinary degree
+    as a single sustained pitch.
     """
+    # Frequencies are returned raw (un-clamped): the singable-range handling and
+    # any octave register correction happen once in _correct_song_register, so a
+    # note an octave out of range can be folded back in tune instead of pinned
+    # (clamped) to a wrong pitch.
     measured = note.get("hz")
     measured = float(measured) if measured else 0.0
 
     if use_measured_hz:
         contour = note.get("contour")
         if isinstance(contour, (list, tuple)):
-            points = [_clamp_voice_hz(float(hz)) for hz in contour if hz and float(hz) > 0]
+            points = [float(hz) for hz in contour if hz and float(hz) > 0]
             if points:
                 return points
         start, end = note.get("startHz"), note.get("endHz")
         if start and end and float(start) > 0 and float(end) > 0:
-            return [_clamp_voice_hz(float(start)), _clamp_voice_hz(float(end))]
+            return _glide_contour(float(start), float(end), _glide_position(note))
         if measured > 0:
-            return [_clamp_voice_hz(measured)]
+            return [measured]
         return None
 
     glide = _glide_semitones(note)
     if glide is not None and tonic_hz > 0:
-        return [_clamp_voice_hz(tonic_hz * 2.0 ** (semi / 12.0)) for semi in glide]
+        return _glide_contour(
+            tonic_hz * 2.0 ** (glide[0] / 12.0),
+            tonic_hz * 2.0 ** (glide[1] / 12.0),
+            _glide_position(note),
+        )
     from .audio import jianpu_to_semitones
 
     semitones = jianpu_to_semitones(note.get("jianpu"))
     if semitones is not None and tonic_hz > 0:
-        return [_clamp_voice_hz(tonic_hz * 2.0 ** (semitones / 12.0))]
+        return [tonic_hz * 2.0 ** (semitones / 12.0)]
     if measured > 0:
-        return [_clamp_voice_hz(measured)]
+        return [measured]
     return None
 
 
@@ -855,6 +909,64 @@ def _resolve_song_notes(
                 "intensity": float(note.get("intensity") or 0.0),
             }
         )
+    return resolved
+
+
+def _median_voiced_freq(resolved: list[dict]) -> float:
+    """Median of every voiced note's contour — used as the song's own pitch when
+    the JSON/CSV gave no 主音 (so the register correction still has a reference)."""
+    points = [
+        hz
+        for note in resolved
+        if isinstance(note.get("contour"), (list, tuple))
+        for hz in note["contour"]
+        if hz and hz > 0
+    ]
+    return float(np.median(points)) if points else 0.0
+
+
+def _fold_hz_into_range(hz: float) -> float:
+    """Bring ``hz`` inside the singable range by whole octaves — keeps the note in
+    tune (same pitch class) instead of clamping it to a wrong pitch."""
+    if hz <= 0:
+        return hz
+    while hz > _MAX_VOICE_HZ:
+        hz /= 2.0
+    while hz < _MIN_VOICE_HZ:
+        hz *= 2.0
+    return hz
+
+
+def _correct_song_register(
+    resolved: list[dict], original_median: float, target_median: float
+) -> list[dict]:
+    """Calibrate the output pitch against the original and target median pitches.
+
+    The whole melody is shifted by the nearest **whole octave** that moves the
+    original median toward the target voice's median (so the song sits in the
+    target's register without detuning or changing the 高低落差), then any note
+    still outside the singable range is folded back by octaves. Shifting only by
+    whole octaves keeps every interval intact, so it never makes the song sound
+    sharp/flat — only an octave higher or lower when the voices are far apart."""
+    shift = 0
+    if original_median > 0 and target_median > 0:
+        shift = int(round(math.log2(target_median / original_median)))
+    factor = 2.0 ** shift
+    if factor == 1.0:
+        # No register shift, but still fold any out-of-range note into the octave.
+        needs_fold = any(
+            isinstance(n.get("contour"), (list, tuple))
+            and any(hz > _MAX_VOICE_HZ or hz < _MIN_VOICE_HZ for hz in n["contour"])
+            for n in resolved
+        )
+        if not needs_fold:
+            return resolved
+    for note in resolved:
+        contour = note.get("contour")
+        if isinstance(contour, (list, tuple)) and contour:
+            folded = [_fold_hz_into_range(hz * factor) for hz in contour]
+            note["contour"] = folded
+            note["freq"] = folded[0]
     return resolved
 
 

@@ -13,8 +13,10 @@ from breeze_elf import main
 from breeze_elf.voice import (
     MockVoiceEngine,
     _breath_sound,
+    _correct_song_register,
     _estimate_median_hz,
     _fit_duration,
+    _fold_hz_into_range,
     _glide_semitones,
     _pitch_shift,
     _resample_rate,
@@ -174,6 +176,33 @@ class MockEngineTests(unittest.TestCase):
         result = self.engine.synthesize_song(notes, 220.0, embedding)
         self.assertAlmostEqual(result.samples.size / result.sample_rate, 0.4, delta=0.05)
 
+    def test_fold_hz_into_range_keeps_pitch_class(self):
+        self.assertAlmostEqual(_fold_hz_into_range(500.0), 250.0, delta=0.1)  # octave down
+        self.assertAlmostEqual(_fold_hz_into_range(40.0), 80.0, delta=0.1)  # octave up
+
+    def test_correct_song_register_aligns_octave_to_target(self):
+        # Original median 150, target 300 → shift the whole melody up one octave,
+        # keeping intervals (150→300, 180→360).
+        notes = [
+            {"kind": "voiced", "contour": [150.0], "freq": 150.0},
+            {"kind": "voiced", "contour": [180.0], "freq": 180.0},
+        ]
+        _correct_song_register(notes, 150.0, 300.0)
+        self.assertAlmostEqual(notes[0]["contour"][0], 300.0, delta=2.0)
+        self.assertAlmostEqual(notes[1]["contour"][0], 360.0, delta=2.0)
+
+    def test_correct_song_register_small_diff_no_shift(self):
+        # A modest median difference must NOT transpose (that caused 太高/小孩聲).
+        notes = [{"kind": "voiced", "contour": [200.0], "freq": 200.0}]
+        _correct_song_register(notes, 200.0, 230.0)
+        self.assertAlmostEqual(notes[0]["contour"][0], 200.0, delta=1.0)
+
+    def test_correct_song_register_folds_out_of_range_note(self):
+        # An out-of-range note is folded by octaves (in tune), not clamped.
+        notes = [{"kind": "voiced", "contour": [520.0], "freq": 520.0}]
+        _correct_song_register(notes, 250.0, 250.0)
+        self.assertAlmostEqual(notes[0]["contour"][0], 260.0, delta=1.0)
+
     def test_trim_edge_rests_removes_only_head_and_tail(self):
         from breeze_elf.voice import _trim_edge_rests
 
@@ -223,11 +252,25 @@ class MockEngineTests(unittest.TestCase):
         self.assertIsNone(_glide_semitones({"jianpu": "3"}))  # steady note, not a glide
 
     def test_resolve_song_notes_builds_contour_kind_and_breath(self):
+        # A 簡譜 glide is a hold → slide → hold portamento: it starts on the first
+        # degree, holds, then settles on the second.
         glide = _resolve_song_notes([{"char": "啦", "jianpu": "1↗5", "durationSeconds": 0.5}], 220.0, False)
         self.assertEqual(glide[0]["kind"], "voiced")
-        self.assertEqual(len(glide[0]["contour"]), 2)
+        self.assertGreater(len(glide[0]["contour"]), 3)
         self.assertAlmostEqual(glide[0]["contour"][0], 220.0, delta=2.0)
-        self.assertAlmostEqual(glide[0]["contour"][1], 220.0 * 2 ** (7 / 12), delta=2.0)
+        self.assertAlmostEqual(glide[0]["contour"][1], 220.0, delta=2.0)  # held start
+        self.assertAlmostEqual(glide[0]["contour"][-1], 220.0 * 2 ** (7 / 12), delta=2.0)
+
+    def test_glide_position_places_the_slide_late(self):
+        # With glideMid late (0.8) the note holds the start most of the way, then
+        # slides near the end — the contour's first half stays on the start pitch.
+        notes = _resolve_song_notes(
+            [{"char": "啦", "jianpu": "1↗5", "durationSeconds": 0.5, "glideMid": 0.8}], 220.0, False
+        )
+        contour = notes[0]["contour"]
+        mid = contour[len(contour) // 2]
+        self.assertAlmostEqual(mid, 220.0, delta=4.0)  # still on the start pitch mid-way
+        self.assertAlmostEqual(contour[-1], 220.0 * 2 ** (7 / 12), delta=2.0)
 
         measured = _resolve_song_notes(
             [{"char": "啦", "contour": [200, 260, 320], "durationSeconds": 0.5}], 0.0, True

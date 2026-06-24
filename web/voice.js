@@ -66,7 +66,8 @@ const els = {
   // 簡譜 singing
   singUpload: document.querySelector("#sing-upload"),
   singFile: document.querySelector("#sing-file"),
-  singScore: document.querySelector("#sing-score"),
+  singBlocks: document.querySelector("#sing-blocks"),
+  singAdd: document.querySelector("#sing-add"),
   singTonic: document.querySelector("#sing-tonic"),
   singSpeed: document.querySelector("#sing-speed"),
   singRun: document.querySelector("#sing-run"),
@@ -115,6 +116,9 @@ const state = {
   pitchRows: null,
   pitchNotes: null,
   pitchTonic: 0,
+  // 簡譜唱歌 state: one editable sentence per row, each with its 文字 + 簡譜 (and
+  // per-character durations / glide positions carried from the loaded 逐字稿).
+  singBlocks: [],
 };
 
 // --------------------------------------------------------------------------- //
@@ -871,11 +875,11 @@ async function loadTextFile(file) {
   }
 }
 
-// Turn a transcript JSON (the 逐字稿 download/remote-save bundle) into the
-// editable "字 簡譜 秒" score. 主音 defaults to the *original* recording's pitch so
-// the melody is reproduced at its own key (transposing it up into the target's
-// register made it sound too high / childlike); silences between words become
-// rests so the sung clip keeps the original timing.
+// Turn a transcript JSON (the 逐字稿 bundle) into one editable sentence per row.
+// Each row keeps a 簡譜 line (degrees, glides as 3↗5) and a 文字 line, separately
+// editable, plus per-character durations + glide positions and the silence before
+// it (so the sung clip keeps the original timing). 主音 defaults to the *original*
+// recording's pitch so the melody stays in its own key.
 async function loadTranscriptFile(file) {
   if (!file) {
     return;
@@ -896,19 +900,24 @@ async function loadTranscriptFile(file) {
       : Array.isArray(doc)
         ? doc
         : [];
-  const GAP_MIN = 0.08; // insert a rest for silences longer than this
-  const lines = [];
+  const singBlocks = [];
   const medians = [];
   let sungCount = 0;
-  let prevEnd = null;
+  let lastBlockEnd = null;
   for (const block of blocks) {
     if (block.pitch && Number.isFinite(Number(block.pitch.medianHz))) {
       medians.push(Number(block.pitch.medianHz));
     }
     const chars = Array.isArray(block.characters) ? block.characters : [];
+    const texts = [];
+    const tokens = [];
+    const durations = [];
+    const glides = [];
+    let blockStart = null;
+    let blockEnd = null;
     for (const entry of chars) {
-      const char = (entry.char || "").trim() || "-";
-      const jianpu = (entry.jianpu || "").trim() || "0";
+      const char = (entry.char || "").trim();
+      if (!char) continue;
       const start = Number(entry.startSeconds);
       const end = Number(entry.endSeconds);
       const rawDur = Number(entry.durationSeconds);
@@ -918,33 +927,138 @@ async function loadTranscriptFile(file) {
           : Number.isFinite(start) && Number.isFinite(end) && end > start
             ? end - start
             : 0.4;
-      // Keep the original timing: a rest for the silence before this character.
-      if (prevEnd != null && Number.isFinite(start) && start - prevEnd > GAP_MIN) {
-        lines.push(`- 0 ${(start - prevEnd).toFixed(2)}`);
+      if (blockStart == null && Number.isFinite(start)) {
+        blockStart = start;
       }
-      lines.push(`${char} ${jianpu} ${duration.toFixed(2)}`);
+      blockEnd = Number.isFinite(end) ? end : (Number.isFinite(start) ? start + duration : blockEnd);
+      texts.push(char);
+      tokens.push((entry.jianpu || "").trim() || "0");
+      durations.push(Number(duration.toFixed(3)));
+      const mid = Number(entry.glideMid);
+      glides.push(entry.isGlide && Number.isFinite(mid) ? mid : null);
       sungCount += 1;
-      if (Number.isFinite(end)) {
-        prevEnd = end;
-      } else if (Number.isFinite(start)) {
-        prevEnd = start + duration;
-      }
+    }
+    if (!texts.length) continue;
+    // Silence before this sentence (kept as a rest so timing matches the original).
+    const leadRest =
+      singBlocks.length && lastBlockEnd != null && blockStart != null
+        ? Math.max(0, blockStart - lastBlockEnd)
+        : 0;
+    singBlocks.push({
+      text: texts.join(""),
+      jianpu: tokens.join(" "),
+      durations,
+      glides,
+      leadRest: leadRest > 0.08 ? Number(leadRest.toFixed(3)) : 0,
+    });
+    if (blockEnd != null) {
+      lastBlockEnd = blockEnd;
     }
   }
   if (!sungCount) {
     setStatus("逐字稿裡找不到音高資料", "error");
     return;
   }
-  els.singScore.value = lines.join("\n");
+  state.singBlocks = singBlocks;
+  renderSingBlocks();
   const tonic = medians.length ? Math.round(median(medians)) : 0;
   els.singTonic.value = tonic ? String(tonic) : "";
   els.singTonic.placeholder = "自動";
   refreshButtons();
   setStatus(
-    `已載入逐字稿「${file.name}」,共 ${sungCount} 個音${
+    `已載入逐字稿「${file.name}」,共 ${sungCount} 個音、${singBlocks.length} 句${
       tonic ? ` · 以原曲音高 ${tonic} Hz 演唱(可調整基音 Hz)` : ""
     }`,
   );
+}
+
+// Render one editable row per sentence: 簡譜 (top) + 文字 (bottom), each editable.
+function renderSingBlocks() {
+  const host = els.singBlocks;
+  if (!host) {
+    return;
+  }
+  host.replaceChildren();
+  if (!state.singBlocks.length) {
+    state.singBlocks.push({ text: "", jianpu: "", durations: [], glides: [], leadRest: 0 });
+  }
+  state.singBlocks.forEach((block, index) => {
+    const row = document.createElement("div");
+    row.className = "sing-block";
+
+    const fields = document.createElement("div");
+    fields.className = "sing-block-fields";
+
+    const jianpu = document.createElement("input");
+    jianpu.className = "sing-field jianpu";
+    jianpu.type = "text";
+    jianpu.value = block.jianpu;
+    jianpu.placeholder = "1 1 5 5 6 6 5";
+    jianpu.setAttribute("aria-label", `第 ${index + 1} 句的簡譜`);
+    jianpu.addEventListener("input", () => {
+      block.jianpu = jianpu.value;
+      refreshButtons();
+    });
+
+    const lyric = document.createElement("input");
+    lyric.className = "sing-field lyric";
+    lyric.type = "text";
+    lyric.value = block.text;
+    lyric.placeholder = "小星星亮晶晶";
+    lyric.setAttribute("aria-label", `第 ${index + 1} 句的文字`);
+    lyric.addEventListener("input", () => {
+      block.text = lyric.value;
+      refreshButtons();
+    });
+
+    fields.append(jianpu, lyric);
+
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "sing-block-del";
+    del.textContent = "🗑";
+    del.title = "刪除這一句";
+    del.setAttribute("aria-label", del.title);
+    del.addEventListener("click", () => {
+      state.singBlocks.splice(index, 1);
+      renderSingBlocks();
+      refreshButtons();
+    });
+
+    row.append(fields, del);
+    host.append(row);
+  });
+}
+
+// Rebuild singable notes from the editable rows. Characters and 簡譜 tokens are
+// zipped per sentence; stored per-character durations / glide positions are used
+// when the counts still line up, otherwise the sentence's time is shared evenly.
+function buildSingNotes(blocks) {
+  const notes = [];
+  for (const block of blocks) {
+    const chars = Array.from((block.text || "").trim()).filter((c) => c.trim());
+    const tokens = (block.jianpu || "").trim().split(/\s+/).filter(Boolean);
+    const count = Math.max(chars.length, tokens.length);
+    if (!count) continue;
+    if (notes.length && block.leadRest > 0.08) {
+      notes.push({ char: "-", jianpu: "0", durationSeconds: block.leadRest });
+    }
+    const stored = Array.isArray(block.durations) ? block.durations : [];
+    const aligned = stored.length === count;
+    const total = stored.length ? stored.reduce((a, b) => a + b, 0) : count * 0.4;
+    const glides = Array.isArray(block.glides) ? block.glides : [];
+    for (let i = 0; i < count; i += 1) {
+      const char = chars[i] != null ? chars[i] : "啦";
+      const jianpu = tokens[i] != null ? tokens[i] : tokens[tokens.length - 1] || "1";
+      const duration = aligned && stored[i] ? stored[i] : total / count;
+      const note = { char, jianpu, durationSeconds: Number(duration.toFixed(3)) };
+      if (aligned && glides[i] != null && /[↗↘]/.test(jianpu)) {
+        note.glideMid = glides[i];
+      }
+      notes.push(note);
+    }
+  }
+  return notes;
 }
 
 function median(values) {
@@ -1004,12 +1118,14 @@ function buildNotesFromRows(rows) {
   let i = 0;
   let prevRowTime = null;
   while (i < rows.length) {
-    // A jump in time between consecutive rows is silence the CSV leaves out (e.g.
-    // the gap between transcript paragraphs/blocks). Keep it as a rest so the sung
-    // clip stays aligned in time with the original instead of running short.
+    // The silence between paragraphs/blocks (a blank line in the CSV, or — for
+    // older CSVs — a big jump in time) becomes a rest so the sung clip stays
+    // aligned with the original. We deliberately do NOT split on ordinary bin
+    // spacing: that varies per block (a long block has wide bins) and would
+    // otherwise chop a character into fragments and drop its lyric.
     if (prevRowTime != null) {
       const gap = rows[i].time - prevRowTime;
-      if (gap > 1.5 * binStep) {
+      if ((rows[i].blockStart || gap > 0.35) && gap > binStep) {
         notes.push({ char: "-", kind: "rest", durationSeconds: gap - binStep });
       }
     }
@@ -1020,7 +1136,7 @@ function buildNotesFromRows(rows) {
     while (
       j < rows.length &&
       (rows[j].text || "").trim() === char &&
-      (j === i || rows[j].time - rows[j - 1].time <= 1.5 * binStep)
+      (j === i || !rows[j].blockStart)
     ) {
       const row = rows[j];
       if (Number.isFinite(row.hz) && row.hz > 0) {
@@ -1093,21 +1209,14 @@ async function loadAnalysisFile(file) {
   );
 }
 
-// Split rows into paragraphs at the big time gaps the CSV leaves between
-// transcript blocks (it has no rows during inter-block silence), mirroring how
-// the 逐字稿 基頻分析 view shows one panel per 段落.
+// Split rows into paragraphs at the block markers (blank lines in the CSV), or —
+// for older CSVs without markers — at big time gaps, mirroring how the 逐字稿
+// 基頻分析 view shows one panel per 段落.
 function splitPitchParagraphs(rows) {
-  const deltas = [];
-  for (let k = 1; k < rows.length; k += 1) {
-    const dt = rows[k].time - rows[k - 1].time;
-    if (dt > 0 && dt < 1) deltas.push(dt);
-  }
-  const binStep = deltas.length ? median(deltas) : 0.02;
-  const gap = Math.max(0.35, binStep * 8);
   const paras = [];
   let current = [rows[0]];
   for (let k = 1; k < rows.length; k += 1) {
-    if (rows[k].time - rows[k - 1].time > gap) {
+    if (rows[k].blockStart || rows[k].time - rows[k - 1].time > 0.35) {
       paras.push(current);
       current = [];
     }
@@ -1275,21 +1384,25 @@ function subsampleContour(values, maxPoints) {
   return out;
 }
 
+// Parse the 基頻分析 CSV. A blank line marks a paragraph (block) break — the first
+// data row after it is flagged ``blockStart`` so segmentation never has to guess
+// boundaries from the (per-block-variable) time-bin spacing.
 function parsePitchCsv(textData) {
-  const lines = textData.split(/\r?\n/).filter((line) => line.length);
-  if (!lines.length) {
-    return [];
-  }
-  let start = 0;
-  if (/time/i.test(lines[0]) && /hz/i.test(lines[0])) {
-    start = 1; // skip the header row
-  }
   const rows = [];
-  for (let i = start; i < lines.length; i += 1) {
-    const cells = splitCsvLine(lines[i]);
+  let seenData = false;
+  let blockBreak = false;
+  for (const raw of textData.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) {
+      if (seenData) {
+        blockBreak = true; // blank line = paragraph break
+      }
+      continue;
+    }
+    const cells = splitCsvLine(line);
     const time = Number.parseFloat(cells[0]);
     if (!Number.isFinite(time)) {
-      continue;
+      continue; // header row or stray line
     }
     const hz = Number.parseFloat(cells[1]);
     const intensity = Number.parseFloat(cells[2]);
@@ -1298,7 +1411,10 @@ function parsePitchCsv(textData) {
       hz: Number.isFinite(hz) ? hz : null,
       intensity: Number.isFinite(intensity) ? intensity : 0,
       text: (cells[3] || "").trim(),
+      blockStart: blockBreak,
     });
+    seenData = true;
+    blockBreak = false;
   }
   return rows;
 }
@@ -1329,28 +1445,6 @@ function splitCsvLine(line) {
   }
   cells.push(current);
   return cells;
-}
-
-function parseScore(text) {
-  const notes = [];
-  for (const raw of text.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (!line) {
-      continue;
-    }
-    const parts = line.split(/\s+/);
-    const duration = parts[2] ? Number.parseFloat(parts[2]) : null;
-    // Optional 4th column = measured Hz (from a loaded 基頻分析); when present it
-    // overrides the 簡譜 so the note follows the actual recorded pitch.
-    const hz = parts[3] ? Number.parseFloat(parts[3]) : null;
-    notes.push({
-      char: parts[0] || "",
-      jianpu: parts[1] || "",
-      durationSeconds: Number.isFinite(duration) ? duration : null,
-      hz: Number.isFinite(hz) && hz > 0 ? hz : null,
-    });
-  }
-  return notes;
 }
 
 // Shared singing job: POST the notes to /api/voice/sing and show the result in
@@ -1384,19 +1478,16 @@ async function performSing({ notes, useMeasured, tonicHz, speed, resultKind }) {
   });
 }
 
-// 簡譜唱歌: sing the editable 簡譜 score (relative degrees, transposed into the
-// target voice's range); a 4th Hz column, if present, overrides with measured pitch.
+// 簡譜唱歌: sing the editable per-sentence rows (relative degrees, transposed into
+// the target voice's register; glides ride along as 3↗5 with their measured position).
 async function runSing() {
   if (!state.selectedId) {
     setStatus("請先在聲音庫選擇或新增一個目標聲音", "error");
     return;
   }
-  const notes = parseScore(els.singScore.value);
-  const useMeasured = notes.some((note) => note.hz && note.hz > 0);
+  const notes = buildSingNotes(state.singBlocks);
   const singable = notes.some(
-    (note) =>
-      (note.hz && note.hz > 0) ||
-      (note.jianpu && note.jianpu !== "0" && note.jianpu !== "-"),
+    (note) => note.jianpu && note.jianpu !== "0" && note.jianpu !== "-",
   );
   if (!singable) {
     setStatus("沒有可唱的內容,請先上傳逐字稿或輸入簡譜", "error");
@@ -1404,7 +1495,7 @@ async function runSing() {
   }
   await performSing({
     notes,
-    useMeasured,
+    useMeasured: false,
     tonicHz: Number.parseFloat(els.singTonic.value),
     speed: positiveNumber(els.singSpeed.value),
     resultKind: "sing",
@@ -1677,7 +1768,10 @@ function refreshButtons() {
   els.cvRecord.disabled = !idle;
   els.cvUpload.disabled = !idle;
   els.ttsRun.disabled = !(idle && els.ttsText.value.trim() && state.selectedId);
-  els.singRun.disabled = !(idle && els.singScore.value.trim() && state.selectedId);
+  const hasScore = state.singBlocks.some(
+    (block) => (block.text || "").trim() || (block.jianpu || "").trim(),
+  );
+  els.singRun.disabled = !(idle && hasScore && state.selectedId);
   els.pitchRun.disabled = !(idle && state.pitchNotes && state.pitchNotes.length && state.selectedId);
 }
 
@@ -1883,7 +1977,11 @@ els.singFile.addEventListener("change", (event) => {
   event.target.value = "";
   void loadTranscriptFile(file);
 });
-els.singScore.addEventListener("input", refreshButtons);
+els.singAdd.addEventListener("click", () => {
+  state.singBlocks.push({ text: "", jianpu: "", durations: [], glides: [], leadRest: 0 });
+  renderSingBlocks();
+  refreshButtons();
+});
 els.singRun.addEventListener("click", runSing);
 els.singDownload.addEventListener("click", () =>
   downloadUrl(state.singResultUrl, `breeze-voice-sing-${Date.now()}.wav`),
@@ -1926,6 +2024,9 @@ document.querySelectorAll("#page-voice .voice-desc-toggle").forEach((button) => 
     button.title = show ? "隱藏說明" : "顯示說明";
   });
 });
+
+// Seed the 簡譜唱歌 editor with one empty sentence row so manual entry works.
+renderSingBlocks();
 
 // Wire each player's ⋮ menu and close any open menu on an outside click.
 document.querySelectorAll("#page-voice .player-menu").forEach(wirePlayerMenu);

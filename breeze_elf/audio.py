@@ -73,6 +73,9 @@ class SegmentAnalysis:
     intensity: float
     intensity_start: float
     intensity_end: float
+    # Where the slide happens, as a fraction (0–1) of the segment, found from the
+    # pitch's rate of change; ``None`` for a steady (non-glide) note.
+    glide_position: float | None = None
 
 
 @dataclass(frozen=True)
@@ -505,24 +508,66 @@ def pitch_cents_off(hz: float | None, tonic_hz: float | None) -> float | None:
     return (semitones - round(semitones)) * 100.0
 
 
+def _glide_edges(
+    hz_points: list[float], edge_fraction: float
+) -> tuple[float | None, float | None, float | None]:
+    """Locate a slide from the pitch track's *rate of change*.
+
+    Returns ``(start_hz, end_hz, position)``. The start/end pitches are the medians
+    of the stable plateaus before and after the move (so they are not skewed by
+    the slide itself, unlike a fixed front-/back-third), and ``position`` is the
+    fraction of the segment where the pitch crosses halfway between them — the real
+    place the glide happens. ``position`` is ``None`` for a steady note (the
+    endpoints sit within a semitone, so it is not a glide)."""
+    n = len(hz_points)
+    if n == 0:
+        return None, None, None
+    if n < 4:
+        edge = max(1, round(n * edge_fraction))
+        return float(np.median(hz_points[:edge])), float(np.median(hz_points[-edge:])), None
+
+    logs = np.log2(np.asarray(hz_points, dtype=np.float64))
+    total = float(logs[-1] - logs[0])
+    if abs(total) * 12.0 < 1.0:  # < 1 semitone end-to-end → steady, not a glide
+        med = float(np.median(hz_points))
+        return med, med, None
+
+    tol = 1.0 / 12.0  # one semitone, in octaves
+    s_end = 0
+    while s_end + 1 < n and abs(logs[s_end + 1] - logs[0]) <= tol:
+        s_end += 1
+    e_start = n - 1
+    while e_start - 1 >= 0 and abs(logs[e_start - 1] - logs[-1]) <= tol:
+        e_start -= 1
+    if e_start <= s_end:  # plateaus meet (a continuous slide) → split at the middle
+        s_end = max(0, n // 2 - 1)
+        e_start = min(n - 1, s_end + 1)
+
+    start_hz = float(np.median(hz_points[: s_end + 1]))
+    end_hz = float(np.median(hz_points[e_start:]))
+    half = logs[0] + total / 2.0
+    cross = n // 2
+    for index in range(n):
+        if (total > 0 and logs[index] >= half) or (total < 0 and logs[index] <= half):
+            cross = index
+            break
+    position = min(0.9, max(0.1, cross / (n - 1)))
+    return start_hz, end_hz, position
+
+
 def analyze_segment(
     samples: np.ndarray,
     sample_rate: int,
     *,
     edge_fraction: float = 0.34,
 ) -> SegmentAnalysis:
-    """Measure pitch range, slide edges, and loudness envelope of a segment."""
+    """Measure pitch range, slide edges/position, and loudness envelope."""
     if samples.size < 2:
         return SegmentAnalysis(None, None, None, None, None, 0.0, 0.0, 0.0)
 
     summary = summarize_pitch(samples, sample_rate)
     hz_points = [point.hz for point in summary.points if point.hz]
-    start_hz: float | None = None
-    end_hz: float | None = None
-    if hz_points:
-        edge = max(1, round(len(hz_points) * edge_fraction))
-        start_hz = float(np.median(hz_points[:edge]))
-        end_hz = float(np.median(hz_points[-edge:]))
+    start_hz, end_hz, glide_position = _glide_edges(hz_points, edge_fraction)
 
     half = max(1, samples.size // 2)
     return SegmentAnalysis(
@@ -534,6 +579,7 @@ def analyze_segment(
         intensity=calculate_rms(samples),
         intensity_start=calculate_rms(samples[:half]),
         intensity_end=calculate_rms(samples[half:]),
+        glide_position=glide_position,
     )
 
 

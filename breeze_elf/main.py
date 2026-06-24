@@ -103,6 +103,7 @@ class TranscriptCharacter(BaseModel):
     startHz: float | None = None
     endHz: float | None = None
     isGlide: bool | None = None
+    glideMid: float | None = None
     centsOff: float | None = None
     intensity: float | None = None
     intensityStart: float | None = None
@@ -169,6 +170,7 @@ class VoiceSingNote(BaseModel):
     jianpuEnd: str | None = Field(default=None, max_length=16)
     startHz: float | None = None
     endHz: float | None = None
+    glideMid: float | None = None
     contour: list[float] | None = Field(default=None, max_length=64)
     kind: str | None = Field(default=None, max_length=12)
     intensity: float | None = None
@@ -724,12 +726,18 @@ async def voice_sing(payload: VoiceSingRequest) -> JSONResponse:
         raise HTTPException(status_code=400, detail="no singable notes (need 簡譜 or hz)")
     tonic = payload.tonicHz or 0.0
     speed = payload.speed or 1.0
+    target_median = _voice_median_hz(payload.voiceId)
     loop = asyncio.get_running_loop()
     try:
         result = await loop.run_in_executor(
             None,
             lambda: voice_engine.synthesize_song(
-                notes, tonic, embedding, payload.useMeasuredHz, speed=speed
+                notes,
+                tonic,
+                embedding,
+                payload.useMeasuredHz,
+                speed=speed,
+                target_median_hz=target_median,
             ),
         )
     except Exception as exc:
@@ -757,6 +765,29 @@ def _require_embedding(voice_id: str) -> bytes:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail="voice not found") from exc
+
+
+_VOICE_MEDIAN_CACHE: dict[str, float] = {}
+
+
+def _voice_median_hz(voice_id: str) -> float:
+    """The target voice's median pitch, measured from its reference sample and
+    cached. Used to calibrate sung output into the target's register; returns 0
+    when no sample is available (then the register correction is a no-op)."""
+    if voice_id in _VOICE_MEDIAN_CACHE:
+        return _VOICE_MEDIAN_CACHE[voice_id]
+    median = 0.0
+    try:
+        path = voice_sample_path(voice_id, _voice_storage_dir())
+        if path is not None:
+            samples, rate = decode_wav(path.read_bytes())
+            summary = summarize_pitch(samples, rate)
+            if summary.median_hz and math.isfinite(summary.median_hz):
+                median = float(summary.median_hz)
+    except (OSError, ValueError):
+        median = 0.0
+    _VOICE_MEDIAN_CACHE[voice_id] = median
+    return median
 
 
 def _audio_response(result) -> dict[str, Any]:
@@ -1159,11 +1190,44 @@ def _analyzed_character_payload(
         "jianpuStart": hz_to_jianpu(start_hz, tonic),
         "jianpuEnd": hz_to_jianpu(end_hz, tonic),
         "isGlide": is_glide,
+        "glideMid": round(seg.glide_position, 3) if (is_glide and seg.glide_position) else None,
         "centsOff": _round_cents(pitch_cents_off(median, tonic)),
         "intensity": _round_intensity(seg.intensity),
         "intensityStart": _round_intensity(seg.intensity_start),
         "intensityEnd": _round_intensity(seg.intensity_end),
     }
+
+
+def _padded_char_spans(block: dict[str, Any]) -> list[tuple[str, float, float]]:
+    """Each 字's analysis window grown by an attack (before its onset) and a
+    release (after its tail), so 基頻 covers the whole 字 including its start and
+    decay. The growth is capped at half the gap to each neighbour (and to the
+    block edges), so adjacent 字 never overlap / merge."""
+    attack = settings.char_attack_ms / 1000.0
+    release = settings.char_release_ms / 1000.0
+    chars = [
+        (str(c.get("char") or "").strip(), float(c["startSeconds"]), float(c["endSeconds"]))
+        for c in (block.get("characters") or [])
+        if c.get("char") and c.get("startSeconds") is not None and c.get("endSeconds") is not None
+    ]
+    block_start = block.get("startSeconds")
+    block_end = block.get("endSeconds")
+    spans: list[tuple[str, float, float]] = []
+    for index, (char, start, end) in enumerate(chars):
+        prev_end = chars[index - 1][2] if index > 0 else None
+        next_start = chars[index + 1][1] if index < len(chars) - 1 else None
+        left = min(attack, max(0.0, start - prev_end) / 2.0) if prev_end is not None else attack
+        right = (
+            min(release, max(0.0, next_start - end) / 2.0) if next_start is not None else release
+        )
+        new_start = max(0.0, start - left)
+        new_end = end + right
+        if block_start is not None:
+            new_start = max(new_start, float(block_start))
+        if block_end is not None:
+            new_end = min(new_end, float(block_end))
+        spans.append((char, new_start, max(new_start, new_end)))
+    return spans
 
 
 def _analyze_blocks_pitch(
@@ -1181,24 +1245,19 @@ def _analyze_blocks_pitch(
     measured: list[list[tuple[str, float, float, SegmentAnalysis]]] = []
     all_medians: list[float] = []
 
-    # Pass 1 (0.02–0.5): measure every character's pitch from its audio slice.
+    # Pass 1 (0.02–0.5): measure every character's pitch from its (attack/release
+    # padded) audio slice so the 基頻 covers the 字's onset and tail.
     progress(0.02, "分析音高")
     for block in blocks:
         block_measured: list[tuple[str, float, float, SegmentAnalysis]] = []
-        for character in block.get("characters") or []:
+        for char, start, end in _padded_char_spans(block):
             done += 1
-            char = str(character.get("char") or "").strip()
-            start = character.get("startSeconds")
-            end = character.get("endSeconds")
-            if char and start is not None and end is not None:
-                start = float(start)
-                end = float(end)
-                seg = _segment_pitch(samples, sample_rate, start, end)
-                block_measured.append((char, start, end, seg))
-                if seg.median_hz:
-                    all_medians.append(seg.median_hz)
+            seg = _segment_pitch(samples, sample_rate, start, end)
+            block_measured.append((char, start, end, seg))
+            if seg.median_hz:
+                all_medians.append(seg.median_hz)
             if done % 8 == 0 or done == total:
-                progress(0.02 + 0.48 * (done / total), f"分析音高 {done}/{total}")
+                progress(0.02 + 0.48 * min(1.0, done / total), f"分析音高 {done}/{total}")
         measured.append(block_measured)
 
     tonic = float(np.median(all_medians)) if all_medians else 0.0
@@ -1249,13 +1308,10 @@ def _block_spectrogram(
         return None
     payload["durationSeconds"] = round((finish - begin) / sample_rate, 3)
     # Tag each time bin with the character sounding then (per-point 文字 for the
-    # 基頻分析 / CSV), using the block's character timings (absolute seconds).
+    # 基頻分析 / CSV), using the attack/release-padded character windows (absolute
+    # seconds) so brief 字 still claim a bin and the lyric reads completely.
     slice_start = begin / sample_rate
-    spans = [
-        (float(c["startSeconds"]), float(c["endSeconds"]), str(c.get("char") or ""))
-        for c in (block.get("characters") or [])
-        if c.get("startSeconds") is not None and c.get("endSeconds") is not None
-    ]
+    spans = [(start, end, char) for char, start, end in _padded_char_spans(block)]
     payload["text"] = [
         _char_at_time(spans, slice_start + relative) for relative in payload.get("times", [])
     ]
