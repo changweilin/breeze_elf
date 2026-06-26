@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -13,6 +14,8 @@ from .config import Settings, get_settings
 TRADITIONAL_CHINESE_PROMPT = (
     "以下是台灣繁體中文語音轉寫，內容可能包含國語、台灣用語、英文詞彙與標點。"
 )
+# Sentinel languages that mean "let Whisper detect freely" (no restriction).
+_AUTO_LANGUAGES = {"", "auto"}
 
 
 @dataclass(frozen=True)
@@ -42,7 +45,15 @@ class ASREngine(Protocol):
     def load(self) -> None:
         ...
 
-    def transcribe(self, samples: np.ndarray, sample_rate: int, language: str) -> ASRResult:
+    def transcribe(
+        self,
+        samples: np.ndarray,
+        sample_rate: int,
+        language: str,
+        *,
+        languages: Sequence[str] | None = None,
+        prompt_terms: Sequence[str] | None = None,
+    ) -> ASRResult:
         ...
 
 
@@ -58,7 +69,16 @@ class MockASR:
     def load(self) -> None:
         return None
 
-    def transcribe(self, samples: np.ndarray, sample_rate: int, language: str) -> ASRResult:
+    def transcribe(
+        self,
+        samples: np.ndarray,
+        sample_rate: int,
+        language: str,
+        *,
+        languages: Sequence[str] | None = None,
+        prompt_terms: Sequence[str] | None = None,
+    ) -> ASRResult:
+        del languages, prompt_terms  # mock ignores restriction / 詞庫 biasing
         self._count += 1
         seconds = samples.size / sample_rate if sample_rate else 0
         text = f"測試字幕 {self._count} ({seconds:.1f}s)"
@@ -118,22 +138,47 @@ class FasterWhisperASR:
             detail = "; ".join(errors) if errors else "no candidates tried"
             raise RuntimeError(f"failed to load Whisper model {self.model_name!r}: {detail}")
 
-    def transcribe(self, samples: np.ndarray, sample_rate: int, language: str) -> ASRResult:
+    def transcribe(
+        self,
+        samples: np.ndarray,
+        sample_rate: int,
+        language: str,
+        *,
+        languages: Sequence[str] | None = None,
+        prompt_terms: Sequence[str] | None = None,
+    ) -> ASRResult:
         self.load()
         assert self._model is not None
 
-        # Loaded files (e.g. music or non-Chinese audio) ask for "auto" so the
-        # model detects the language itself; forcing Traditional Chinese on a
-        # melody produces hallucinated gibberish. In auto mode we also drop the
-        # Chinese prompt so it cannot bias the detection back toward zh.
-        requested = (language or "").strip().lower()
-        auto_detect = requested in {"", "auto"}
-        whisper_language = None if auto_detect else language
-        initial_prompt = None if auto_detect else TRADITIONAL_CHINESE_PROMPT
+        del sample_rate  # the model uses the fixed 16 kHz it was warmed for
+        audio = samples.astype(np.float32, copy=False)
+        # The allowed set: explicit ``languages`` (the 多選語言 picker) wins,
+        # else the single back-compat ``language``. ``auto``/empty means free
+        # detection — loaded files (music / non-Chinese) ask for it because
+        # forcing Traditional Chinese on a melody produces hallucinated gibberish.
+        allowed = _normalize_languages(languages, language)
+        auto_detect = not allowed or any(code in _AUTO_LANGUAGES for code in allowed)
+
+        if auto_detect:
+            whisper_language: str | None = None
+        elif len(allowed) == 1:
+            whisper_language = allowed[0]
+        else:
+            # Strict restriction: detect, then force the highest-probability
+            # language that is actually in the allowed set so a stray foreign
+            # segment is recognised as the primary language, not a 4th tongue.
+            whisper_language = self._resolve_language(audio, allowed)
+
+        # In free-detect mode we drop the prompt entirely so it cannot bias the
+        # detection (back toward zh, or toward 詞庫 terms on a melody).
+        initial_prompt = None if auto_detect else _build_prompt(allowed, prompt_terms)
+        # OpenCC simplified→traditional only matters for Chinese output; skip it
+        # for a pure non-zh restriction so shared CJK kanji aren't mangled.
+        converter = self._converter if (auto_detect or "zh" in allowed) else None
 
         started = time.perf_counter()
         segments, info = self._model.transcribe(
-            samples.astype(np.float32, copy=False),
+            audio,
             language=whisper_language,
             task="transcribe",
             beam_size=1,
@@ -144,8 +189,12 @@ class FasterWhisperASR:
         )
         segment_list = list(segments)
         text = " ".join(segment.text.strip() for segment in segment_list).strip()
-        text = _to_traditional(text, self._converter)
-        detected_language = getattr(info, "language", None) or (language or "auto")
+        text = _to_traditional(text, converter)
+        detected_language = (
+            getattr(info, "language", None)
+            or whisper_language
+            or (allowed[0] if allowed else "auto")
+        )
         return ASRResult(
             text=text,
             language=detected_language,
@@ -153,14 +202,31 @@ class FasterWhisperASR:
             backend=self.backend,
             device=f"{self.device}/{self.compute_type}",
             no_speech_prob=_max_segment_float(segment_list, "no_speech_prob"),
-            words=self._collect_words(segment_list),
+            words=self._collect_words(segment_list, converter),
         )
 
-    def _collect_words(self, segments) -> tuple[WordTiming, ...]:
+    def _resolve_language(self, audio: np.ndarray, allowed: tuple[str, ...]) -> str:
+        """Pick the most likely language *within* ``allowed``; fall back to the
+        primary (first) language when detection is unavailable or finds nothing
+        in the set, so recognition never escapes the user's chosen languages."""
+        detect = getattr(self._model, "detect_language", None)
+        if detect is None:
+            return allowed[0]
+        try:
+            _, _, all_probs = detect(audio)
+        except Exception:  # pragma: no cover - depends on model internals
+            return allowed[0]
+        allowed_set = set(allowed)
+        for code, _prob in all_probs or []:
+            if code in allowed_set:
+                return code
+        return allowed[0]
+
+    def _collect_words(self, segments, converter) -> tuple[WordTiming, ...]:
         words: list[WordTiming] = []
         for segment in segments:
             for word in getattr(segment, "words", None) or []:
-                text = _to_traditional((getattr(word, "word", "") or "").strip(), self._converter)
+                text = _to_traditional((getattr(word, "word", "") or "").strip(), converter)
                 if not text:
                     continue
                 try:
@@ -180,6 +246,38 @@ class FasterWhisperASR:
         if preference == "cpu":
             return [("cpu", "int8")]
         return [(preference, os.getenv("BREEZE_ASR_COMPUTE_TYPE", "int8"))]
+
+
+def _normalize_languages(
+    languages: Sequence[str] | None, fallback: str
+) -> tuple[str, ...]:
+    """The de-duplicated, lower-cased allowed languages; falls back to the
+    single ``fallback`` code so callers using the old positional ``language``
+    argument keep working unchanged."""
+    items: list[str] = []
+    for value in languages or ():
+        code = (value or "").strip().lower()
+        if code and code not in items:
+            items.append(code)
+    if items:
+        return tuple(items)
+    code = (fallback or "").strip().lower()
+    return (code,) if code else ()
+
+
+def _build_prompt(
+    allowed: tuple[str, ...], prompt_terms: Sequence[str] | None
+) -> str | None:
+    """The Whisper ``initial_prompt``: the Traditional-Chinese base prompt when
+    zh is in scope, followed by the 慣用詞庫 terms so the model is biased toward
+    the user's preferred spellings. ``None`` when there is nothing to bias with."""
+    parts: list[str] = []
+    if "zh" in allowed:
+        parts.append(TRADITIONAL_CHINESE_PROMPT)
+    terms = [term.strip() for term in (prompt_terms or ()) if term and term.strip()]
+    if terms:
+        parts.append("、".join(dict.fromkeys(terms)))
+    return " ".join(parts) if parts else None
 
 
 def build_asr_from_env(settings: Settings | None = None) -> ASREngine:

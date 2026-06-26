@@ -41,6 +41,7 @@ from .audio import (
 )
 from .config import get_settings
 from .protocol import (
+    GlossaryEntry,
     PingMessage,
     ProtocolError,
     StartMessage,
@@ -904,7 +905,9 @@ async def _handle_text_message(
         state.queue = asyncio.Queue(maxsize=queue_size)
         state.stop_event.clear()
         state.processor_task = asyncio.create_task(
-            _process_windows(state, send_json, asr_queue, message.language)
+            _process_windows(
+                state, send_json, asr_queue, message.languages, message.glossary
+            )
         )
         state.started = True
         await send_json(
@@ -912,6 +915,7 @@ async def _handle_text_message(
                 "ready",
                 sampleRate=message.sample_rate,
                 language=message.language,
+                languages=list(message.languages),
                 windowSeconds=settings.window_seconds,
                 overlapSeconds=settings.overlap_seconds,
                 segmenter=settings.segmenter,
@@ -974,9 +978,20 @@ async def _process_windows(
     state: StreamState,
     send_json: Callable[[dict[str, Any]], Awaitable[None]],
     asr_queue: ASRQueue,
-    language: str,
+    languages: tuple[str, ...],
+    glossary: tuple[GlossaryEntry, ...],
 ) -> None:
     assert state.queue is not None
+
+    primary_language = languages[0] if languages else "zh"
+    # ``source→target`` replacements (longest source first so a longer 詞 wins
+    # over a substring), and the preferred spellings fed to the Whisper prompt.
+    replacements = sorted(
+        ((entry.source, entry.target) for entry in glossary),
+        key=lambda pair: len(pair[0]),
+        reverse=True,
+    )
+    prompt_terms = tuple(dict.fromkeys(entry.target for entry in glossary))
 
     while True:
         try:
@@ -1016,7 +1031,9 @@ async def _process_windows(
                 queued_result = await asr_queue.transcribe(
                     asr_samples,
                     settings.sample_rate,
-                    language,
+                    primary_language,
+                    languages=languages,
+                    prompt_terms=prompt_terms,
                 )
                 result = queued_result.result
                 asr_queue_wait_ms = queued_result.queue_wait_ms
@@ -1036,6 +1053,10 @@ async def _process_windows(
 
             filtered_as_silence = bool(result.text and _should_drop_asr_result(window, result))
             if result.text and not filtered_as_silence:
+                # Apply the learned 慣用詞庫 corrections to the recognised text so
+                # both the live partial and the accumulated transcript carry the
+                # user's preferred spellings (the prompt biasing is best-effort).
+                display_text = _apply_glossary(result.text, replacements)
                 sample_rate = _window_sample_rate(window)
                 summary = summarize_pitch(window.samples, sample_rate)
                 pitch = _pitch_summary_payload(summary)
@@ -1043,7 +1064,7 @@ async def _process_windows(
                 await send_json(
                     server_event(
                         "partial",
-                        text=result.text,
+                        text=display_text,
                         language=result.language,
                         windowIndex=window.index,
                         segmentKind=window.kind,
@@ -1054,7 +1075,7 @@ async def _process_windows(
                 )
                 novel_text = _novel_text(
                     state.transcript,
-                    result.text,
+                    display_text,
                     max_overlap_chars=_dedupe_overlap_cap(window, prev_segment_end),
                 )
                 if novel_text:
@@ -1498,6 +1519,20 @@ def _dedupe_overlap_cap(window: AudioWindow, prev_segment_end: float | None) -> 
         prev_segment_end is not None and window.start_seconds < prev_segment_end - 1e-3
     )
     return _VAD_BOUNDARY_OVERLAP_CHARS if overlaps_previous else 0
+
+
+def _apply_glossary(text: str, replacements: list[tuple[str, str]]) -> str:
+    """Substitute each learned ``source→target`` 慣用詞 in the recognised text.
+
+    ``replacements`` is pre-sorted longest-source-first so a longer 詞 is taken
+    before any substring of it; empty sources are already filtered upstream.
+    """
+    if not text or not replacements:
+        return text
+    for source, target in replacements:
+        if source:
+            text = text.replace(source, target)
+    return text
 
 
 def _novel_text(transcript: str, current: str, *, max_overlap_chars: int | None = None) -> str:

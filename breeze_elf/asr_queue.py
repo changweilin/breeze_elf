@@ -24,6 +24,8 @@ class _ASRJob:
     language: str
     submitted_at: float
     future: asyncio.Future[QueuedASRResult]
+    languages: tuple[str, ...] = ()
+    prompt_terms: tuple[str, ...] = ()
 
 
 class ASRQueue:
@@ -81,6 +83,9 @@ class ASRQueue:
         samples: np.ndarray,
         sample_rate: int,
         language: str,
+        *,
+        languages: tuple[str, ...] = (),
+        prompt_terms: tuple[str, ...] = (),
     ) -> QueuedASRResult:
         await self.start()
         loop = asyncio.get_running_loop()
@@ -92,6 +97,8 @@ class ASRQueue:
                 language=language,
                 submitted_at=time.perf_counter(),
                 future=future,
+                languages=languages,
+                prompt_terms=prompt_terms,
             )
         )
         try:
@@ -113,10 +120,13 @@ class ASRQueue:
                 try:
                     result = await loop.run_in_executor(
                         None,
-                        self.asr.transcribe,
-                        job.samples,
-                        job.sample_rate,
-                        job.language,
+                        lambda job=job: self.asr.transcribe(
+                            job.samples,
+                            job.sample_rate,
+                            job.language,
+                            languages=job.languages,
+                            prompt_terms=job.prompt_terms,
+                        ),
                     )
                 except asyncio.CancelledError:
                     if not job.future.done():

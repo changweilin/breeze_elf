@@ -37,8 +37,8 @@ class ImmediateASRQueue:
     device = "cpu"
     queue_depth = 0
 
-    async def transcribe(self, samples, sample_rate, language):
-        del samples, sample_rate
+    async def transcribe(self, samples, sample_rate, language, *, languages=(), prompt_terms=()):
+        del samples, sample_rate, languages, prompt_terms
         return QueuedASRResult(
             result=ASRResult(
                 text="最後一句",
@@ -60,8 +60,8 @@ class RecordingASRQueue:
     def __init__(self):
         self.received_rms = 0.0
 
-    async def transcribe(self, samples, sample_rate, language):
-        del sample_rate
+    async def transcribe(self, samples, sample_rate, language, *, languages=(), prompt_terms=()):
+        del sample_rate, languages, prompt_terms
         self.received_rms = calculate_rms(samples)
         return QueuedASRResult(
             result=ASRResult(
@@ -182,7 +182,7 @@ class MainTests(unittest.IsolatedAsyncioTestCase):
             queue=asyncio.Queue(maxsize=4),
         )
         state.processor_task = asyncio.create_task(
-            main._process_windows(state, send_json, ImmediateASRQueue(), "zh")
+            main._process_windows(state, send_json, ImmediateASRQueue(), ("zh",), ())
         )
         state.segmenter.append_pcm16(np.array([1000, 1000, 1000], dtype="<i2").tobytes())
 
@@ -233,10 +233,56 @@ class MainTests(unittest.IsolatedAsyncioTestCase):
             "settings",
             replace(main.settings, audio_preprocess="natural", sample_rate=sample_rate),
         ):
-            await main._process_windows(state, send_json, asr_queue, "zh")
+            await main._process_windows(state, send_json, asr_queue, ("zh",), ())
 
         self.assertGreater(asr_queue.received_rms, window.rms)
         self.assertTrue(any(event.get("rms") == round(window.rms, 5) for event in events))
+
+    async def test_process_windows_applies_glossary_corrections(self):
+        sample_rate = 16_000
+        time_axis = np.arange(sample_rate, dtype=np.float32) / sample_rate
+        samples = (0.05 * np.sin(2 * np.pi * 220.0 * time_axis)).astype(np.float32)
+        window = AudioWindow(
+            index=0,
+            start_seconds=0.0,
+            end_seconds=1.0,
+            samples=samples,
+            rms=calculate_rms(samples),
+            is_speech=True,
+            kind="utterance",
+        )
+
+        class _FixedTextQueue(ImmediateASRQueue):
+            async def transcribe(
+                self, samples, sample_rate, language, *, languages=(), prompt_terms=()
+            ):
+                del samples, sample_rate, languages, prompt_terms
+                return QueuedASRResult(
+                    result=ASRResult(
+                        text="機器學習很有趣",
+                        language=language,
+                        duration_ms=0,
+                        backend=self.backend,
+                        device=self.device,
+                    ),
+                    queue_wait_ms=0,
+                    queue_depth=0,
+                )
+
+        state = StreamState(started=True, queue=asyncio.Queue(maxsize=1))
+        await state.queue.put(window)
+        state.stop_event.set()
+        events = []
+
+        async def send_json(payload):
+            events.append(payload)
+
+        glossary = (main.GlossaryEntry(source="機器學習", target="Mike 學習"),)
+        await main._process_windows(state, send_json, _FixedTextQueue(), ("zh",), glossary)
+
+        final = next(event for event in events if event["type"] == "final")
+        self.assertEqual(final["text"], "Mike 學習很有趣")
+        self.assertEqual(final["transcript"], "Mike 學習很有趣")
 
 
 class CharacterPayloadTests(unittest.TestCase):

@@ -30,6 +30,28 @@ after text appears, and the server writes a UTF-8 `.txt` file under
 
 Set `BREEZE_REMOTE_STORAGE_DIR` to choose another host-side directory.
 
+## Recognition Languages
+
+Tap `🌐 語言` to choose which languages live recognition is restricted to. The default is
+Traditional Chinese + English, and you can multi-select **up to 4** languages. When more
+than one is selected the server detects each utterance's language but forces the
+highest-probability language **within your chosen set**, so a stray foreign segment is
+recognised as your primary (first) language instead of escaping into an unselected tongue.
+Switch on **自由偵測** to let Whisper auto-detect freely with no restriction. Traditional
+Chinese also adds a Taiwan-usage prompt; a pure non-Chinese selection skips the
+simplified→traditional conversion. The selection is remembered on the device and sent in the
+WebSocket `start` message. (Loaded audio files always use free detection — see below.)
+
+## 慣用詞庫 (Custom Glossary)
+
+Tap the ✎ on any finalized transcript block to edit its text in place. The diff between the
+original and your edit is learned as a `原本 → 改成` correction and stored on the device
+(`📖 慣用詞庫` lists and manages them). On the next recognition the glossary is used two ways:
+the preferred spellings are added to Whisper's `initial_prompt` to bias decoding, and the
+recognised text is auto-corrected with the same `原本 → 改成` substitutions. This makes
+recurring names and terms progressively more accurate. The glossary stays on your device and
+rides along in the `start` message; it is never uploaded to any cloud service.
+
 ## Pitch Mode
 
 Tap `音高` to show each finalized transcript block with its matched audio time range and a

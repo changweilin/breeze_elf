@@ -23,8 +23,8 @@ class RecordingASR:
     def load(self):
         return None
 
-    def transcribe(self, samples, sample_rate, language):
-        del samples, sample_rate
+    def transcribe(self, samples, sample_rate, language, *, languages=(), prompt_terms=()):
+        del samples, sample_rate, languages, prompt_terms
         with self.lock:
             self.active += 1
             self.calls += 1
@@ -56,8 +56,8 @@ class BlockingASR:
     def load(self):
         return None
 
-    def transcribe(self, samples, sample_rate, language):
-        del samples, sample_rate
+    def transcribe(self, samples, sample_rate, language, *, languages=(), prompt_terms=()):
+        del samples, sample_rate, languages, prompt_terms
         self.calls += 1
         self.started.set()
         self.release.wait(timeout=1)

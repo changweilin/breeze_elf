@@ -870,6 +870,133 @@
         flex: none;
       }
 
+      /* 語言 / 詞庫 設定列(主控制列下方,靠左的小按鈕) */
+      .controls-secondary {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: -2px;
+      }
+
+      .controls-secondary .mini {
+        flex: 1 1 auto;
+      }
+
+      .lang-hint {
+        margin: 0;
+        color: var(--muted);
+        font-size: 0.78rem;
+        line-height: 1.4;
+      }
+
+      .lang-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 6px;
+      }
+
+      .lang-grid .pick-item {
+        font-weight: 600;
+        font-size: 0.9rem;
+        padding: 9px 10px;
+      }
+
+      .lang-grid .pick-item.disabled {
+        opacity: 0.42;
+        pointer-events: none;
+      }
+
+      /* 慣用詞庫清單:原詞 → 改成,加上刪除鈕 */
+      .gloss-list {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        max-height: 46vh;
+        overflow: auto;
+      }
+
+      .gloss-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        font-size: 0.88rem;
+      }
+
+      .gloss-pair {
+        flex: 1 1 auto;
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+
+      .gloss-from {
+        color: var(--muted);
+        text-decoration: line-through;
+      }
+
+      .gloss-arrow {
+        color: var(--muted);
+      }
+
+      .gloss-to {
+        font-weight: 760;
+      }
+
+      .gloss-del {
+        flex: 0 0 auto;
+        width: 28px;
+        min-width: 28px;
+        min-height: 28px;
+        padding: 0;
+        border-radius: 6px;
+        font-size: 0.9rem;
+        color: var(--muted);
+      }
+
+      .gloss-empty {
+        color: var(--muted);
+        font-size: 0.84rem;
+        text-align: center;
+        padding: 14px 0;
+      }
+
+      /* 逐字稿每段的「編輯」鈕(✎),點了就能改字並學進詞庫 */
+      .entry-edit {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 22px;
+        height: 22px;
+        min-height: 0; /* base button{min-height:48px} would stretch it into an ellipse */
+        padding: 0;
+        border: 1px solid var(--border, rgba(127, 127, 127, 0.3));
+        border-radius: 999px;
+        background: transparent;
+        color: var(--muted);
+        font-size: 0.72rem;
+        line-height: 1;
+        cursor: pointer;
+        flex: 0 0 auto;
+      }
+
+      .entry-edit:hover {
+        background: var(--button-hover);
+        color: var(--ink);
+      }
+
+      .transcript-text[contenteditable="true"] {
+        outline: 2px solid var(--live);
+        outline-offset: 2px;
+        border-radius: 4px;
+        background: var(--panel-subtle);
+        cursor: text;
+      }
+
       /* 取消 / 確認 split the row into equal left-right halves. */
       .pick-actions {
         display: flex;
@@ -941,6 +1068,70 @@
         font-variant-numeric: tabular-nums;
         color: var(--muted);
         overflow-wrap: anywhere;
+      }
+
+      .about-me-name {
+        margin: 0 0 8px;
+        font-size: 1rem;
+        font-weight: 760;
+        color: var(--ink);
+      }
+
+      .about-me-quote {
+        margin: 0 0 12px;
+        padding-left: 12px;
+        border-left: 3px solid var(--live-soft);
+        color: var(--ink);
+        font-size: 0.86rem;
+        line-height: 1.55;
+      }
+
+      .about-me-quote .en {
+        display: block;
+        margin-top: 2px;
+        color: var(--muted);
+        font-style: italic;
+      }
+
+      .about-me-quote cite {
+        display: block;
+        margin-top: 6px;
+        font-size: 0.78rem;
+        font-style: normal;
+        color: var(--muted);
+      }
+
+      .about-me-links {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .about-me-links a {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 11px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        color: var(--ink);
+        font-size: 0.82rem;
+        font-weight: 680;
+        text-decoration: none;
+        transition:
+          background-color 140ms ease,
+          border-color 140ms ease;
+      }
+
+      .about-me-links a:hover {
+        background: var(--button-hover);
+        border-color: var(--accent);
+      }
+
+      .about-me-links svg {
+        width: 16px;
+        height: 16px;
+        flex: 0 0 auto;
       }
 
       .voice-page {
@@ -1755,6 +1946,11 @@
         <button id="clear" type="button">清除</button>
       </section>
 
+      <section class="controls-secondary" aria-label="辨識設定">
+        <button id="lang" class="mini" type="button" aria-haspopup="dialog" aria-controls="lang-dialog" title="設定辨識語言(最多 4 種,或自由偵測)">🌐 語言</button>
+        <button id="glossary" class="mini" type="button" aria-haspopup="dialog" aria-controls="glossary-dialog" title="慣用詞庫:你在逐字稿改的字會被記住,調整之後的辨識">📖 慣用詞庫</button>
+      </section>
+
       <section class="transcript" aria-label="transcript">
         <div class="bar">
           <div class="view-tabs" role="tablist" aria-label="逐字稿顯示方式">
@@ -2027,7 +2223,7 @@
         <div class="about-section">
           <h3>語音辨識</h3>
           <p>
-            以 faster-whisper（Whisper 系列模型）在本機運算,不上傳雲端。即時收音固定辨識繁體中文並加上台灣用語提示詞;載入音檔時改為自動偵測語言,避免把音樂或外語辨成中文亂碼。目前後端:<span class="about-backend" id="about-backend">—</span>
+            以 faster-whisper（Whisper 系列模型）在本機運算,不上傳雲端。即時收音預設辨識繁體中文與英文,可在「🌐 語言」最多多選 4 種語言並嚴格限制在選定範圍,或切到自由偵測;繁中會加上台灣用語提示詞。載入音檔時固定自動偵測語言,避免把音樂或外語辨成中文亂碼。目前後端:<span class="about-backend" id="about-backend">—</span>
           </p>
         </div>
         <div class="about-section">
@@ -2054,6 +2250,33 @@
           <h3>幻覺過濾</h3>
           <p>結合 Whisper 的 no-speech 機率、低能量門檻,以及常見的贊助／字幕幻覺片語,過濾在靜音時冒出的假文字。</p>
         </div>
+        <div class="about-section">
+          <h3>慣用詞庫</h3>
+          <p>在逐字稿點每段的 ✎ 修改文字,系統會把「原本 → 改成」記在本機詞庫,下次辨識時一方面把偏好寫法加進 Whisper 提示詞,一方面對輸出自動套用同樣的更正,讓常用的人名、術語越用越準。詞庫只存在你的裝置,不會上傳。</p>
+        </div>
+        <div class="about-section">
+          <h3>關於作者 · About Me</h3>
+          <p class="about-me-name">Chang Wei Lin</p>
+          <blockquote class="about-me-quote">
+            我愛星空至深,無懼黑夜。
+            <span class="en" lang="en">We have loved the stars too fondly to fear the dark.</span>
+            <cite>— Sarah Williams,《The Old Astronomer》</cite>
+          </blockquote>
+          <div class="about-me-links">
+            <a href="https://github.com/changweilin" target="_blank" rel="noopener noreferrer">
+              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.78 0 12.29c0 5.2 3.44 9.6 8.21 11.16.6.11.82-.25.82-.57 0-.28-.01-1.02-.02-2-3.34.71-4.04-1.58-4.04-1.58-.55-1.36-1.33-1.73-1.33-1.73-1.09-.73.08-.71.08-.71 1.2.08 1.84 1.22 1.84 1.22 1.07 1.8 2.81 1.28 3.5.98.11-.76.42-1.28.76-1.58-2.67-.3-5.47-1.31-5.47-5.83 0-1.29.47-2.34 1.24-3.17-.13-.3-.54-1.52.12-3.16 0 0 1.01-.32 3.3 1.21a11.6 11.6 0 0 1 3-.4c1.02 0 2.05.13 3 .4 2.29-1.53 3.3-1.21 3.3-1.21.66 1.64.25 2.86.12 3.16.77.83 1.24 1.88 1.24 3.17 0 4.53-2.81 5.53-5.49 5.82.43.36.81 1.08.81 2.18 0 1.58-.01 2.85-.01 3.24 0 .32.21.69.83.57A12.02 12.02 0 0 0 24 12.29C24 5.78 18.63.5 12 .5z"/></svg>
+              GitHub
+            </a>
+            <a href="https://www.linkedin.com/in/wei-lin-chang-ba38049a/" target="_blank" rel="noopener noreferrer">
+              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.45 20.45h-3.56v-5.57c0-1.33-.02-3.04-1.85-3.04-1.85 0-2.14 1.45-2.14 2.94v5.67H9.35V9h3.42v1.56h.05c.48-.9 1.64-1.85 3.37-1.85 3.6 0 4.27 2.37 4.27 5.46v6.28zM5.34 7.43a2.07 2.07 0 1 1 0-4.14 2.07 2.07 0 0 1 0 4.14zM7.12 20.45H3.56V9h3.56v11.45zM22.22 0H1.77C.8 0 0 .78 0 1.74v20.52C0 23.22.8 24 1.77 24h20.45c.98 0 1.78-.78 1.78-1.74V1.74C24 .78 23.2 0 22.22 0z"/></svg>
+              LinkedIn
+            </a>
+            <a href="https://changweilin.github.io/demo_link/" target="_blank" rel="noopener noreferrer">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18 14 14 0 0 1 0-18z"/></svg>
+              作品集
+            </a>
+          </div>
+        </div>
       </div>
     </dialog>
 
@@ -2068,7 +2291,35 @@
       </form>
     </dialog>
 
-    <script src="./app.js?v=25" type="module"></script>
+    <dialog id="lang-dialog" class="pick-dialog" aria-labelledby="lang-title">
+      <form method="dialog" class="pick-form">
+        <h2 id="lang-title" class="pick-title">辨識語言</h2>
+        <label class="pick-item lang-auto">
+          <input type="checkbox" id="lang-auto" />
+          <span>自由偵測(自動判斷語言,不限制)</span>
+        </label>
+        <p class="lang-hint" id="lang-hint">最多選 4 種語言。選定後辨識會限制在這些語言內。</p>
+        <div class="lang-grid" id="lang-grid"></div>
+        <div class="pick-actions">
+          <button type="button" class="mini lang-cancel">取消</button>
+          <button type="button" class="primary lang-confirm">確認</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="glossary-dialog" class="pick-dialog" aria-labelledby="glossary-title">
+      <form method="dialog" class="pick-form">
+        <h2 id="glossary-title" class="pick-title">慣用詞庫</h2>
+        <p class="lang-hint">在逐字稿點 ✎ 修改文字,系統會把「原本 → 改成」記在這裡,並在之後的辨識自動套用。</p>
+        <div class="gloss-list" id="gloss-list"></div>
+        <div class="pick-actions">
+          <button type="button" class="mini gloss-clear">清空詞庫</button>
+          <button type="button" class="primary gloss-close">關閉</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="./app.js?v=26" type="module"></script>
     <script src="./voice.js?v=23" type="module"></script>
   </body>
 </html>

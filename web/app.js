@@ -3,6 +3,8 @@ const els = {
   load: document.querySelector("#load"),
   fileInput: document.querySelector("#file"),
   clear: document.querySelector("#clear"),
+  lang: document.querySelector("#lang"),
+  glossary: document.querySelector("#glossary"),
   viewTabs: Array.from(document.querySelectorAll(".view-tab")),
   analyze: document.querySelector("#analyze"),
   analyzeProgress: document.querySelector("#analyze-progress"),
@@ -32,6 +34,27 @@ const MAX_WS_BUFFERED_BYTES = 256 * 1024;
 const THEME_STORAGE_KEY = "breeze-elf-theme";
 const SETTINGS_STORAGE_KEY = "breeze-elf-settings-v1";
 const SESSION_STORAGE_KEY = "breeze-elf-session-v1";
+const GLOSSARY_STORAGE_KEY = "breeze-elf-glossary-v1";
+// 辨識語言設定:預設繁中＋英文,最多可多選 4 種,或切到「自由偵測」不限制。
+const MAX_LANGUAGES = 4;
+const MAX_GLOSSARY_ENTRIES = 200;
+const MAX_GLOSSARY_TERM_CHARS = 80;
+const DEFAULT_LANGUAGES = ["zh", "en"];
+const LANGUAGE_OPTIONS = [
+  { code: "zh", label: "繁體中文" },
+  { code: "en", label: "English 英文" },
+  { code: "ja", label: "日本語 日文" },
+  { code: "ko", label: "한국어 韓文" },
+  { code: "es", label: "Español 西班牙文" },
+  { code: "fr", label: "Français 法文" },
+  { code: "de", label: "Deutsch 德文" },
+  { code: "vi", label: "Tiếng Việt 越南文" },
+  { code: "th", label: "ไทย 泰文" },
+  { code: "id", label: "Indonesia 印尼文" },
+  { code: "ru", label: "Русский 俄文" },
+  { code: "pt", label: "Português 葡萄牙文" },
+];
+const LANGUAGE_LABELS = new Map(LANGUAGE_OPTIONS.map((item) => [item.code, item.label]));
 const AUDIO_DB_NAME = "breeze-elf-audio-v1";
 const AUDIO_STORE_NAME = "sessions";
 const AUDIO_RECORD_ID = "current";
@@ -152,6 +175,11 @@ const state = {
   openBlocks: new Set(),
   demoRunning: false,
   demoTimers: [],
+  // 辨識語言限制 + 自由偵測 + 慣用詞庫,從 localStorage 還原(下方函式宣告已提升)。
+  languages: sanitizeLanguages(INITIAL_SETTINGS.languages) || DEFAULT_LANGUAGES.slice(),
+  autoDetectLang: Boolean(INITIAL_SETTINGS.autoDetectLang),
+  glossary: loadStoredGlossary(),
+  editingIndex: null,
 };
 
 let audioDatabasePromise = null;
@@ -226,11 +254,305 @@ function persistSettings() {
       SETTINGS_STORAGE_KEY,
       JSON.stringify({
         viewMode: state.viewMode,
+        languages: state.languages,
+        autoDetectLang: state.autoDetectLang,
       }),
     );
   } catch {
     flashStats("設定儲存失敗");
   }
+}
+
+// ── 辨識語言限制 + 慣用詞庫 ──────────────────────────────────────────────────
+// Languages restrict recognition to the chosen set (default 繁中＋英文, 最多 4
+// 種) unless 自由偵測 is on; the 慣用詞庫 holds 原詞→改成 corrections learned from
+// transcript edits. Both ride along in the WebSocket start message so the server
+// can bias Whisper's prompt and auto-replace the recognised text.
+
+function sanitizeLanguages(value) {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const seen = [];
+  for (const item of value) {
+    const code = String(item || "").trim().toLowerCase();
+    if (code && code !== "auto" && !seen.includes(code)) {
+      seen.push(code);
+    }
+    if (seen.length >= MAX_LANGUAGES) {
+      break;
+    }
+  }
+  return seen.length ? seen : null;
+}
+
+function loadStoredGlossary() {
+  try {
+    const data = JSON.parse(localStorage.getItem(GLOSSARY_STORAGE_KEY) || "[]");
+    if (!Array.isArray(data)) {
+      return [];
+    }
+    return data
+      .map((entry) => ({
+        from: String(entry?.from || "").trim(),
+        to: String(entry?.to || "").trim(),
+      }))
+      .filter((entry) => entry.from && entry.to && entry.from !== entry.to)
+      .slice(0, MAX_GLOSSARY_ENTRIES);
+  } catch {
+    return [];
+  }
+}
+
+function persistGlossary() {
+  if (DEMO_MODE) {
+    return;
+  }
+  try {
+    localStorage.setItem(GLOSSARY_STORAGE_KEY, JSON.stringify(state.glossary));
+  } catch {
+    flashStats("詞庫儲存失敗");
+  }
+}
+
+// The languages payload sent to the server: ["auto"] for 自由偵測, otherwise the
+// chosen set (never empty — falls back to the default).
+function startLanguages() {
+  if (state.autoDetectLang || !state.languages.length) {
+    return ["auto"];
+  }
+  return state.languages.slice(0, MAX_LANGUAGES);
+}
+
+function languageLabel(code) {
+  return LANGUAGE_LABELS.get(code) || code;
+}
+
+// A short label for the 語言 button: 自動 for free-detect, else the codes' 中文 names.
+function languageButtonText() {
+  if (state.autoDetectLang || !state.languages.length) {
+    return "🌐 語言:自動";
+  }
+  const names = state.languages.map((code) => {
+    const label = languageLabel(code);
+    return label.split(/\s+/)[0];
+  });
+  const shown = names.slice(0, 2).join("・");
+  const extra = names.length > 2 ? ` +${names.length - 2}` : "";
+  return `🌐 語言:${shown}${extra}`;
+}
+
+function updateLangButton() {
+  if (els.lang) {
+    els.lang.textContent = languageButtonText();
+  }
+}
+
+function updateGlossaryButton() {
+  if (els.glossary) {
+    const count = state.glossary.length;
+    els.glossary.textContent = count ? `📖 慣用詞庫 (${count})` : "📖 慣用詞庫";
+  }
+}
+
+function openLanguageDialog() {
+  const dialog = document.querySelector("#lang-dialog");
+  if (!dialog) {
+    return;
+  }
+  const grid = dialog.querySelector("#lang-grid");
+  const autoToggle = dialog.querySelector("#lang-auto");
+  const confirmBtn = dialog.querySelector(".lang-confirm");
+  const cancelBtn = dialog.querySelector(".lang-cancel");
+
+  const working = state.languages.length ? state.languages.slice() : DEFAULT_LANGUAGES.slice();
+  let auto = state.autoDetectLang;
+  const inputs = new Map();
+
+  grid.replaceChildren();
+  LANGUAGE_OPTIONS.forEach((option) => {
+    const label = document.createElement("label");
+    label.className = "pick-item";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.value = option.code;
+    checkbox.checked = working.includes(option.code);
+    const span = document.createElement("span");
+    span.textContent = option.label;
+    label.append(checkbox, span);
+    grid.append(label);
+    inputs.set(option.code, checkbox);
+    checkbox.addEventListener("change", () => {
+      const checkedCount = [...inputs.values()].filter((box) => box.checked).length;
+      if (checkedCount > MAX_LANGUAGES) {
+        checkbox.checked = false;
+        flashStats(`最多選 ${MAX_LANGUAGES} 種語言`);
+      }
+    });
+  });
+
+  const applyAutoState = () => {
+    grid.querySelectorAll(".pick-item").forEach((item) => item.classList.toggle("disabled", auto));
+  };
+  autoToggle.checked = auto;
+  applyAutoState();
+  autoToggle.onchange = () => {
+    auto = autoToggle.checked;
+    applyAutoState();
+  };
+
+  let settled = false;
+  const onClose = () => finish(false);
+  const finish = (commit) => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    confirmBtn.onclick = null;
+    cancelBtn.onclick = null;
+    autoToggle.onchange = null;
+    dialog.removeEventListener("close", onClose);
+    if (dialog.open) {
+      dialog.close();
+    }
+    if (!commit) {
+      return;
+    }
+    const chosen = LANGUAGE_OPTIONS.filter((option) => inputs.get(option.code).checked)
+      .map((option) => option.code)
+      .slice(0, MAX_LANGUAGES);
+    state.autoDetectLang = auto;
+    state.languages = chosen.length ? chosen : DEFAULT_LANGUAGES.slice();
+    persistSettings();
+    updateLangButton();
+    flashStats(auto ? "語言:自由偵測" : `語言:${languageButtonText().replace("🌐 語言:", "")}`);
+  };
+  confirmBtn.onclick = () => finish(true);
+  cancelBtn.onclick = () => finish(false);
+  dialog.addEventListener("close", onClose);
+
+  if (typeof dialog.showModal === "function") {
+    dialog.showModal();
+  } else {
+    dialog.setAttribute("open", "");
+  }
+}
+
+function openGlossaryDialog() {
+  const dialog = document.querySelector("#glossary-dialog");
+  if (!dialog) {
+    return;
+  }
+  renderGlossaryList(dialog);
+  const clearBtn = dialog.querySelector(".gloss-clear");
+  const closeBtn = dialog.querySelector(".gloss-close");
+  closeBtn.onclick = () => {
+    if (dialog.open) {
+      dialog.close();
+    }
+  };
+  clearBtn.onclick = () => {
+    if (!state.glossary.length) {
+      return;
+    }
+    state.glossary = [];
+    persistGlossary();
+    updateGlossaryButton();
+    renderGlossaryList(dialog);
+    flashStats("已清空詞庫");
+  };
+  if (typeof dialog.showModal === "function") {
+    dialog.showModal();
+  } else {
+    dialog.setAttribute("open", "");
+  }
+}
+
+function renderGlossaryList(dialog) {
+  const list = dialog.querySelector("#gloss-list");
+  list.replaceChildren();
+  if (!state.glossary.length) {
+    const empty = document.createElement("div");
+    empty.className = "gloss-empty";
+    empty.textContent = "還沒有任何慣用詞。到逐字稿點 ✎ 改字就會自動學習。";
+    list.append(empty);
+    return;
+  }
+  state.glossary.forEach((entry, index) => {
+    const item = document.createElement("div");
+    item.className = "gloss-item";
+    const pair = document.createElement("div");
+    pair.className = "gloss-pair";
+    const from = document.createElement("span");
+    from.className = "gloss-from";
+    from.textContent = entry.from;
+    const arrow = document.createElement("span");
+    arrow.className = "gloss-arrow";
+    arrow.textContent = "→";
+    const to = document.createElement("span");
+    to.className = "gloss-to";
+    to.textContent = entry.to;
+    pair.append(from, arrow, to);
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "gloss-del";
+    del.textContent = "✕";
+    del.title = "刪除這個詞";
+    del.addEventListener("click", () => {
+      state.glossary.splice(index, 1);
+      persistGlossary();
+      updateGlossaryButton();
+      renderGlossaryList(dialog);
+    });
+    item.append(pair, del);
+    list.append(item);
+  });
+}
+
+// Extract the single changed span between the old and new text (common prefix /
+// suffix stripped) so an edit like 「機器學習很好」→「Mike 學習很好」 yields the
+// minimal pair 機器→Mike rather than a whole-line replacement.
+function diffTerms(oldText, newText) {
+  let start = 0;
+  const max = Math.min(oldText.length, newText.length);
+  while (start < max && oldText[start] === newText[start]) {
+    start += 1;
+  }
+  let oldEnd = oldText.length;
+  let newEnd = newText.length;
+  while (oldEnd > start && newEnd > start && oldText[oldEnd - 1] === newText[newEnd - 1]) {
+    oldEnd -= 1;
+    newEnd -= 1;
+  }
+  return { from: oldText.slice(start, oldEnd).trim(), to: newText.slice(start, newEnd).trim() };
+}
+
+// Record a 原詞→改成 correction (upserting by 原詞). Returns true when the 詞庫
+// actually changed, so the caller can confirm the learning to the user.
+function learnGlossary(from, to) {
+  from = (from || "").trim();
+  to = (to || "").trim();
+  if (!from || !to || from === to) {
+    return false;
+  }
+  if (from.length > MAX_GLOSSARY_TERM_CHARS || to.length > MAX_GLOSSARY_TERM_CHARS) {
+    return false;
+  }
+  const existing = state.glossary.find((entry) => entry.from === from);
+  if (existing) {
+    if (existing.to === to) {
+      return false;
+    }
+    existing.to = to;
+  } else {
+    state.glossary.push({ from, to });
+    if (state.glossary.length > MAX_GLOSSARY_ENTRIES) {
+      state.glossary.shift();
+    }
+  }
+  persistGlossary();
+  updateGlossaryButton();
+  return true;
 }
 
 function storedTheme() {
@@ -444,6 +766,11 @@ function renderTranscriptEntry(block, index) {
     const text = document.createElement("span");
     text.className = "transcript-text";
     text.textContent = block.text.trimStart();
+    // ✎ lets the user correct this block; corrections feed the 慣用詞庫. Hidden
+    // in 示意模式 (no real recognition to improve) and while streaming.
+    if (!DEMO_MODE) {
+      meta.append(createBlockEditButton(index, text));
+    }
     const body = document.createElement("span");
     body.className = "entry-body";
     body.append(text);
@@ -472,6 +799,98 @@ function renderTranscriptEntry(block, index) {
     entry.append(details);
   }
   return entry;
+}
+
+// ── 逐字稿編輯 → 慣用詞庫學習 ─────────────────────────────────────────────────
+// Each block's text can be edited in place; the diff between the original and the
+// edit is learned as a 原詞→改成 correction, and the whole transcript is rebuilt
+// from the blocks so 複製/下載/儲存 reflect the change.
+
+function createBlockEditButton(index, textEl) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "entry-edit";
+  button.textContent = "✎";
+  button.title = "編輯這段文字(系統會記住你的更正,加入慣用詞庫)";
+  button.setAttribute("aria-label", "編輯這段文字");
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    beginEditBlock(index, textEl);
+  });
+  return button;
+}
+
+function beginEditBlock(index, textEl) {
+  if (state.editingIndex !== null) {
+    return;
+  }
+  state.editingIndex = index;
+  textEl.contentEditable = "true";
+  textEl.spellcheck = false;
+  textEl.focus();
+
+  const selection = window.getSelection();
+  if (selection) {
+    const range = document.createRange();
+    range.selectNodeContents(textEl);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  const commit = () => {
+    textEl.removeEventListener("blur", commit);
+    textEl.removeEventListener("keydown", onKeydown);
+    commitEditBlock(index, textEl);
+  };
+  const onKeydown = (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      textEl.blur();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      // Cancel: restore the original text, then commit (a no-op diff).
+      const block = state.transcriptBlocks[index];
+      if (block) {
+        textEl.textContent = block.text.trimStart();
+      }
+      textEl.blur();
+    }
+  };
+  textEl.addEventListener("blur", commit);
+  textEl.addEventListener("keydown", onKeydown);
+}
+
+function commitEditBlock(index, textEl) {
+  if (state.editingIndex !== index) {
+    return;
+  }
+  state.editingIndex = null;
+  textEl.contentEditable = "false";
+
+  const block = state.transcriptBlocks[index];
+  if (!block) {
+    renderTranscriptView();
+    return;
+  }
+
+  const oldDisplayed = block.text.trimStart();
+  const leading = block.text.slice(0, block.text.length - oldDisplayed.length);
+  const newDisplayed = textEl.textContent.replace(/\s+$/u, "");
+
+  if (!newDisplayed || newDisplayed === oldDisplayed) {
+    renderTranscriptView();
+    return;
+  }
+
+  const { from, to } = diffTerms(oldDisplayed, newDisplayed);
+  const learned = learnGlossary(from, to);
+
+  block.text = leading + newDisplayed;
+  state.transcript = state.transcriptBlocks.map((entry) => entry.text).join("").replace(/^\s+/u, "");
+  renderTranscriptView();
+  setTranscriptActions(Boolean(state.transcript.trim()));
+  scheduleSessionPersist();
+  flashStats(learned ? `已學習:${from} → ${to}` : "已更新文字");
 }
 
 function toggleEntryDetails(index) {
@@ -1077,8 +1496,14 @@ function bindViewTabs() {
 }
 
 function entryIndexFromEvent(event) {
-  // The 段落播放 button lives inside entry-main but drives its own action.
-  if (event.target.closest?.(".seg-play")) {
+  // The 段落播放 / 編輯 buttons live inside entry-main but drive their own action,
+  // and an in-progress inline edit must not toggle the details panel either.
+  if (
+    event.target.closest?.(".seg-play") ||
+    event.target.closest?.(".entry-edit") ||
+    event.target.closest?.("[contenteditable='true']") ||
+    state.editingIndex !== null
+  ) {
     return null;
   }
   const main = event.target.closest?.(".entry-main[role='button']");
@@ -1720,7 +2145,15 @@ async function start() {
     state.source.connect(state.worklet);
     state.worklet.connect(state.silence).connect(state.audioContext.destination);
 
-    ws.send(JSON.stringify({ type: "start", sampleRate: AUDIO_SAMPLE_RATE, language: "zh", chunkMs: AUDIO_CHUNK_MS }));
+    ws.send(
+      JSON.stringify({
+        type: "start",
+        sampleRate: AUDIO_SAMPLE_RATE,
+        languages: startLanguages(),
+        glossary: state.glossary,
+        chunkMs: AUDIO_CHUNK_MS,
+      }),
+    );
     setStatus("收音中", "live");
     startClock();
   } catch (error) {
@@ -1782,8 +2215,10 @@ async function analyzeFile(file) {
         type: "start",
         sampleRate: AUDIO_SAMPLE_RATE,
         // Loaded files may be music or non-Chinese audio; let the model detect
-        // the language instead of forcing zh, which garbles melodies.
-        language: "auto",
+        // the language instead of forcing zh, which garbles melodies. The 慣用詞庫
+        // corrections still apply to whatever is recognised.
+        languages: ["auto"],
+        glossary: state.glossary,
         chunkMs: AUDIO_CHUNK_MS,
         mode: "file",
       }),
@@ -2016,6 +2451,10 @@ els.about?.addEventListener("click", (event) => {
 });
 bindViewTabs();
 bindEntryToggle();
+updateLangButton();
+updateGlossaryButton();
+els.lang?.addEventListener("click", openLanguageDialog);
+els.glossary?.addEventListener("click", openGlossaryDialog);
 SYSTEM_DARK_QUERY.addEventListener("change", syncSystemTheme);
 els.toggle.addEventListener("click", handleToggle);
 els.load.addEventListener("click", () => {

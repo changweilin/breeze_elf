@@ -1,6 +1,7 @@
 import unittest
 
 from breeze_elf.protocol import (
+    GlossaryEntry,
     ProtocolError,
     StartMessage,
     StopMessage,
@@ -14,8 +15,40 @@ class ProtocolTests(unittest.TestCase):
         message = parse_client_text(
             '{"type":"start","sampleRate":16000,"language":"zh","chunkMs":1000}'
         )
-        self.assertEqual(message, StartMessage(sample_rate=16000, language="zh", chunk_ms=1000))
+        self.assertEqual(
+            message,
+            StartMessage(
+                sample_rate=16000, language="zh", chunk_ms=1000, languages=("zh",)
+            ),
+        )
         self.assertEqual(message.mode, "live")
+
+    def test_parse_start_languages_dedupes_lowercases_and_caps_at_four(self):
+        message = parse_client_text(
+            '{"type":"start","sampleRate":16000,"chunkMs":250,'
+            '"languages":["ZH","en","zh","ja","ko","es"]}'
+        )
+        self.assertEqual(message.languages, ("zh", "en", "ja", "ko"))
+        # The primary/back-compat single language mirrors the first entry.
+        self.assertEqual(message.language, "zh")
+
+    def test_parse_start_languages_fall_back_to_single_language(self):
+        message = parse_client_text(
+            '{"type":"start","sampleRate":16000,"language":"auto","chunkMs":250,"mode":"file"}'
+        )
+        self.assertEqual(message.languages, ("auto",))
+
+    def test_parse_start_glossary_filters_invalid_entries(self):
+        message = parse_client_text(
+            '{"type":"start","sampleRate":16000,"chunkMs":250,"glossary":['
+            '{"from":"機器學習","to":"Mike 學習"},'
+            '{"from":"同","to":"同"},'          # no-op, dropped
+            '{"from":"","to":"x"},'            # empty source, dropped
+            '"nonsense"]}'                      # not an object, dropped
+        )
+        self.assertEqual(
+            message.glossary, (GlossaryEntry(source="機器學習", target="Mike 學習"),)
+        )
 
     def test_parse_start_file_mode(self):
         message = parse_client_text(
