@@ -2,6 +2,7 @@ const els = {
   toggle: document.querySelector("#toggle"),
   load: document.querySelector("#load"),
   fileInput: document.querySelector("#file"),
+  scenario: document.querySelector("#scenario"),
   clear: document.querySelector("#clear"),
   lang: document.querySelector("#lang"),
   glossary: document.querySelector("#glossary"),
@@ -178,6 +179,8 @@ const state = {
   // 辨識語言限制 + 自由偵測 + 慣用詞庫,從 localStorage 還原(下方函式宣告已提升)。
   languages: sanitizeLanguages(INITIAL_SETTINGS.languages) || DEFAULT_LANGUAGES.slice(),
   autoDetectLang: Boolean(INITIAL_SETTINGS.autoDetectLang),
+  // 載入音檔的後製情境:"general" 直接辨識,"music" 先 Demucs 分離人聲再辨識歌詞。
+  scenario: INITIAL_SETTINGS.scenario === "music" ? "music" : "general",
   glossary: loadStoredGlossary(),
   editingIndex: null,
 };
@@ -256,6 +259,7 @@ function persistSettings() {
         viewMode: state.viewMode,
         languages: state.languages,
         autoDetectLang: state.autoDetectLang,
+        scenario: state.scenario,
       }),
     );
   } catch {
@@ -2193,6 +2197,21 @@ async function analyzeFile(file) {
     return;
   }
 
+  // 音樂情境:先用 Demucs 分離人聲,後續辨識/基頻/播放都跑在乾淨人聲上,避免
+  // Whisper 在整段混音上幻覺。分離失敗就退回原始混音,至少還能辨識。
+  if (state.scenario === "music") {
+    try {
+      setStatus("分離人聲中(Demucs)", "live");
+      const vocals = await separateVocals(decoded.pcm, decoded.sampleRate);
+      if (vocals && vocals.length) {
+        decoded = { pcm: vocals, sampleRate: decoded.sampleRate };
+      }
+    } catch (error) {
+      console.error("separateVocals failed", error);
+      flashStats(error?.message || "人聲分離失敗,改用原始音檔");
+    }
+  }
+
   renderTranscript("", { persist: false });
   els.partial.textContent = "";
   await clearRecordedAudio();
@@ -2238,6 +2257,44 @@ async function analyzeFile(file) {
     state.ws?.close();
     setStatus(error?.message || "分析失敗", "error");
   }
+}
+
+async function separateVocals(pcm, sampleRate) {
+  const response = await fetch("/api/enhance/separate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pcmBase64: pcmToBase64(pcm), sampleRate, scenario: "music" }),
+  });
+  if (!response.ok) {
+    let detail = `HTTP ${response.status}`;
+    try {
+      detail = (await response.json())?.detail || detail;
+    } catch {
+      // non-JSON error body; keep the status line
+    }
+    throw new Error(detail);
+  }
+  const data = await response.json();
+  return base64ToPcm(data.pcmBase64);
+}
+
+function pcmToBase64(int16) {
+  const bytes = new Uint8Array(int16.buffer, int16.byteOffset, int16.byteLength);
+  let binary = "";
+  const CHUNK = 0x8000; // chunked so a big song does not blow the arg-count limit
+  for (let offset = 0; offset < bytes.length; offset += CHUNK) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(offset, offset + CHUNK));
+  }
+  return btoa(binary);
+}
+
+function base64ToPcm(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return new Int16Array(bytes.buffer, 0, bytes.byteLength >> 1);
 }
 
 async function streamPcmToSocket(ws, pcm) {
@@ -2469,6 +2526,13 @@ els.fileInput.addEventListener("change", (event) => {
     void analyzeFile(file);
   }
 });
+if (els.scenario) {
+  els.scenario.value = state.scenario;
+  els.scenario.addEventListener("change", () => {
+    state.scenario = els.scenario.value === "music" ? "music" : "general";
+    persistSettings();
+  });
+}
 els.clear.addEventListener("click", () => {
   renderTranscript("", { persist: false });
   els.partial.textContent = "";

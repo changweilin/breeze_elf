@@ -35,11 +35,13 @@ from .audio import (
     hz_to_jianpu,
     jianpu_glide,
     jianpu_to_semitones,
+    pcm16le_to_float32,
     pitch_cents_off,
     prepare_asr_audio,
     summarize_pitch,
 )
 from .config import get_settings
+from .enhance import build_enhancer, build_separator
 from .protocol import (
     GlossaryEntry,
     PingMessage,
@@ -153,6 +155,14 @@ class VoiceUpdateRequest(BaseModel):
 class VoiceConvertRequest(BaseModel):
     voiceId: str = Field(min_length=1)
     audioBase64: str = Field(min_length=1)
+
+
+class SeparateRequest(BaseModel):
+    # Raw 16-bit little-endian mono PCM (base64) at ``sampleRate`` — the same
+    # format the audio WebSocket streams, so the client needs no WAV encoder.
+    pcmBase64: str = Field(min_length=1)
+    sampleRate: int = Field(default=16_000, ge=8_000, le=48_000)
+    scenario: str = Field(default="music", max_length=16)
 
 
 class VoiceTtsRequest(BaseModel):
@@ -320,6 +330,12 @@ class AnalyzeState:
 
 settings = get_settings()
 asr_engine = build_asr_from_env(settings)
+# Neural enhancement stage in front of Whisper (NullEnhancer when off / no extra).
+# ``live``/``file`` can differ so the latency-sensitive mic path and the offline
+# file path are tuned independently; the separator is the whole-file music pass.
+live_enhancer = build_enhancer("live", settings)
+file_enhancer = build_enhancer("file", settings)
+separator = build_separator(settings)
 voice_engine = build_voice_from_env(settings)
 voice_load_state = VoiceLoadState()
 analyze_state = AnalyzeState()
@@ -345,6 +361,13 @@ async def lifespan(app: FastAPI):
         except Exception as exc:  # pragma: no cover - depends on local ASR setup
             app.state.asr_error = str(exc)
             LOGGER.exception("ASR startup load failed")
+        # Warm the live enhancer too so the first utterance is not slow; failure
+        # is non-fatal (the enhancer self-disables and falls back to raw audio).
+        if live_enhancer.name != "off":
+            try:
+                await loop.run_in_executor(None, live_enhancer.load)
+            except Exception:  # pragma: no cover - depends on optional extra
+                LOGGER.exception("Live enhancer startup load failed")
 
     try:
         yield
@@ -402,6 +425,10 @@ async def health() -> JSONResponse:
             "asrConcurrency": settings.asr_concurrency,
             "asrQueueDepth": app.state.asr_queue.queue_depth,
             "asrError": app.state.asr_error,
+            "enhanceLive": live_enhancer.name,
+            "enhanceFile": file_enhancer.name,
+            "enhanceDevice": settings.enhance_device,
+            "separatorAvailable": separator.available,
             "voiceProvider": settings.voice_provider,
             "voiceBackend": voice_engine.backend,
             "voiceModel": getattr(voice_engine, "model_name", "unknown"),
@@ -661,6 +688,51 @@ async def convert_voice(payload: VoiceConvertRequest) -> JSONResponse:
     return JSONResponse({"ok": True, **_audio_response(result)})
 
 
+@app.post("/api/enhance/separate")
+async def separate_audio(payload: SeparateRequest) -> JSONResponse:
+    """Isolate the vocals stem from a whole music recording (Demucs htdemucs).
+
+    The 音樂 post-processing pass: the client sends the full decoded PCM once,
+    before streaming, so recognition runs on isolated 歌詞 instead of a full mix.
+    """
+    if not separator.available:
+        raise HTTPException(
+            status_code=503,
+            detail="source separation not installed; install torch (CUDA) + demucs "
+            "(see README 'Speech Enhancement & Source Separation')",
+        )
+    try:
+        raw = base64.b64decode(payload.pcmBase64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="invalid PCM payload") from exc
+    samples = pcm16le_to_float32(raw)
+    if samples.size == 0:
+        raise HTTPException(status_code=400, detail="audio payload is empty")
+
+    loop = asyncio.get_running_loop()
+    try:
+        vocals = await loop.run_in_executor(
+            None, separator.separate_vocals, samples, payload.sampleRate
+        )
+    except Exception as exc:
+        LOGGER.exception("Source separation failed")
+        raise HTTPException(status_code=500, detail=f"source separation failed: {exc}") from exc
+
+    pcm = (np.clip(vocals, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
+    return JSONResponse(
+        {
+            "ok": True,
+            "pcmBase64": base64.b64encode(pcm).decode("ascii"),
+            "sampleRate": payload.sampleRate,
+            "durationSeconds": round(vocals.size / payload.sampleRate, 3)
+            if payload.sampleRate
+            else 0.0,
+            "model": separator.name,
+            "device": separator.device,
+        }
+    )
+
+
 @app.post("/api/voice/outputs")
 async def save_voice_output_endpoint(payload: VoiceOutputSaveRequest) -> JSONResponse:
     audio = _decode_audio(payload.audioBase64)
@@ -813,6 +885,7 @@ def _audio_response(result) -> dict[str, Any]:
 @dataclass
 class StreamState:
     started: bool = False
+    mode: str = "live"
     segmenter: AudioWindowBuffer | AudioUtteranceBuffer | None = None
     queue: asyncio.Queue[AudioWindow] | None = None
     stop_event: asyncio.Event = field(default_factory=asyncio.Event)
@@ -897,6 +970,7 @@ async def _handle_text_message(
             await send_json(server_event("error", message="stream already started"))
             return False
 
+        state.mode = message.mode
         state.segmenter = _build_segmenter(message.sample_rate)
         # File analysis streams a whole recording at once; an unbounded queue
         # keeps every window so nothing is dropped to backpressure. Live mic
@@ -923,6 +997,7 @@ async def _handle_text_message(
                 device=asr_queue.device,
                 model=asr_queue.model,
                 computeType=asr_queue.compute_type,
+                enhance=(file_enhancer if message.mode == "file" else live_enhancer).name,
             )
         )
         return False
@@ -983,6 +1058,10 @@ async def _process_windows(
 ) -> None:
     assert state.queue is not None
 
+    loop = asyncio.get_running_loop()
+    # Fixed per stream: the file path may use a different (or no) enhancer than
+    # the latency-sensitive live path.
+    enhancer = file_enhancer if state.mode == "file" else live_enhancer
     primary_language = languages[0] if languages else "zh"
     # ``source→target`` replacements (longest source first so a longer 詞 wins
     # over a substring), and the preferred spellings fed to the Whisper prompt.
@@ -1028,6 +1107,13 @@ async def _process_windows(
                     settings.sample_rate,
                     profile=settings.audio_preprocess,
                 )
+                # Neural denoise+dereverb runs in a worker thread so the model's
+                # GPU/CPU work never blocks the event loop; it self-disables to a
+                # passthrough on failure, so this never breaks the ASR feed.
+                if enhancer.name != "off":
+                    asr_samples = await loop.run_in_executor(
+                        None, enhancer.enhance, asr_samples, settings.sample_rate
+                    )
                 queued_result = await asr_queue.transcribe(
                     asr_samples,
                     settings.sample_rate,

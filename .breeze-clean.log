@@ -1,0 +1,126 @@
+INFO:     Started server process [22632]
+INFO:     Waiting for application startup.
+INFO:httpx:HTTP Request: GET https://huggingface.co/api/models/Systran/faster-whisper-medium/revision/main "HTTP/1.1 200 OK"
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8788 (Press CTRL+C to quit)
+INFO:     127.0.0.1:62318 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62364 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60605 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60727 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56990 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53287 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63509 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54844 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62424 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61527 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55545 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55545 - "GET /app.js?v=11 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55545 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55545 - "GET /service-worker.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55545 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55545 - "GET /service-worker.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50377 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52561 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51978 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51978 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52008 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52008 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52008 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53248 - "GET /service-worker.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56004 - "WebSocket /ws/audio" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     127.0.0.1:61106 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61143 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61178 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61211 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61247 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61286 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55836 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55871 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55904 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55939 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55977 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56013 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56048 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56081 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56118 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56152 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63029 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63053 - "GET /app.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63054 - "GET /audio-worklet.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63055 - "GET /index.html HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:63056 - "GET /manifest.webmanifest HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63057 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63069 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63103 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63139 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63175 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63211 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63245 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63281 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63316 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63350 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63383 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63419 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63456 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63491 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49873 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51119 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60694 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60729 - "WebSocket /ws/audio" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     127.0.0.1:60732 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60769 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60803 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60837 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59377 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59412 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59447 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59483 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59517 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59551 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59586 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59620 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59655 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59688 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59727 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59385 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59427 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55525 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55560 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55560 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55560 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55560 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55560 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60858 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60858 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58034 - "GET /app.js?v=11 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58034 - "GET /service-worker.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60858 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58102 - "WebSocket /ws/audio" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     127.0.0.1:51217 - "WebSocket /ws/audio" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     127.0.0.1:51221 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51258 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51293 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51326 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52900 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57396 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57396 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57459 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57459 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57459 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57459 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52722 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52722 - "GET /service-worker.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62139 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64480 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64480 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64480 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64480 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64480 - "GET / HTTP/1.1" 200 OK

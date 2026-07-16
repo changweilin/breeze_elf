@@ -1942,6 +1942,13 @@
       <section class="controls" aria-label="controls">
         <input id="file" class="visually-hidden" type="file" accept="audio/*" />
         <button id="load" type="button" aria-label="載入音檔分析" title="載入音檔進行辨識">⤵ 載入音檔</button>
+        <label id="scenario-field" title="載入音檔的後製情境:音樂會先用 Demucs 分離人聲再辨識歌詞">
+          <span class="visually-hidden">音檔後製情境</span>
+          <select id="scenario" aria-label="音檔後製情境">
+            <option value="general">🗣 一般人聲</option>
+            <option value="music">🎵 音樂(分離人聲)</option>
+          </select>
+        </label>
         <button id="toggle" class="primary" type="button" aria-pressed="false">▶ 開始</button>
         <button id="clear" type="button">清除</button>
       </section>
@@ -2319,7 +2326,7 @@
       </form>
     </dialog>
 
-    <script src="./app.js?v=26" type="module"></script>
+    <script src="./app.js?v=27" type="module"></script>
     <script src="./voice.js?v=23" type="module"></script>
   </body>
 </html>

@@ -72,6 +72,38 @@ non-Chinese audio is no longer transcribed as Chinese gibberish. Note that a spe
 still hallucinates lyrics on purely instrumental tracks — for melodies the pitch / 簡譜
 output is the meaningful result.
 
+## Speech Enhancement & Source Separation (optional)
+
+Two neural models can sit in front of Whisper on a GPU (tuned for a 12 GB RTX 3060).
+Both are optional — the base install stays torch-free and falls back to the DSP-only
+pipeline. Install the extra with the CUDA build matching the box:
+
+```bash
+uv pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
+uv pip install deepfilternet demucs
+# then run with the live enhancer on:
+BREEZE_ENHANCE_LIVE=deepfilter uv run python -m breeze_elf
+```
+
+> Install torch from the CUDA wheel index as shown — **not** with `uv sync --extra enhance`,
+> which resolves the CPU-only `torch` pinned in `uv.lock` and silently disables the GPU.
+> `uv run` keeps the CUDA build already present in `.venv`; it does not strip it.
+
+- **Real-time denoise + dereverb (DeepFilterNet3).** Set `BREEZE_ENHANCE_LIVE=deepfilter`
+  (and/or `BREEZE_ENHANCE_FILE=deepfilter`) to run DeepFilterNet3 per utterance before
+  Whisper. It is ~70–95× real time once warm (~15–60 ms per utterance), so it clears the
+  far-mic / reverb / low-level phone pickup that otherwise degrades recognition. Any
+  load/inference failure silently falls back to the raw audio.
+- **Music source separation (Demucs htdemucs).** Pick `🎵 音樂(分離人聲)` in the 情境
+  selector next to `載入音檔`. The whole file is sent to `/api/enhance/separate` once, the
+  `vocals` stem is isolated, and recognition + 基頻/簡譜 then run on the clean vocal instead
+  of hallucinating over the full mix. `🗣 一般人聲` skips separation. The choice persists
+  in `localStorage` and needs no env var; the endpoint returns `503` when the extra is not
+  installed.
+
+`GET /health` reports the active stage via `enhanceLive` / `enhanceFile` / `enhanceDevice`
+/ `separatorAvailable`, and each stream's `ready` event carries the active `enhance` name.
+
 ## 變聲工作室 (Voice Studio)
 
 The bottom icon tabs switch between the transcribe page (`逐字稿`) and a voice page
@@ -142,6 +174,9 @@ Environment variables:
 | `BREEZE_WINDOW_SECONDS` | `2.0` | ASR window duration. |
 | `BREEZE_OVERLAP_SECONDS` | `0.5` | Overlap between ASR windows. |
 | `BREEZE_AUDIO_PREPROCESS` | `natural` | ASR audio preparation: `off`, `natural`, or stronger `speech`. |
+| `BREEZE_ENHANCE_LIVE` | `off` | Neural denoise+dereverb on the live-mic path: `off` or `deepfilter` (needs the `[enhance]` extra). |
+| `BREEZE_ENHANCE_FILE` | `off` | Neural denoise+dereverb on the loaded-file path: `off` or `deepfilter`. |
+| `BREEZE_ENHANCE_DEVICE` | `auto` | Enhancement/separation device: `auto`, `cuda`, or `cpu`. |
 | `BREEZE_MAX_QUEUE_WINDOWS` | `4` | Maximum pending ASR windows per client. |
 | `BREEZE_SEGMENTER` | `vad` | `vad` for utterance segments, or `window` for fixed windows. |
 | `BREEZE_VAD_FRAME_MS` | `100` | RMS VAD frame size. |

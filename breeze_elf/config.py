@@ -45,6 +45,12 @@ class Settings:
     overlap_seconds: float = 0.5
     rms_threshold: float = 0.008
     audio_preprocess: str = "natural"
+    # Neural speech enhancement in front of Whisper (needs the ``[enhance]``
+    # extra). ``off`` keeps the torch-free DSP-only path. ``deepfilter`` runs
+    # DeepFilterNet3 denoise+dereverb per utterance on the live / file path.
+    enhance_live: str = "off"
+    enhance_file: str = "off"
+    enhance_device: str = "auto"
     max_queue_windows: int = 4
     segmenter: str = "vad"
     vad_frame_ms: int = 100
@@ -94,6 +100,9 @@ def get_settings() -> Settings:
             "natural",
             {"off", "natural", "speech"},
         ),
+        enhance_live=_choice_env("BREEZE_ENHANCE_LIVE", "off", {"off", "deepfilter"}),
+        enhance_file=_choice_env("BREEZE_ENHANCE_FILE", "off", {"off", "deepfilter"}),
+        enhance_device=_choice_env("BREEZE_ENHANCE_DEVICE", "auto", {"auto", "cuda", "cpu"}),
         max_queue_windows=max(1, _int_env("BREEZE_MAX_QUEUE_WINDOWS", 4)),
         segmenter=os.getenv("BREEZE_SEGMENTER", "vad").strip().lower(),
         vad_frame_ms=max(1, _int_env("BREEZE_VAD_FRAME_MS", 100)),
