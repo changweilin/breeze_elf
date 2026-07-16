@@ -75,6 +75,9 @@ _ENVELOPE_BANDS = 28
 _ENVELOPE_MIN_HZ = 90.0
 _ENVELOPE_MAX_HZ = 7600.0
 _ENVELOPE_MAX_GAIN_DB = 9.0
+# Below this peak correction the source timbre already matches the target, so the
+# matching EQ (and its STFT round-trip) is skipped rather than stacked on top.
+_ENVELOPE_MIN_GAIN_DB = 1.0
 
 
 @dataclass(frozen=True)
@@ -657,22 +660,70 @@ def _istft(stft: np.ndarray, n_fft: int, hop: int) -> np.ndarray:
     return out[pad : len(out) - pad] if pad > 0 else out
 
 
+def _spectral_peaks(magnitude: np.ndarray) -> np.ndarray:
+    """Indices of local magnitude maxima (greater than their two neighbours each
+    side) — the sinusoidal peaks a locked phase vocoder propagates from."""
+    if magnitude.size < 5:
+        return np.empty(0, dtype=np.intp)
+    m = magnitude
+    is_peak = (
+        (m[2:-2] > m[:-4])
+        & (m[2:-2] > m[1:-3])
+        & (m[2:-2] > m[3:-1])
+        & (m[2:-2] > m[4:])
+    )
+    return np.nonzero(is_peak)[0] + 2
+
+
+def _peak_owner(peaks: np.ndarray, n_bins: int) -> np.ndarray:
+    """For every bin, the index (into ``peaks``) of the peak whose region of
+    influence it falls in — boundaries sit at the midpoints between peaks."""
+    if peaks.size <= 1:
+        return np.zeros(n_bins, dtype=np.intp)
+    mids = (peaks[:-1] + peaks[1:]) / 2.0
+    return np.searchsorted(mids, np.arange(n_bins))
+
+
 def _phase_vocoder(stft: np.ndarray, rate: float, hop: int) -> np.ndarray:
+    """Time-scale ``stft`` by ``rate`` with identity phase locking.
+
+    A plain phase vocoder advances every bin's phase independently, so the bins
+    that belong to one sinusoid drift out of phase with each other — the familiar
+    metallic / reverberant "phasiness" that makes pitch-shifted speech sound
+    robotic. Identity phase locking (Laroche & Dolson 1999) still tracks each
+    peak's true frequency via the usual propagation, but locks every non-peak
+    bin's output phase to its nearest peak, preserving the intra-region phase
+    relationships from the analysis frame so the retuned voice stays natural.
+    """
     n_bins, n_frames = stft.shape
     time_steps = np.arange(0, n_frames, rate)
     output = np.zeros((n_bins, len(time_steps)), dtype=np.complex64)
     phase_advance = 2.0 * np.pi * hop * np.arange(n_bins) / (2 * (n_bins - 1))
     padded = np.concatenate([stft, np.zeros((n_bins, 2), dtype=stft.dtype)], axis=1)
-    phase = np.angle(padded[:, 0])
+    # Accumulated (unlocked) synthesis phase — tracks true peak frequency.
+    synth_phase = np.angle(padded[:, 0])
     two_pi = 2.0 * np.pi
     for out_index, step in enumerate(time_steps):
         left = int(np.floor(step))
         frac = step - left
-        magnitude = (1.0 - frac) * np.abs(padded[:, left]) + frac * np.abs(padded[:, left + 1])
-        output[:, out_index] = magnitude * np.exp(1j * phase)
-        delta = np.angle(padded[:, left + 1]) - np.angle(padded[:, left]) - phase_advance
+        left_mag = np.abs(padded[:, left])
+        magnitude = (1.0 - frac) * left_mag + frac * np.abs(padded[:, left + 1])
+        analysis_phase = np.angle(padded[:, left])
+
+        # Lock output phase to peaks: each region shares its peak's phase
+        # rotation, keeping the sinusoid's bins coherent. Fall back to the
+        # unlocked phase for frames with no clear peak (near-silence / noise).
+        peaks = _spectral_peaks(left_mag)
+        if peaks.size:
+            rotation = synth_phase[peaks] - analysis_phase[peaks]
+            out_phase = analysis_phase + rotation[_peak_owner(peaks, n_bins)]
+        else:
+            out_phase = synth_phase
+        output[:, out_index] = magnitude * np.exp(1j * out_phase)
+
+        delta = np.angle(padded[:, left + 1]) - analysis_phase - phase_advance
         delta -= two_pi * np.round(delta / two_pi)
-        phase += phase_advance + delta
+        synth_phase = synth_phase + phase_advance + delta
     return output
 
 
@@ -1335,28 +1386,78 @@ def _song_base(
     return _synthesize_song(notes, synth_rate), synth_rate, False
 
 
-_OS_TTS_SCRIPT = (
-    "Add-Type -AssemblyName System.Speech;"
-    "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer;"
-    "$zh = $s.GetInstalledVoices() | ForEach-Object { $_.VoiceInfo } |"
-    " Where-Object { $_.Culture.Name -like 'zh*' } | Select-Object -First 1;"
-    "if ($zh) { $s.SelectVoice($zh.Name) };"
-    "$s.SetOutputToWaveFile($env:BREEZE_TTS_OUT);"
-    "$s.Speak($env:BREEZE_TTS_TEXT);"
-    "$s.Dispose()"
-)
+# Prefer the modern WinRT synthesizer (Windows.Media.SpeechSynthesis) with a
+# Natural/OneCore zh voice — far less robotic than legacy SAPI5 — and fall back
+# to System.Speech (SAPI5) inside the same process when WinRT is unavailable, has
+# no Chinese voice, or throws. One PowerShell spawn either way. Text/output travel
+# via env vars (never interpolated into the script) so input can't break out.
+_OS_TTS_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+$text = $env:BREEZE_TTS_TEXT
+$out = $env:BREEZE_TTS_OUT
+
+function Convert-WithWinRT {
+    Add-Type -AssemblyName System.Runtime.WindowsRuntime
+    $asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() |
+        Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and
+            $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]
+    function Await($op, $type) {
+        $task = $asTaskGeneric.MakeGenericMethod($type).Invoke($null, @($op))
+        $task.Wait(-1) | Out-Null
+        $task.Result
+    }
+    [Windows.Media.SpeechSynthesis.SpeechSynthesizer, Windows.Media.SpeechSynthesis, ContentType = WindowsRuntime] | Out-Null
+    [Windows.Storage.Streams.DataReader, Windows.Storage.Streams, ContentType = WindowsRuntime] | Out-Null
+    $synth = New-Object Windows.Media.SpeechSynthesis.SpeechSynthesizer
+    $zh = [Windows.Media.SpeechSynthesis.SpeechSynthesizer]::AllVoices |
+        Where-Object { $_.Language -like 'zh*' }
+    if (-not $zh) { throw 'no zh WinRT voice' }
+    # Prefer the most natural voice available: cloud/neural Natural or Online
+    # voices first, then the better OneCore/mobile voices, then any zh voice.
+    # 'Hanhan' (the legacy desktop voice mirrored from SAPI5) is the last resort.
+    $prefs = @('*Natural*', '*Online*', '*Yating*', '*HsiaoChen*', '*HsiaoYu*', '*Zhiwei*')
+    $pick = $null
+    foreach ($p in $prefs) {
+        if (-not $pick) { $pick = $zh | Where-Object { $_.DisplayName -like $p } | Select-Object -First 1 }
+    }
+    if (-not $pick) { $pick = $zh | Select-Object -First 1 }
+    $synth.Voice = $pick
+    $stream = Await ($synth.SynthesizeTextToStreamAsync($text)) ([Windows.Media.SpeechSynthesis.SpeechSynthesisStream])
+    $size = [uint32]$stream.Size
+    $reader = New-Object Windows.Storage.Streams.DataReader($stream.GetInputStreamAt([uint64]0))
+    Await ($reader.LoadAsync($size)) ([uint32]) | Out-Null
+    $bytes = New-Object byte[] $size
+    $reader.ReadBytes($bytes)
+    [System.IO.File]::WriteAllBytes($out, $bytes)
+    $synth.Dispose()
+}
+
+function Convert-WithSapi {
+    Add-Type -AssemblyName System.Speech
+    $s = New-Object System.Speech.Synthesis.SpeechSynthesizer
+    $zh = $s.GetInstalledVoices() | ForEach-Object { $_.VoiceInfo } |
+        Where-Object { $_.Culture.Name -like 'zh*' } | Select-Object -First 1
+    if ($zh) { $s.SelectVoice($zh.Name) }
+    $s.SetOutputToWaveFile($out)
+    $s.Speak($text)
+    $s.Dispose()
+}
+
+try { Convert-WithWinRT } catch { Convert-WithSapi }
+"""
 
 
 def _system_tts(text: str) -> tuple[np.ndarray, int] | None:
     """Render real speech with the OS text-to-speech voice.
 
-    On Windows this drives the built-in SAPI5 synthesizer (e.g. Microsoft
-    Hanhan, zh-TW) through PowerShell and returns mono ``float32`` samples plus
-    their sample rate. The text travels via environment variables and is never
-    interpolated into the command, so arbitrary input cannot break out of the
-    script. Returns ``None`` whenever no OS voice is usable (non-Windows host,
-    missing PowerShell, empty text, or a failed render) so callers can fall back
-    to the synthetic voice.
+    On Windows this prefers the modern WinRT synthesizer (a Natural/OneCore zh
+    voice, much less robotic than SAPI5) and falls back to the legacy SAPI5
+    synthesizer (e.g. Microsoft Hanhan, zh-TW) in the same process when WinRT is
+    unavailable; both return mono ``float32`` samples plus their sample rate. The
+    text travels via environment variables and is never interpolated into the
+    command, so arbitrary input cannot break out of the script. Returns ``None``
+    whenever no OS voice is usable (non-Windows host, missing PowerShell, empty
+    text, or a failed render) so callers can fall back to the synthetic voice.
     """
     clean = (text or "").strip()
     if not clean or sys.platform != "win32":
@@ -1503,6 +1604,8 @@ def _apply_envelope_match(
 
     gain_db = (target - source) * (20.0 / math.log(10.0))
     gain_db = _smooth_curve(gain_db, 2)
+    if float(np.max(np.abs(gain_db))) < _ENVELOPE_MIN_GAIN_DB:
+        return samples.astype(np.float32, copy=False)
     gain_db = np.clip(gain_db, -_ENVELOPE_MAX_GAIN_DB, _ENVELOPE_MAX_GAIN_DB)
     linear = 10.0 ** (gain_db / 20.0)
 

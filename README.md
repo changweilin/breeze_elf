@@ -81,7 +81,17 @@ pipeline. Install the extra with the CUDA build matching the box:
 ```bash
 uv pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
 uv pip install deepfilternet demucs
-# then run with the live enhancer on:
+```
+
+Then run with the live enhancer on. PowerShell (Windows):
+
+```powershell
+$env:BREEZE_ENHANCE_LIVE = "deepfilter"; uv run python -m breeze_elf
+```
+
+bash / zsh:
+
+```bash
 BREEZE_ENHANCE_LIVE=deepfilter uv run python -m breeze_elf
 ```
 

@@ -41,7 +41,7 @@ from .audio import (
     summarize_pitch,
 )
 from .config import get_settings
-from .enhance import build_enhancer, build_separator
+from .enhance import build_enhancer, build_separator, preload_torch_cudnn
 from .protocol import (
     GlossaryEntry,
     PingMessage,
@@ -353,9 +353,20 @@ async def lifespan(app: FastAPI):
     app.state.analyze_task = None
     app.state.asr_queue = ASRQueue(asr_engine, settings.asr_concurrency)
     await app.state.asr_queue.start()
+    loop = asyncio.get_running_loop()
+
+    # When GPU enhancement/separation is in play, load torch's cuDNN before
+    # ctranslate2 (Whisper) so the two do not fight over cudnn64_9.dll on Windows.
+    # Must run before any Whisper load (startup or lazy). See preload_torch_cudnn.
+    torch_gpu_in_use = settings.enhance_device != "cpu" and (
+        live_enhancer.name != "off"
+        or file_enhancer.name != "off"
+        or separator.available
+    )
+    if torch_gpu_in_use:
+        await loop.run_in_executor(None, preload_torch_cudnn, settings.enhance_device)
 
     if settings.asr_load_on_startup:
-        loop = asyncio.get_running_loop()
         try:
             await loop.run_in_executor(None, app.state.asr.load)
         except Exception as exc:  # pragma: no cover - depends on local ASR setup

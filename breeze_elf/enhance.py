@@ -50,6 +50,38 @@ def _resolve_device(preference: str) -> str:
         return "cpu"
 
 
+def preload_torch_cudnn(device_preference: str = "auto") -> bool:
+    """Force torch's cuDNN to load before ctranslate2's (Windows DLL conflict).
+
+    torch and ctranslate2 both ship ``cudnn64_9.dll``, but ctranslate2's monolithic
+    build lacks symbols torch needs (e.g. ``cudnnGetLibConfig`` → "Could not load
+    symbol … Error code 127"). Only one ``cudnn64_9.dll`` loads per process —
+    whichever is requested first wins. Whisper (ctranslate2) normally loads at
+    startup before any enhancer, so its older cuDNN wins and torch then fails.
+
+    Running one tiny cuDNN conv on CUDA here, *before* Whisper loads, makes torch's
+    newer cuDNN win; ctranslate2 then shares it (a superset) and both work. A no-op
+    off CUDA or without the ``[enhance]`` extra, and non-fatal on any failure.
+    """
+    if _resolve_device(device_preference) != "cuda":
+        return False
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return False
+        with torch.no_grad():
+            x = torch.zeros(1, 1, 8, 8, device="cuda")
+            weight = torch.zeros(1, 1, 3, 3, device="cuda")
+            torch.nn.functional.conv2d(x, weight)  # a conv forces the cuDNN load
+        torch.cuda.synchronize()
+        LOGGER.info("Loaded torch cuDNN ahead of ctranslate2")
+        return True
+    except Exception as exc:  # pragma: no cover - depends on optional extra
+        LOGGER.warning("torch cuDNN preload failed: %s", exc)
+        return False
+
+
 def _resample(audio, orig_sr: int, target_sr: int):
     """Resample a ``(channels, time)`` torch tensor; a no-op at equal rates."""
     if orig_sr == target_sr:
