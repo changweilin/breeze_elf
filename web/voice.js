@@ -272,7 +272,14 @@ let activeRecorder = null;
 let activeRecordButton = null;
 
 function idleLabel(button) {
-  return button?.dataset.idleLabel || "● 開始錄音";
+  return button?.dataset.idleLabel || "開始錄音";
+}
+
+// Record buttons are icon + label; swap both together so the glyph survives the toggle.
+function setRecordButton(button, recording) {
+  if (!button) return;
+  const label = recording ? "停止錄音" : idleLabel(button);
+  button.innerHTML = `<svg class="ic" aria-hidden="true"><use href="#${recording ? "i-stop" : "i-mic"}"></use></svg><span class="btn-label">${label}</span>`;
 }
 
 // Record/stop toggle. On stop the captured blob is handed to onDone, which kicks
@@ -290,7 +297,7 @@ async function toggleRecording(button, onDone) {
     activeRecorder = null;
     activeRecordButton = null;
     button.classList.remove("recording");
-    button.textContent = idleLabel(button);
+    setRecordButton(button, false);
     let blob = null;
     try {
       blob = await recorder.stop();
@@ -326,7 +333,7 @@ async function toggleRecording(button, onDone) {
   activeRecorder = recorder;
   activeRecordButton = button;
   button.classList.add("recording");
-  button.textContent = "■ 停止錄音";
+  setRecordButton(button, true);
   setStatus("錄音中…", "live");
 }
 
@@ -340,7 +347,7 @@ async function stopActiveRecording(reason) {
   activeRecordButton = null;
   if (button) {
     button.classList.remove("recording");
-    button.textContent = idleLabel(button);
+    setRecordButton(button, false);
   }
   try {
     await recorder.stop();

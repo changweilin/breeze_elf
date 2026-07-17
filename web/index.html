@@ -259,8 +259,8 @@
       }
 
       .controls .iconbtn {
-        width: 42px;
-        min-width: 42px;
+        width: 40px;
+        min-width: 40px;
         min-height: 42px;
       }
 
@@ -1395,8 +1395,15 @@
 
       /* 執行(念出來 / 唱出來)做成圖示鍵,與上傳鍵在同列右邊等寬並列。 */
       .icon-run {
-        font-size: 1.15rem;
-        line-height: 1;
+        display: grid;
+        place-items: center;
+      }
+
+      /* the info "i" circle is smaller than a normal button — shrink its glyph to fit. */
+      .voice-desc-toggle .ic {
+        width: 15px;
+        height: 15px;
+        stroke-width: 2;
       }
 
       .voice-audio {
@@ -1893,19 +1900,28 @@
         background: var(--panel-subtle);
       }
 
+      /* icon + tiny label, stacked (same idiom as the bottom tab bar). */
       .subtab {
-        min-height: 42px;
+        min-height: 46px;
         min-width: 0;
-        padding: 0 2px;
+        padding: 4px 2px;
         border: 0;
         border-radius: 8px;
         background: transparent;
         color: var(--muted);
         font: inherit;
         font-weight: 720;
-        font-size: 0.86rem;
         white-space: nowrap;
         cursor: pointer;
+        display: grid;
+        justify-items: center;
+        align-content: center;
+        gap: 3px;
+      }
+
+      .subtab-label {
+        font-size: 0.68rem;
+        line-height: 1;
       }
 
       .subtab[aria-selected="true"] {
@@ -2185,7 +2201,7 @@
       <section id="vpanel-convert" class="voice-card vpanel">
         <div class="voice-card-title">
           <h2>聲音轉換</h2>
-          <button class="voice-desc-toggle" type="button" aria-expanded="false" aria-label="顯示說明" title="顯示說明">i</button>
+          <button class="voice-desc-toggle" type="button" aria-expanded="false" aria-label="顯示說明" title="顯示說明"><svg class="ic" aria-hidden="true"><use href="#i-info"></use></svg></button>
         </div>
         <p class="voice-hint voice-desc" hidden>錄一段或上傳你的聲音,系統會自動用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」重新詮釋。</p>
         <div class="voice-source">
@@ -2230,7 +2246,7 @@
       <section id="vpanel-tts" class="voice-card vpanel" hidden>
         <div class="voice-card-title">
           <h2>文字轉換</h2>
-          <button class="voice-desc-toggle" type="button" aria-expanded="false" aria-label="顯示說明" title="顯示說明">i</button>
+          <button class="voice-desc-toggle" type="button" aria-expanded="false" aria-label="顯示說明" title="顯示說明"><svg class="ic" aria-hidden="true"><use href="#i-info"></use></svg></button>
         </div>
         <p class="voice-hint voice-desc" hidden>輸入或上傳文字,用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」念出來。</p>
         <div class="voice-source">
@@ -2259,7 +2275,7 @@
       <section id="vpanel-sing" class="voice-card vpanel" hidden>
         <div class="voice-card-title">
           <h2>簡譜唱歌</h2>
-          <button class="voice-desc-toggle" type="button" aria-expanded="false" aria-label="顯示說明" title="顯示說明">i</button>
+          <button class="voice-desc-toggle" type="button" aria-expanded="false" aria-label="顯示說明" title="顯示說明"><svg class="ic" aria-hidden="true"><use href="#i-info"></use></svg></button>
         </div>
         <p class="voice-hint voice-desc" hidden>
           上傳逐字稿(含音高的 .json),或直接編輯下面的簡譜:<strong>一句一排</strong>,上排是<strong>簡譜</strong>(空格分隔,如 <code>1 1 5</code>;滑音用 <code>3↗5</code>;高八度加 <code>'</code>、低八度加 <code>,</code>),下排是<strong>文字</strong>(逐字),兩者可各自編輯,用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」唱出來。想依實測音高、抑揚頓挫演唱,請改用「基頻唱歌」。
@@ -2291,7 +2307,7 @@
       <section id="vpanel-pitch" class="voice-card vpanel" hidden>
         <div class="voice-card-title">
           <h2>基頻唱歌</h2>
-          <button class="voice-desc-toggle" type="button" aria-expanded="false" aria-label="顯示說明" title="顯示說明">i</button>
+          <button class="voice-desc-toggle" type="button" aria-expanded="false" aria-label="顯示說明" title="顯示說明"><svg class="ic" aria-hidden="true"><use href="#i-info"></use></svg></button>
         </div>
         <p class="voice-hint voice-desc" hidden>
           載入「基頻分析(.csv)」後,下方會按段落完整呈現<strong>基頻</strong>(青色音高曲線)、<strong>強度</strong>(橘色填色)與<strong>文字</strong>(上方標記)的對應關係,再用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」依實測音高、抑揚頓挫與氣音重新唱出來。CSV 由逐字稿頁「後處理」後匯出。
@@ -2339,7 +2355,7 @@
           <div class="progress-track">
             <div id="voice-busy-bar" class="progress-fill indeterminate"></div>
           </div>
-          <button id="voice-busy-cancel" type="button" class="danger">■ 中斷</button>
+          <button id="voice-busy-cancel" type="button" class="danger btniconlabel"><svg class="ic" aria-hidden="true"><use href="#i-stop"></use></svg><span class="btn-label">中斷</span></button>
         </div>
       </div>
     </main>
