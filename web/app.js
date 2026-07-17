@@ -6,6 +6,10 @@ const els = {
   clear: document.querySelector("#clear"),
   lang: document.querySelector("#lang"),
   glossary: document.querySelector("#glossary"),
+  search: document.querySelector("#search"),
+  searchDialog: document.querySelector("#search-dialog"),
+  searchInput: document.querySelector("#search-input"),
+  searchResults: document.querySelector("#search-results"),
   viewTabs: Array.from(document.querySelectorAll(".view-tab")),
   analyze: document.querySelector("#analyze"),
   analyzeProgress: document.querySelector("#analyze-progress"),
@@ -1501,6 +1505,7 @@ function setViewMode(mode, { persist = true } = {}) {
     tab.setAttribute("aria-selected", String(tab.dataset.view === state.viewMode));
   });
   renderTranscriptView({ scrollToEnd: true });
+  reapplyCaptureConstraints();
   if (persist) {
     persistSettings();
   }
@@ -1697,6 +1702,155 @@ function restoreTranscriptSession() {
   renderTranscriptView({ scrollToEnd: true });
   setTranscriptActions(Boolean(state.transcript.trim()));
   flashStats("已恢復本機記憶");
+}
+
+// --- 跨稿搜尋 ---------------------------------------------------------------
+
+function openSearchDialog() {
+  if (DEMO_MODE) {
+    flashStats("示意模式無法搜尋");
+    return;
+  }
+  const dialog = els.searchDialog;
+  if (!dialog || typeof dialog.showModal !== "function") {
+    return;
+  }
+  els.searchInput.value = "";
+  dialog.showModal();
+  void runSearch(""); // browse newest-first on open
+  els.searchInput.focus();
+}
+
+function scheduleSearch() {
+  window.clearTimeout(state.searchTimer);
+  state.searchTimer = window.setTimeout(() => void runSearch(els.searchInput.value), 200);
+}
+
+async function runSearch(query) {
+  const list = els.searchResults;
+  if (!list) {
+    return;
+  }
+  // Guard against out-of-order responses (a slow earlier query resolving after a
+  // faster later one) clobbering the results for what's currently in the box.
+  const seq = (state.searchSeq = (state.searchSeq || 0) + 1);
+  try {
+    const params = new URLSearchParams({ q: query.trim() });
+    const response = await fetch(`/api/transcripts/search?${params}`);
+    if (seq !== state.searchSeq) {
+      return;
+    }
+    if (!response.ok) {
+      list.textContent = response.status === 503 ? "搜尋功能未啟用" : "搜尋失敗";
+      return;
+    }
+    const data = await response.json();
+    if (seq !== state.searchSeq) {
+      return;
+    }
+    renderSearchResults(Array.isArray(data.results) ? data.results : []);
+  } catch (error) {
+    if (seq !== state.searchSeq) {
+      return;
+    }
+    console.error("search failed", error);
+    list.textContent = "搜尋失敗";
+  }
+}
+
+function renderSearchResults(results) {
+  const list = els.searchResults;
+  list.replaceChildren();
+  if (!results.length) {
+    const empty = document.createElement("p");
+    empty.className = "lang-hint";
+    empty.textContent = "沒有符合的逐字稿。";
+    list.append(empty);
+    return;
+  }
+  for (const item of results) {
+    list.append(buildSearchResult(item));
+  }
+}
+
+function buildSearchResult(item) {
+  const entry = document.createElement("button");
+  entry.type = "button";
+  entry.className = "search-result";
+
+  const title = document.createElement("span");
+  title.className = "search-result-title";
+  title.textContent = item.title || item.filename || item.id;
+
+  const meta = document.createElement("span");
+  meta.className = "search-result-meta";
+  const badges = [item.hasAudio ? "🔊" : "", item.hasJianpu ? "🎵" : ""].filter(Boolean).join(" ");
+  meta.textContent = badges ? `${formatSearchDate(item.createdAt)} · ${badges}` : formatSearchDate(item.createdAt);
+
+  entry.append(title, meta);
+  if (item.snippet) {
+    const snippet = document.createElement("span");
+    snippet.className = "search-result-snippet";
+    snippet.textContent = item.snippet;
+    entry.append(snippet);
+  }
+  entry.addEventListener("click", () => void openSearchResult(item.id));
+  return entry;
+}
+
+function formatSearchDate(value) {
+  if (!value) {
+    return "";
+  }
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+async function openSearchResult(id) {
+  // Never silently clobber an unsaved live/edited transcript with a stored one.
+  if (state.running) {
+    flashStats("請先停止收音再開啟");
+    return;
+  }
+  if (
+    hasUnsavedTranscript() &&
+    !window.confirm("開啟這份逐字稿會覆蓋目前畫面的內容,是否繼續?")
+  ) {
+    return;
+  }
+  try {
+    const response = await fetch(`/api/transcripts/${encodeURIComponent(id)}`);
+    if (!response.ok) {
+      flashStats("讀取逐字稿失敗");
+      return;
+    }
+    loadTranscriptRecord(await response.json());
+    els.searchDialog?.close();
+  } catch (error) {
+    console.error("open transcript failed", error);
+    flashStats("讀取逐字稿失敗");
+  }
+}
+
+function hasUnsavedTranscript() {
+  return Boolean(state.transcript.trim()) || state.transcriptBlocks.length > 0;
+}
+
+function loadTranscriptRecord(data) {
+  const blocks = Array.isArray(data.blocks)
+    ? data.blocks.map(normalizeTranscriptBlockForRestore).filter(Boolean)
+    : [];
+  const text = typeof data.text === "string" ? data.text : "";
+  state.transcript = text || blocks.map((block) => block.text).join("");
+  state.transcriptBlocks = blocks;
+  state.openBlocks.clear();
+  // Drop any prior 基頻分析 spectra — they are index-parallel to the OLD blocks; left
+  // stale they'd render under the new text and poison hasAnalysis()/the CSV export.
+  state.analysisSpectra = [];
+  renderTranscriptView({ scrollToEnd: false });
+  setTranscriptActions(Boolean(state.transcript.trim()));
+  persistSessionNow();
+  flashStats(`已開啟:${data.title || data.id}`);
 }
 
 function scheduleSessionPersist() {
@@ -2093,6 +2247,38 @@ function handleSocketClose() {
   state.ws = null;
 }
 
+// 收音設定檔:純逐字稿(text 檢視)時開啟瀏覽器端回音消除與降噪,讓 Whisper 拿到乾淨音訊;
+// 一旦進入音高/簡譜/基頻(jianpu/spectrum)或音樂情境,就退回 raw(全關)保住基頻分析準度。
+function wantsRawCapture() {
+  return state.viewMode !== "text" || state.scenario === "music";
+}
+
+function captureConstraints() {
+  const raw = wantsRawCapture();
+  return {
+    channelCount: AUDIO_CHANNEL_COUNT,
+    echoCancellation: !raw,
+    noiseSuppression: !raw,
+    // 自動增益(AGC)一律關閉,即使逐字稿模式:伺服器端 prepare_asr_audio 已做 RMS 正規化
+    // (瀏覽器 AGC 因此多餘),而 AGC 會把靜段的 RMS 抬高,反而破壞 server 端以 RMS 校準的
+    // VAD 起點門檻與靜音幻覺過濾(asr_hallucination_rms_threshold)。降噪則相反、會壓低噪聲,
+    // 對兩者都有利,所以逐字稿模式只開 EC+NS。
+    autoGainControl: false,
+  };
+}
+
+// 錄音中切換檢視/情境時,盡量即時套用新設定檔;部分行動瀏覽器不支援對已開啟的 track
+// applyConstraints,失敗就維持啟動時的設定(下次重錄才生效),不中斷收音。
+function reapplyCaptureConstraints() {
+  const track = state.stream?.getAudioTracks?.()?.[0];
+  if (!track || track.readyState !== "live") {
+    return;
+  }
+  track.applyConstraints(captureConstraints()).catch((error) => {
+    console.warn("applyConstraints failed", error);
+  });
+}
+
 async function start() {
   if (DEMO_MODE) {
     startDemo();
@@ -2121,12 +2307,7 @@ async function start() {
     await waitForOpen(ws);
 
     state.stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        channelCount: 1,
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false,
-      },
+      audio: captureConstraints(),
       video: false,
     });
 
@@ -2542,7 +2723,25 @@ if (els.scenario) {
   els.scenario.value = state.scenario;
   els.scenario.addEventListener("change", () => {
     state.scenario = els.scenario.value === "music" ? "music" : "general";
+    reapplyCaptureConstraints();
     persistSettings();
+  });
+}
+if (els.search) {
+  els.search.addEventListener("click", openSearchDialog);
+}
+if (els.searchInput) {
+  els.searchInput.addEventListener("input", scheduleSearch);
+}
+if (els.searchDialog) {
+  els.searchDialog
+    .querySelector(".search-close")
+    ?.addEventListener("click", () => els.searchDialog.close());
+  // Enter in the sole text input would implicitly submit the method="dialog" form
+  // and close the dialog; search is already live on input, so swallow the submit.
+  els.searchDialog.querySelector("form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void runSearch(els.searchInput.value);
   });
 }
 els.clear.addEventListener("click", () => {

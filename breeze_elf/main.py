@@ -35,6 +35,7 @@ from .audio import (
     hz_to_jianpu,
     jianpu_glide,
     jianpu_to_semitones,
+    make_speech_detector,
     pcm16le_to_float32,
     pitch_cents_off,
     prepare_asr_audio,
@@ -51,7 +52,8 @@ from .protocol import (
     parse_client_text,
     server_event,
 )
-from .storage import save_transcript
+from .search_index import build_search_index
+from .storage import load_transcript, safe_transcript_id, save_transcript
 from .voice import build_voice_from_env
 from .voice_storage import (
     decode_wav,
@@ -330,6 +332,16 @@ class AnalyzeState:
 
 settings = get_settings()
 asr_engine = build_asr_from_env(settings)
+# Resolve the effective VAD detector once at startup so /health reports what will
+# actually run — silero silently degrades to rms when the model/onnxruntime is
+# missing — and so that fallback warning is logged at boot, not per connection.
+effective_vad_detector = make_speech_detector(
+    settings.vad_detector,
+    rms_threshold=settings.rms_threshold,
+    speech_threshold=settings.vad_speech_threshold,
+    neg_threshold=settings.vad_neg_threshold,
+    model_path=settings.vad_silero_model_path or None,
+).name
 # Neural enhancement stage in front of Whisper (NullEnhancer when off / no extra).
 # ``live``/``file`` can differ so the latency-sensitive mic path and the offline
 # file path are tuned independently; the separator is the whole-file music pass.
@@ -380,6 +392,14 @@ async def lifespan(app: FastAPI):
             except Exception:  # pragma: no cover - depends on optional extra
                 LOGGER.exception("Live enhancer startup load failed")
 
+    # Reconcile the search index once at startup so transcripts added or deleted
+    # out-of-band are picked up / purged without waiting for the user to search.
+    if search_index.available:
+        try:
+            await loop.run_in_executor(None, search_index.sync, _remote_storage_dir())
+        except Exception:  # pragma: no cover - sync already self-guards
+            LOGGER.exception("Search index startup sync failed")
+
     try:
         yield
     finally:
@@ -421,11 +441,17 @@ async def service_worker() -> FileResponse:
 
 @app.get("/health")
 async def health() -> JSONResponse:
+    # Offload the SQLite count so a poll never blocks the event loop on disk I/O.
+    search_indexed = await asyncio.get_event_loop().run_in_executor(
+        None, search_index.indexed_count
+    )
     return JSONResponse(
         {
             "ok": True,
             "sampleRate": settings.sample_rate,
             "segmenter": settings.segmenter,
+            "vadDetector": settings.vad_detector,
+            "vadDetectorEffective": effective_vad_detector,
             "audioPreprocess": settings.audio_preprocess,
             "vadFrameMs": settings.vad_frame_ms,
             "vadEndSilenceMs": settings.vad_end_silence_ms,
@@ -440,6 +466,8 @@ async def health() -> JSONResponse:
             "enhanceFile": file_enhancer.name,
             "enhanceDevice": settings.enhance_device,
             "separatorAvailable": separator.available,
+            "searchEnabled": search_index.available,
+            "searchIndexed": search_indexed,
             "voiceProvider": settings.voice_provider,
             "voiceBackend": voice_engine.backend,
             "voiceModel": getattr(voice_engine, "model_name", "unknown"),
@@ -477,6 +505,12 @@ async def create_remote_transcript(payload: TranscriptSaveRequest) -> JSONRespon
         LOGGER.exception("Remote transcript storage failed")
         raise HTTPException(status_code=500, detail="remote transcript storage failed") from exc
 
+    # Best-effort incremental index — an indexing failure must never fail the save
+    # (a later search sync() self-heals from the files on disk).
+    await asyncio.get_event_loop().run_in_executor(
+        None, _index_saved_transcript, stored.id
+    )
+
     return JSONResponse(
         {
             "ok": True,
@@ -487,6 +521,75 @@ async def create_remote_transcript(payload: TranscriptSaveRequest) -> JSONRespon
             "csvFilename": stored.csv_filename,
             "createdAt": stored.created_at,
             "sizeBytes": stored.size_bytes,
+        }
+    )
+
+
+def _index_saved_transcript(doc_id: str) -> None:
+    try:
+        record = load_transcript(_remote_storage_dir(), doc_id)
+        if record is not None:
+            search_index.upsert(record)
+    except Exception:  # pragma: no cover - indexing must never break a save
+        LOGGER.exception("Transcript indexing failed for %s", doc_id)
+
+
+def _search_transcripts(query: str, limit: int) -> list[dict]:
+    # Stat-based sync self-heals for out-of-band adds/deletes and backfills old
+    # transcripts on first use; cheap for the few hundred files this app produces.
+    storage_dir = _remote_storage_dir()
+    search_index.sync(storage_dir)
+    return search_index.search(query, limit)
+
+
+# NOTE: /search MUST be declared before /{doc_id} or FastAPI routes "search" as an id.
+@app.get("/api/transcripts/search")
+async def search_remote_transcripts(q: str = "", limit: int | None = None) -> JSONResponse:
+    if not search_index.available:
+        raise HTTPException(status_code=503, detail="transcript search is unavailable")
+    capped = min(limit or settings.search_max_results, settings.search_max_results)
+    results = await asyncio.get_event_loop().run_in_executor(
+        None, _search_transcripts, q, capped
+    )
+    return JSONResponse({"ok": True, "query": q, "count": len(results), "results": results})
+
+
+@app.get("/api/transcripts")
+async def list_remote_transcripts(limit: int | None = None) -> JSONResponse:
+    if not search_index.available:
+        raise HTTPException(status_code=503, detail="transcript search is unavailable")
+    capped = min(limit or settings.search_max_results, settings.search_max_results)
+    results = await asyncio.get_event_loop().run_in_executor(
+        None, _search_transcripts, "", capped
+    )
+    return JSONResponse({"ok": True, "count": len(results), "results": results})
+
+
+@app.get("/api/transcripts/{doc_id}")
+async def read_remote_transcript(doc_id: str) -> JSONResponse:
+    try:
+        safe = safe_transcript_id(doc_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    record = await asyncio.get_event_loop().run_in_executor(
+        None, load_transcript, _remote_storage_dir(), safe
+    )
+    if record is None:
+        raise HTTPException(status_code=404, detail="transcript not found")
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "id": record.id,
+            "filename": record.filename,
+            "title": record.title,
+            "createdAt": record.created_at,
+            "text": record.text,
+            "hasAudio": record.has_audio,
+            "hasJianpu": record.has_jianpu,
+            "audioFilename": record.audio_filename,
+            "blocks": record.blocks,
         }
     )
 
@@ -516,6 +619,13 @@ def _remote_storage_dir() -> Path:
     if configured.is_absolute():
         return configured
     return ROOT_DIR / configured
+
+
+# Cross-transcript search index over the saved bundles. Degrades to a disabled
+# no-op when the runtime SQLite lacks FTS5/trigram (see SearchIndex).
+search_index = build_search_index(
+    _remote_storage_dir() / "_index.sqlite3", enabled=settings.search_enabled
+)
 
 
 def _voice_storage_dir() -> Path:
@@ -1004,6 +1114,8 @@ async def _handle_text_message(
                 windowSeconds=settings.window_seconds,
                 overlapSeconds=settings.overlap_seconds,
                 segmenter=settings.segmenter,
+                # AudioWindowBuffer has no detector (always energy) → report "rms".
+                vadDetector=getattr(state.segmenter, "detector_name", "rms"),
                 backend=asr_queue.backend,
                 device=asr_queue.device,
                 model=asr_queue.model,
@@ -1241,6 +1353,13 @@ def _build_segmenter(sample_rate: int) -> AudioWindowBuffer | AudioUtteranceBuff
             rms_threshold=settings.rms_threshold,
         )
 
+    detector = make_speech_detector(
+        settings.vad_detector,
+        rms_threshold=settings.rms_threshold,
+        speech_threshold=settings.vad_speech_threshold,
+        neg_threshold=settings.vad_neg_threshold,
+        model_path=settings.vad_silero_model_path or None,
+    )
     return AudioUtteranceBuffer(
         sample_rate=sample_rate,
         frame_ms=settings.vad_frame_ms,
@@ -1248,10 +1367,19 @@ def _build_segmenter(sample_rate: int) -> AudioWindowBuffer | AudioUtteranceBuff
         end_silence_ms=settings.vad_end_silence_ms,
         max_segment_seconds=settings.vad_max_segment_seconds,
         rms_threshold=settings.rms_threshold,
+        speech_detector=detector,
     )
 
 
 def _should_drop_asr_result(window: AudioWindow, result: ASRResult) -> bool:
+    # Note (silero VAD): the silero detector can onset a segment on quiet far-field
+    # voice whose whole-window RMS is below asr_hallucination_rms_threshold, so
+    # ``low_energy`` is True for windows the RMS segmenter would never have emitted.
+    # This stays gated behind ``likely_no_speech``/``common_hallucination`` on
+    # purpose: a genuinely-spoken quiet utterance carries a *low* no_speech_prob and
+    # non-filler text, so it is kept; only when Whisper itself doubts it (or emits a
+    # known silence phrase) is it dropped — loosening this would re-admit exactly the
+    # silence hallucinations this backstop exists to remove.
     likely_no_speech = (
         result.no_speech_prob is not None
         and result.no_speech_prob >= settings.asr_no_speech_prob_threshold

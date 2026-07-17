@@ -1,8 +1,8 @@
-const CACHE_NAME = "breeze-elf-v49";
+const CACHE_NAME = "breeze-elf-v52";
 const ASSETS = [
   "./",
   "./app.js",
-  "./app.js?v=27",
+  "./app.js?v=31",
   "./voice.js",
   "./voice.js?v=23",
   "./audio-utils.js",

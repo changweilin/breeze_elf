@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import base64
+import logging
 import math
 from dataclasses import dataclass
+from typing import Protocol
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 # 簡譜 (jianpu) maps each scale degree, measured in semitones above the tonic,
 # to a number 1-7. Chromatic degrees borrow the lower number with a sharp.
@@ -794,6 +798,191 @@ class _SampleRingBuffer:
         self._start = 0
 
 
+class SpeechDetector(Protocol):
+    """Per-frame speech/not-speech decision the utterance segmenter onsets on.
+
+    ``is_speech`` is called once per fixed-size frame in stream order; a detector
+    may keep state across calls (Silero's LSTM does), so a fresh detector is built
+    per connection and never shared between streams."""
+
+    name: str
+
+    def is_speech(self, frame: np.ndarray) -> bool:
+        ...
+
+
+class RmsSpeechDetector:
+    """The original energy gate: a frame is speech when its RMS clears a fixed
+    threshold. Cheap and stateless, but can't tell speech from equally-loud
+    steady noise (冷氣/路噪) — the reason the Silero detector exists."""
+
+    name = "rms"
+
+    def __init__(self, rms_threshold: float) -> None:
+        self.rms_threshold = rms_threshold
+
+    def is_speech(self, frame: np.ndarray) -> bool:
+        return calculate_rms(frame) >= self.rms_threshold
+
+
+# Silero v6 (as bundled by faster-whisper) is a 16 kHz model that scores exactly
+# 512-sample (32 ms) chunks, each prepended with the previous chunk's last 64
+# samples as context, and carries an LSTM hidden/cell state (1, 1, 128) forward.
+_SILERO_CHUNK_SAMPLES = 512
+_SILERO_CONTEXT_SAMPLES = 64
+_SILERO_STATE = (1, 1, 128)
+
+
+def _default_silero_model_path() -> str | None:
+    """Path to the silero VAD ONNX that ships inside faster-whisper's assets, or
+    ``None`` when faster-whisper isn't importable. Globbed (not hard-coded) so a
+    version bump renaming ``silero_vad_v6.onnx`` doesn't silently break loading."""
+    try:
+        from faster_whisper.utils import get_assets_path
+    except Exception:  # pragma: no cover - faster-whisper optional in dev
+        return None
+
+    import glob
+    import os
+
+    assets = get_assets_path()
+    for pattern in ("silero*vad*.onnx", "*silero*.onnx", "*vad*.onnx"):
+        matches = sorted(glob.glob(os.path.join(assets, pattern)))
+        if matches:
+            return matches[0]
+    return None
+
+
+class SileroSpeechDetector:
+    """Streaming Silero VAD over onnxruntime. Judges *voice*, not loudness, so the
+    far-field phone false-triggers that energy VAD produces on steady noise go away.
+
+    faster-whisper bundles both the ONNX model and onnxruntime, so this adds no new
+    dependency. Its own ``SileroVADModel`` resets state every call (batch use); here
+    the LSTM state and the 64-sample context are carried across frames for true
+    streaming. Construction never raises — an unavailable model/runtime is reported
+    via :attr:`available` so the factory can fall back to RMS, and any *runtime*
+    inference failure degrades this detector to an internal RMS gate (logged once).
+    """
+
+    name = "silero"
+
+    def __init__(
+        self,
+        *,
+        rms_threshold: float,
+        speech_threshold: float = 0.5,
+        neg_threshold: float | None = None,
+        model_path: str | None = None,
+    ) -> None:
+        self.rms_threshold = rms_threshold
+        self.speech_threshold = float(speech_threshold)
+        # Hysteresis low edge: between neg and speech thresholds the previous
+        # decision is held, so a wavering probability doesn't chatter the segmenter.
+        self.neg_threshold = (
+            float(neg_threshold)
+            if neg_threshold is not None
+            else max(0.0, self.speech_threshold - 0.15)
+        )
+        self.available = False
+        self.unavailable_reason: str | None = None
+        self._degraded = False
+        self._session = None
+        self._pending = np.empty(0, dtype=np.float32)
+        self._context = np.zeros(_SILERO_CONTEXT_SAMPLES, dtype=np.float32)
+        self._h = np.zeros(_SILERO_STATE, dtype=np.float32)
+        self._c = np.zeros(_SILERO_STATE, dtype=np.float32)
+        self._last_speech = False
+
+        path = model_path or _default_silero_model_path()
+        if not path:
+            self.unavailable_reason = "silero VAD model not found in faster-whisper assets"
+            return
+        try:
+            import onnxruntime
+        except Exception as exc:  # pragma: no cover - onnxruntime optional in dev
+            self.unavailable_reason = f"onnxruntime import failed: {exc}"
+            return
+        try:
+            opts = onnxruntime.SessionOptions()
+            opts.inter_op_num_threads = 1
+            opts.intra_op_num_threads = 1
+            opts.enable_cpu_mem_arena = False
+            opts.log_severity_level = 4
+            self._session = onnxruntime.InferenceSession(
+                path, providers=["CPUExecutionProvider"], sess_options=opts
+            )
+            self.available = True
+        except Exception as exc:  # pragma: no cover - depends on model/runtime
+            self.unavailable_reason = f"onnxruntime session failed: {exc}"
+
+    def is_speech(self, frame: np.ndarray) -> bool:
+        if self._degraded or self._session is None:
+            return calculate_rms(frame) >= self.rms_threshold
+
+        if frame.dtype != np.float32:
+            frame = frame.astype(np.float32, copy=False)
+        self._pending = (
+            frame if self._pending.size == 0 else np.concatenate([self._pending, frame])
+        )
+
+        max_prob: float | None = None
+        while self._pending.size >= _SILERO_CHUNK_SAMPLES:
+            chunk = self._pending[:_SILERO_CHUNK_SAMPLES]
+            self._pending = self._pending[_SILERO_CHUNK_SAMPLES:]
+            try:
+                prob = self._infer_chunk(chunk)
+            except Exception as exc:  # pragma: no cover - depends on runtime
+                logger.warning("silero VAD inference failed; falling back to RMS: %s", exc)
+                self._degraded = True
+                return calculate_rms(frame) >= self.rms_threshold
+            max_prob = prob if max_prob is None else max(max_prob, prob)
+
+        if max_prob is None:
+            # Fewer than one chunk buffered so far — hold the previous decision.
+            return self._last_speech
+        if max_prob >= self.speech_threshold:
+            self._last_speech = True
+        elif max_prob < self.neg_threshold:
+            self._last_speech = False
+        # else: within the hysteresis band — keep _last_speech unchanged.
+        return self._last_speech
+
+    def _infer_chunk(self, chunk: np.ndarray) -> float:
+        model_input = np.concatenate([self._context, chunk]).reshape(1, -1).astype(np.float32)
+        output, self._h, self._c = self._session.run(
+            None, {"input": model_input, "h": self._h, "c": self._c}
+        )
+        self._context = chunk[-_SILERO_CONTEXT_SAMPLES:].copy()
+        return float(np.asarray(output).reshape(-1)[-1])
+
+
+def make_speech_detector(
+    kind: str,
+    *,
+    rms_threshold: float,
+    speech_threshold: float = 0.5,
+    neg_threshold: float | None = None,
+    model_path: str | None = None,
+) -> SpeechDetector:
+    """Build the requested detector, degrading to RMS when Silero can't load so a
+    missing model/runtime never breaks recognition — only reverts to energy VAD."""
+    if kind == "silero":
+        detector = SileroSpeechDetector(
+            rms_threshold=rms_threshold,
+            speech_threshold=speech_threshold,
+            neg_threshold=neg_threshold,
+            model_path=model_path,
+        )
+        if detector.available:
+            return detector
+        logger.warning(
+            "silero VAD unavailable (%s); using RMS energy VAD instead",
+            detector.unavailable_reason,
+        )
+    return RmsSpeechDetector(rms_threshold)
+
+
 class AudioWindowBuffer:
     def __init__(
         self,
@@ -869,6 +1058,7 @@ class AudioUtteranceBuffer:
         end_silence_ms: int = 700,
         max_segment_seconds: float = 12.0,
         rms_threshold: float = 0.008,
+        speech_detector: SpeechDetector | None = None,
     ) -> None:
         if sample_rate <= 0:
             raise ValueError("sample_rate must be positive")
@@ -887,6 +1077,7 @@ class AudioUtteranceBuffer:
         self.end_silence_frames = max(1, round(end_silence_ms / frame_ms))
         self.max_segment_samples = max(self.frame_samples, round(sample_rate * max_segment_seconds))
         self.rms_threshold = rms_threshold
+        self._detector = speech_detector or RmsSpeechDetector(rms_threshold)
 
         self._pending = _SampleRingBuffer(max(self.frame_samples * 8, 1))
         self._pre_roll: list[np.ndarray] = []
@@ -901,6 +1092,10 @@ class AudioUtteranceBuffer:
     def buffered_seconds(self) -> float:
         active = self._segment_sample_count + self._pending.length
         return active / self.sample_rate
+
+    @property
+    def detector_name(self) -> str:
+        return getattr(self._detector, "name", "rms")
 
     def append_pcm16(self, payload: bytes) -> list[AudioWindow]:
         chunk = pcm16le_to_float32(payload)
@@ -930,8 +1125,9 @@ class AudioUtteranceBuffer:
         return [emitted] if emitted is not None else []
 
     def _process_frame(self, frame: np.ndarray, frame_start: int) -> AudioWindow | None:
-        rms = calculate_rms(frame)
-        is_speech = rms >= self.rms_threshold
+        # Voice-vs-not (Silero) or energy-vs-threshold (RMS) — the detector decides;
+        # the segment/pre-roll/silence machinery below is identical either way.
+        is_speech = self._detector.is_speech(frame)
         emitted: AudioWindow | None = None
 
         if is_speech:

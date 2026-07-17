@@ -20,6 +20,113 @@ class StoredTranscript:
     csv_filename: str | None = None
 
 
+# Sibling audio extensions save_transcript may have written (audio_ext defaults to
+# "wav"; kept broad so an id is flagged has_audio regardless of the chosen format).
+_AUDIO_EXTS = (".wav", ".mp3", ".m4a", ".ogg", ".webm", ".flac")
+
+
+@dataclass(frozen=True)
+class TranscriptRecord:
+    id: str
+    filename: str
+    title: str
+    created_at: str
+    text: str
+    has_audio: bool
+    has_jianpu: bool
+    mtime: float
+    blocks: list[dict[str, Any]]
+    audio_filename: str | None = None
+
+
+def safe_transcript_id(doc_id: str) -> str:
+    """Validate a client-supplied transcript id before it is joined to a path.
+
+    Transcript ids are server-generated stems; refuse anything that could escape
+    the storage directory (path separators / ``..``) so ``GET /{id}`` can't be
+    turned into an arbitrary-file read."""
+    cleaned = (doc_id or "").strip()
+    if not cleaned or "/" in cleaned or "\\" in cleaned or ".." in cleaned:
+        raise ValueError("invalid transcript id")
+    return cleaned
+
+
+def iter_transcript_ids(storage_dir: str | Path) -> list[str]:
+    """The stems of every saved ``.txt`` transcript, excluding sidecar files."""
+    directory = Path(storage_dir).expanduser()
+    if not directory.is_dir():
+        return []
+    return sorted(path.stem for path in directory.glob("*.txt") if path.is_file())
+
+
+def load_transcript(storage_dir: str | Path, doc_id: str) -> TranscriptRecord | None:
+    """Read a saved transcript back by id: the ``.txt`` body plus, when present,
+    the sibling ``.json`` (title, per-character blocks) and audio. Returns ``None``
+    when the id has no ``.txt`` on disk. ``doc_id`` is caller-validated — this does
+    not escape ``storage_dir`` because it only ever appends ``id + suffix``."""
+    directory = Path(storage_dir).expanduser()
+    txt_path = directory / f"{doc_id}.txt"
+    if not txt_path.is_file():
+        return None
+
+    text = txt_path.read_text(encoding="utf-8").strip()
+    mtime = txt_path.stat().st_mtime
+
+    title = ""
+    created_at = ""
+    blocks: list[dict[str, Any]] = []
+    json_path = directory / f"{doc_id}.json"
+    if json_path.is_file():
+        try:
+            document = json.loads(json_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            document = {}
+        if isinstance(document, dict):
+            title = (document.get("title") or "").strip()
+            created_at = (document.get("createdAt") or "").strip()
+            raw_blocks = document.get("blocks")
+            if isinstance(raw_blocks, list):
+                blocks = [block for block in raw_blocks if isinstance(block, dict)]
+
+    if not title:
+        title = _first_line(text) or doc_id
+    if not created_at:
+        created_at = _created_at(datetime.fromtimestamp(mtime, timezone.utc)).isoformat(
+            timespec="seconds"
+        )
+
+    audio_filename = next(
+        (f"{doc_id}{ext}" for ext in _AUDIO_EXTS if (directory / f"{doc_id}{ext}").is_file()),
+        None,
+    )
+    has_jianpu = any(
+        isinstance(char, dict) and str(char.get("jianpu") or "").strip()
+        for block in blocks
+        for char in (block.get("characters") or [])
+    )
+
+    return TranscriptRecord(
+        id=doc_id,
+        filename=txt_path.name,
+        title=title,
+        created_at=created_at,
+        text=text,
+        has_audio=audio_filename is not None,
+        has_jianpu=has_jianpu,
+        mtime=mtime,
+        blocks=blocks,
+        audio_filename=audio_filename,
+    )
+
+
+def _first_line(text: str) -> str:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped[:80]
+    return ""
+
+
 def save_transcript(
     text: str,
     storage_dir: str | Path,

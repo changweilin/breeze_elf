@@ -188,8 +188,12 @@ Environment variables:
 | `BREEZE_ENHANCE_FILE` | `off` | Neural denoise+dereverb on the loaded-file path: `off` or `deepfilter`. |
 | `BREEZE_ENHANCE_DEVICE` | `auto` | Enhancement/separation device: `auto`, `cuda`, or `cpu`. |
 | `BREEZE_MAX_QUEUE_WINDOWS` | `4` | Maximum pending ASR windows per client. |
-| `BREEZE_SEGMENTER` | `vad` | `vad` for utterance segments, or `window` for fixed windows. |
-| `BREEZE_VAD_FRAME_MS` | `100` | RMS VAD frame size. |
+| `BREEZE_SEGMENTER` | `vad` | `vad` for utterance segments, `window` for fixed windows, or `silero` (alias for `vad` + `BREEZE_VAD_DETECTOR=silero`). |
+| `BREEZE_VAD_DETECTOR` | `rms` | Speech-onset gate for the `vad` segmenter: `rms` (energy threshold) or `silero` (neural voice detector via the ONNX model bundled with faster-whisper — no new dependency; silently falls back to `rms` if the model/onnxruntime is missing). |
+| `BREEZE_VAD_SPEECH_THRESHOLD` | `0.5` | Silero speech probability at/above which a frame is speech. |
+| `BREEZE_VAD_NEG_THRESHOLD` | `0.35` | Silero silence probability; between this and the speech threshold the previous decision is held (hysteresis). |
+| `BREEZE_VAD_SILERO_MODEL` | *(bundled)* | Override path to a `silero_vad*.onnx`; defaults to the one shipped inside faster-whisper. |
+| `BREEZE_VAD_FRAME_MS` | `100` | VAD frame size (RMS gate; Silero re-chunks internally to 32 ms). |
 | `BREEZE_VAD_PRE_ROLL_MS` | `300` | Audio kept before detected speech. |
 | `BREEZE_VAD_END_SILENCE_MS` | `700` | Silence required to finish an utterance. |
 | `BREEZE_VAD_MAX_SEGMENT_SECONDS` | `18.0` | Max utterance length before a forced split. The split lands at the quietest recent frame (a syllable gap) so a long sung phrase is never cut mid-note. |
@@ -205,6 +209,8 @@ Environment variables:
 | `BREEZE_STOP_DRAIN_TIMEOUT_SECONDS` | `60.0` | Time allowed to transcribe the final flushed utterance after stop. |
 | `BREEZE_RMS_THRESHOLD` | `0.008` | Silence gate threshold. |
 | `BREEZE_REMOTE_STORAGE_DIR` | `remote_transcripts` | Host-side directory for remotely saved transcript `.txt` files. |
+| `BREEZE_SEARCH_ENABLED` | `true` | Cross-transcript full-text search (SQLite FTS5 trigram, no extra dependency). Auto-disables if the runtime SQLite lacks FTS5/trigram. |
+| `BREEZE_SEARCH_MAX_RESULTS` | `50` | Maximum search results returned per query. |
 | `BREEZE_VOICE_PROVIDER` | `mock` | Voice studio engine: `mock` (DSP, no downloads) or `openvoice` (OpenVoice v2 + MeloTTS). |
 | `BREEZE_VOICE_STORAGE_DIR` | `voices` | Host-side directory for saved voice profiles (embedding + reference `.wav` + metadata). |
 | `BREEZE_VOICE_SAMPLE_RATE` | `16000` | Sample rate used for voice capture and mock synthesis. |

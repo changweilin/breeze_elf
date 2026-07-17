@@ -53,6 +53,14 @@ class Settings:
     enhance_device: str = "auto"
     max_queue_windows: int = 4
     segmenter: str = "vad"
+    # VAD onset gate for the "vad" segmenter. ``rms`` is the energy threshold;
+    # ``silero`` runs the neural voice detector bundled with faster-whisper
+    # (onnxruntime, no new dependency) and silently falls back to ``rms`` when the
+    # model/runtime is missing. ``BREEZE_SEGMENTER=silero`` is accepted as an alias.
+    vad_detector: str = "rms"
+    vad_speech_threshold: float = 0.5
+    vad_neg_threshold: float = 0.35
+    vad_silero_model_path: str = ""
     vad_frame_ms: int = 100
     vad_pre_roll_ms: int = 300
     vad_end_silence_ms: int = 700
@@ -77,6 +85,8 @@ class Settings:
     asr_hallucination_rms_threshold: float = 0.02
     stop_drain_timeout_seconds: float = 60.0
     remote_storage_dir: str = "remote_transcripts"
+    search_enabled: bool = True
+    search_max_results: int = 50
     voice_provider: str = "mock"
     voice_storage_dir: str = "voices"
     voice_output_dir: str = "voice_outputs"
@@ -87,7 +97,27 @@ class Settings:
     voice_mock_warmup_seconds: float = 0.9
 
 
+def _resolve_vad() -> tuple[str, str]:
+    """(segmenter, vad_detector). ``BREEZE_SEGMENTER=silero`` is sugar for the vad
+    segmenter with the silero detector, so users can flip one env var. It takes
+    precedence: ``BREEZE_SEGMENTER=silero`` forces the silero detector even if
+    ``BREEZE_VAD_DETECTOR`` is set to something else."""
+    raw_segmenter = os.getenv("BREEZE_SEGMENTER", "vad").strip().lower()
+    detector = _choice_env("BREEZE_VAD_DETECTOR", "rms", {"rms", "silero"})
+    if raw_segmenter == "silero":
+        return "vad", "silero"
+    return raw_segmenter, detector
+
+
 def get_settings() -> Settings:
+    segmenter, vad_detector = _resolve_vad()
+    # Silero probabilities live in [0, 1]; clamp so a fat-fingered threshold can't
+    # silently disable detection (speech>1 -> nothing is ever speech), and keep
+    # neg <= speech or the hysteresis band inverts and stops holding decisions.
+    vad_speech_threshold = min(1.0, max(0.0, _float_env("BREEZE_VAD_SPEECH_THRESHOLD", 0.5)))
+    vad_neg_threshold = min(
+        vad_speech_threshold, max(0.0, _float_env("BREEZE_VAD_NEG_THRESHOLD", 0.35))
+    )
     return Settings(
         host=os.getenv("BREEZE_HOST", "127.0.0.1"),
         port=_int_env("BREEZE_PORT", 8788),
@@ -104,7 +134,11 @@ def get_settings() -> Settings:
         enhance_file=_choice_env("BREEZE_ENHANCE_FILE", "off", {"off", "deepfilter"}),
         enhance_device=_choice_env("BREEZE_ENHANCE_DEVICE", "auto", {"auto", "cuda", "cpu"}),
         max_queue_windows=max(1, _int_env("BREEZE_MAX_QUEUE_WINDOWS", 4)),
-        segmenter=os.getenv("BREEZE_SEGMENTER", "vad").strip().lower(),
+        segmenter=segmenter,
+        vad_detector=vad_detector,
+        vad_speech_threshold=vad_speech_threshold,
+        vad_neg_threshold=vad_neg_threshold,
+        vad_silero_model_path=os.getenv("BREEZE_VAD_SILERO_MODEL", ""),
         vad_frame_ms=max(1, _int_env("BREEZE_VAD_FRAME_MS", 100)),
         vad_pre_roll_ms=max(0, _int_env("BREEZE_VAD_PRE_ROLL_MS", 300)),
         vad_end_silence_ms=max(1, _int_env("BREEZE_VAD_END_SILENCE_MS", 700)),
@@ -122,6 +156,8 @@ def get_settings() -> Settings:
         asr_hallucination_rms_threshold=_float_env("BREEZE_ASR_HALLUCINATION_RMS_THRESHOLD", 0.02),
         stop_drain_timeout_seconds=max(0.1, _float_env("BREEZE_STOP_DRAIN_TIMEOUT_SECONDS", 60.0)),
         remote_storage_dir=os.getenv("BREEZE_REMOTE_STORAGE_DIR", "remote_transcripts"),
+        search_enabled=_bool_env("BREEZE_SEARCH_ENABLED", True),
+        search_max_results=max(1, _int_env("BREEZE_SEARCH_MAX_RESULTS", 50)),
         voice_provider=_choice_env(
             "BREEZE_VOICE_PROVIDER",
             "mock",
