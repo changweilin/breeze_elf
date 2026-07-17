@@ -1906,7 +1906,7 @@ async function bundleSaveConvert() {
 // --------------------------------------------------------------------------- //
 
 function closeAllPlayerMenus(except) {
-  document.querySelectorAll("#page-voice .player-menu.open").forEach((menu) => {
+  document.querySelectorAll(".player-menu.open").forEach((menu) => {
     if (menu === except) {
       return;
     }
@@ -1917,6 +1917,116 @@ function closeAllPlayerMenus(except) {
       list.hidden = true;
     }
   });
+}
+
+// Native <audio> controls have controlsList="noplaybackrate", so the speed control
+// lives here in our own menu instead — one menu per player, no browser duplicate.
+const PLAYBACK_RATES = [0.75, 1, 1.25, 1.5, 2];
+const RATE_DEFAULT_INDEX = 1; // 1×
+// Slot-reel geometry — MUST match .reel-item height / .reel-window in the stylesheet.
+const REEL_ITEM_H = 24;
+const REEL_ABOVE = 1; // items visible above the centred one (window shows 3)
+
+// A slot-machine style speed picker: a vertical reel of rates, current one centred in a
+// window, changed with ▲/▼, a wheel, or an up/down drag ("上下滑").
+function attachSpeedControl(list, audio) {
+  const group = document.createElement("div");
+  group.className = "menu-speed";
+  // Keep the menu open while adjusting (don't bubble to the outside-click closer).
+  group.addEventListener("click", (event) => event.stopPropagation());
+
+  const label = document.createElement("span");
+  label.className = "menu-speed-label";
+  label.textContent = "速度";
+  group.appendChild(label);
+
+  const reel = document.createElement("div");
+  reel.className = "speed-reel";
+
+  const win = document.createElement("div");
+  win.className = "reel-window";
+  win.setAttribute("role", "spinbutton");
+  win.setAttribute("aria-label", "播放速度");
+  win.tabIndex = 0;
+  const strip = document.createElement("div");
+  strip.className = "reel-strip";
+  PLAYBACK_RATES.forEach((rate) => {
+    const item = document.createElement("span");
+    item.className = "reel-item";
+    item.textContent = `${rate}×`;
+    strip.appendChild(item);
+  });
+  win.appendChild(strip);
+
+  const arrows = document.createElement("div");
+  arrows.className = "reel-arrows";
+  const up = document.createElement("button");
+  up.type = "button";
+  up.className = "reel-btn";
+  up.setAttribute("aria-label", "加快");
+  up.textContent = "▲";
+  const down = document.createElement("button");
+  down.type = "button";
+  down.className = "reel-btn";
+  down.setAttribute("aria-label", "放慢");
+  down.textContent = "▼";
+  arrows.append(up, down);
+
+  reel.append(win, arrows);
+  group.appendChild(reel);
+  list.appendChild(group);
+
+  let index = RATE_DEFAULT_INDEX;
+  function render() {
+    strip.style.transform = `translateY(${(REEL_ABOVE - index) * REEL_ITEM_H}px)`;
+    [...strip.children].forEach((el, i) => el.classList.toggle("is-current", i === index));
+    audio.playbackRate = PLAYBACK_RATES[index];
+    up.disabled = index >= PLAYBACK_RATES.length - 1;
+    down.disabled = index <= 0;
+    const rate = PLAYBACK_RATES[index];
+    win.setAttribute("aria-valuenow", String(rate));
+    win.setAttribute("aria-valuetext", `${rate}×`);
+  }
+  function step(delta) {
+    const next = Math.max(0, Math.min(PLAYBACK_RATES.length - 1, index + delta));
+    if (next !== index) {
+      index = next;
+      render();
+    }
+  }
+  up.addEventListener("click", () => step(1));
+  down.addEventListener("click", () => step(-1));
+  win.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    step(event.deltaY < 0 ? 1 : -1);
+  }, { passive: false });
+  win.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowUp") { event.preventDefault(); step(1); }
+    else if (event.key === "ArrowDown") { event.preventDefault(); step(-1); }
+  });
+  // Up/down drag: dragging down reveals slower rates (reel follows the finger).
+  let dragY = null;
+  win.addEventListener("pointerdown", (event) => {
+    dragY = event.clientY;
+    try {
+      win.setPointerCapture(event.pointerId);
+    } catch {
+      /* pointer already released — capture is best-effort */
+    }
+  });
+  win.addEventListener("pointermove", (event) => {
+    if (dragY === null) return;
+    const dy = event.clientY - dragY;
+    if (Math.abs(dy) >= REEL_ITEM_H) {
+      step(dy < 0 ? 1 : -1);
+      dragY = event.clientY;
+    }
+  });
+  const endDrag = () => { dragY = null; };
+  win.addEventListener("pointerup", endDrag);
+  win.addEventListener("pointercancel", endDrag);
+
+  render();
 }
 
 function wirePlayerMenu(menu) {
@@ -1933,6 +2043,10 @@ function wirePlayerMenu(menu) {
     button.setAttribute("aria-expanded", String(willOpen));
     list.hidden = !willOpen;
   });
+  const audio = menu.closest(".voice-player, #audio-panel")?.querySelector("audio");
+  if (audio) {
+    attachSpeedControl(list, audio);
+  }
 }
 
 function base64ToBlob(base64, type) {
@@ -2223,8 +2337,8 @@ document.querySelectorAll("#page-voice .voice-desc-toggle").forEach((button) => 
 // Seed the 簡譜唱歌 editor with one empty sentence row so manual entry works.
 renderSingBlocks();
 
-// Wire each player's ⋮ menu and close any open menu on an outside click.
-document.querySelectorAll("#page-voice .player-menu").forEach(wirePlayerMenu);
+// Wire each player's ⋮ menu (both pages) and close any open menu on an outside click.
+document.querySelectorAll(".player-menu").forEach(wirePlayerMenu);
 document.addEventListener("click", () => closeAllPlayerMenus());
 
 // Open the voice page directly when deep-linked (?page=voice / #voice), which is

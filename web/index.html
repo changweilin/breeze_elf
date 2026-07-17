@@ -814,10 +814,9 @@
       }
 
       .recording {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr);
+        display: flex;
         align-items: center;
-        gap: 10px;
+        gap: 8px;
         padding: 10px 12px;
         border: 1px solid var(--line);
         border-radius: 8px;
@@ -830,20 +829,10 @@
       }
 
       .recording audio {
-        width: 100%;
+        flex: 1 1 auto;
+        width: auto;
         min-width: 0;
         height: 38px;
-      }
-
-      .audio-actions {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 8px;
-      }
-
-      .audio-actions .mini {
-        width: 100%;
-        min-width: 0;
       }
 
       footer {
@@ -1594,38 +1583,29 @@
         min-width: 0;
       }
 
-      .voice-result-actions {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 8px;
-      }
-
-      .voice-result-actions .mini {
-        width: 100%;
-        min-width: 0;
-      }
-
+      /* One row: title · audio (stretches) · ⋮ menu on the right. */
       .voice-player {
         display: flex;
-        flex-direction: column;
-        gap: 6px;
+        align-items: center;
+        gap: 8px;
         padding: 8px;
         border: 1px solid var(--line);
         border-radius: 8px;
         background: var(--panel);
       }
 
-      .voice-player-head {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 8px;
+      .voice-player > .voice-audio {
+        flex: 1 1 auto;
+        width: auto;
+        min-width: 0;
       }
 
       .voice-player-title {
+        flex: 0 0 auto;
         font-size: 0.82rem;
         font-weight: 720;
         color: var(--muted);
+        white-space: nowrap;
       }
 
       .player-menu {
@@ -1646,7 +1626,7 @@
         top: calc(100% + 4px);
         right: 0;
         z-index: 20;
-        min-width: 8.5rem;
+        min-width: 11rem;
         display: flex;
         flex-direction: column;
         gap: 2px;
@@ -1674,6 +1654,112 @@
 
       .player-menu-list button:hover:not(:disabled) {
         background: var(--button-hover);
+      }
+
+      /* 播放速度:選單內的老虎機滾輪(取代原生控制列的速度選單) */
+      .menu-speed {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-top: 2px;
+        padding: 6px 8px 4px;
+        border-top: 1px solid var(--line);
+      }
+
+      .menu-speed-label {
+        font-size: 0.78rem;
+        font-weight: 680;
+        color: var(--muted);
+      }
+
+      .speed-reel {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      /* the slot window: 3 rows tall (3 × REEL_ITEM_H = 72px), current row centred */
+      .reel-window {
+        position: relative;
+        width: 3.4rem;
+        height: 72px;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel-subtle);
+        cursor: ns-resize;
+        touch-action: none;
+        -webkit-mask-image: linear-gradient(to bottom, transparent, #000 34%, #000 66%, transparent);
+        mask-image: linear-gradient(to bottom, transparent, #000 34%, #000 66%, transparent);
+      }
+
+      /* hairlines framing the centre "selected" row */
+      .reel-window::before,
+      .reel-window::after {
+        content: "";
+        position: absolute;
+        left: 0;
+        right: 0;
+        height: 1px;
+        background: var(--live-soft);
+        pointer-events: none;
+        z-index: 1;
+      }
+
+      .reel-window::before {
+        top: 24px;
+      }
+
+      .reel-window::after {
+        top: 48px;
+      }
+
+      .reel-window:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+      }
+
+      .reel-strip {
+        display: flex;
+        flex-direction: column;
+        transition: transform 0.28s cubic-bezier(0.2, 0.9, 0.25, 1.25);
+      }
+
+      .reel-item {
+        height: 24px;
+        display: grid;
+        place-items: center;
+        font-size: 0.84rem;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+        color: var(--muted);
+      }
+
+      .reel-item.is-current {
+        color: var(--live);
+        font-weight: 820;
+        font-size: 0.98rem;
+      }
+
+      .reel-arrows {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+      }
+
+      .reel-btn {
+        width: 26px;
+        min-width: 26px;
+        min-height: 22px;
+        padding: 0;
+        font-size: 0.68rem;
+        line-height: 1;
+        color: var(--muted);
+      }
+
+      .reel-btn:disabled {
+        opacity: 0.35;
       }
 
       .icon-btn.edit {
@@ -2037,10 +2123,6 @@
           grid-template-columns: minmax(0, 1fr);
         }
 
-        .recording {
-          grid-template-columns: minmax(0, 1fr);
-        }
-
         .entry-meta {
           justify-content: flex-start;
           white-space: normal;
@@ -2137,10 +2219,14 @@
       </section>
 
       <section id="audio-panel" class="recording" aria-label="錄音" hidden>
-        <audio id="recording" controls preload="metadata"></audio>
-        <div class="audio-actions">
-          <button id="audio-download" class="mini iconbtn" type="button" disabled aria-label="下載音檔" title="下載音檔"><svg class="ic" aria-hidden="true"><use href="#i-download"></use></svg></button>
-          <button id="audio-save" class="mini iconbtn" type="button" disabled aria-label="雲端儲存音檔" title="雲端儲存音檔"><svg class="ic" aria-hidden="true"><use href="#i-cloud"></use></svg></button>
+        <span class="voice-player-title">錄音</span>
+        <audio id="recording" controls controlsList="nodownload noplaybackrate" preload="metadata"></audio>
+        <div class="player-menu">
+          <button class="icon-btn player-menu-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-label="錄音功能選單" title="功能選單">⋮</button>
+          <div class="player-menu-list" role="menu" hidden>
+            <button id="audio-download" type="button" role="menuitem" disabled>下載音檔</button>
+            <button id="audio-save" type="button" role="menuitem" disabled>雲端儲存音檔</button>
+          </div>
         </div>
       </section>
 
@@ -2211,34 +2297,28 @@
         </div>
         <div id="cv-result-wrap" class="voice-result" hidden>
           <div class="voice-player">
-            <div class="voice-player-head">
-              <span class="voice-player-title">原始音檔</span>
-              <div class="player-menu">
-                <button class="icon-btn player-menu-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-label="原始音檔功能選單" title="功能選單">⋮</button>
-                <div class="player-menu-list" role="menu" hidden>
-                  <button id="cv-src-download" type="button" role="menuitem">下載</button>
-                  <button id="cv-src-save" type="button" role="menuitem">雲端儲存</button>
-                </div>
+            <span class="voice-player-title">原始音檔</span>
+            <audio id="cv-source" class="voice-audio" controls controlsList="nodownload noplaybackrate" preload="metadata"></audio>
+            <div class="player-menu">
+              <button class="icon-btn player-menu-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-label="原始音檔功能選單" title="功能選單">⋮</button>
+              <div class="player-menu-list" role="menu" hidden>
+                <button id="cv-src-download" type="button" role="menuitem">下載</button>
+                <button id="cv-src-save" type="button" role="menuitem">雲端儲存</button>
               </div>
             </div>
-            <audio id="cv-source" class="voice-audio" controls preload="metadata"></audio>
           </div>
           <div class="voice-player">
-            <div class="voice-player-head">
-              <span class="voice-player-title">轉換音檔</span>
-              <div class="player-menu">
-                <button class="icon-btn player-menu-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-label="轉換音檔功能選單" title="功能選單">⋮</button>
-                <div class="player-menu-list" role="menu" hidden>
-                  <button id="cv-download" type="button" role="menuitem">下載</button>
-                  <button id="cv-save" type="button" role="menuitem">雲端儲存</button>
-                </div>
+            <span class="voice-player-title">轉換音檔</span>
+            <audio id="cv-result" class="voice-audio" controls controlsList="nodownload noplaybackrate" preload="metadata"></audio>
+            <div class="player-menu">
+              <button class="icon-btn player-menu-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-label="轉換音檔功能選單" title="功能選單">⋮</button>
+              <div class="player-menu-list" role="menu" hidden>
+                <button id="cv-download" type="button" role="menuitem">下載</button>
+                <button id="cv-save" type="button" role="menuitem">雲端儲存</button>
+                <button id="cv-bundle-download" type="button" role="menuitem">打包下載(原始＋轉換)</button>
+                <button id="cv-bundle-save" type="button" role="menuitem">打包雲端儲存(原始＋轉換)</button>
               </div>
             </div>
-            <audio id="cv-result" class="voice-audio" controls preload="metadata"></audio>
-          </div>
-          <div class="voice-result-actions">
-            <button id="cv-bundle-download" type="button" class="mini iconbtn" aria-label="打包下載" title="打包下載"><svg class="ic" aria-hidden="true"><use href="#i-download"></use></svg></button>
-            <button id="cv-bundle-save" type="button" class="mini iconbtn" aria-label="打包雲端儲存" title="打包雲端儲存"><svg class="ic" aria-hidden="true"><use href="#i-cloud"></use></svg></button>
           </div>
         </div>
       </section>
@@ -2264,10 +2344,16 @@
         </div>
         <textarea id="tts-text" class="voice-textarea" maxlength="2000" rows="3" placeholder="輸入想說的話,或上傳文字檔…"></textarea>
         <div id="tts-result-wrap" class="voice-result" hidden>
-          <audio id="tts-result" class="voice-audio" controls preload="metadata"></audio>
-          <div class="voice-result-actions">
-            <button id="tts-download" type="button" class="mini iconbtn" aria-label="下載" title="下載"><svg class="ic" aria-hidden="true"><use href="#i-download"></use></svg></button>
-            <button id="tts-save" type="button" class="mini iconbtn" aria-label="雲端儲存" title="雲端儲存"><svg class="ic" aria-hidden="true"><use href="#i-cloud"></use></svg></button>
+          <div class="voice-player">
+            <span class="voice-player-title">結果</span>
+            <audio id="tts-result" class="voice-audio" controls controlsList="nodownload noplaybackrate" preload="metadata"></audio>
+            <div class="player-menu">
+              <button class="icon-btn player-menu-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-label="結果音檔功能選單" title="功能選單">⋮</button>
+              <div class="player-menu-list" role="menu" hidden>
+                <button id="tts-download" type="button" role="menuitem">下載</button>
+                <button id="tts-save" type="button" role="menuitem">雲端儲存</button>
+              </div>
+            </div>
           </div>
         </div>
       </section>
@@ -2296,10 +2382,16 @@
         <div id="sing-blocks" class="sing-blocks"></div>
         <button id="sing-add" type="button" class="mini btniconlabel"><svg class="ic" aria-hidden="true"><use href="#i-plus"></use></svg><span class="btn-label">新增一句</span></button>
         <div id="sing-result-wrap" class="voice-result" hidden>
-          <audio id="sing-result" class="voice-audio" controls preload="metadata"></audio>
-          <div class="voice-result-actions">
-            <button id="sing-download" type="button" class="mini iconbtn" aria-label="下載" title="下載"><svg class="ic" aria-hidden="true"><use href="#i-download"></use></svg></button>
-            <button id="sing-save" type="button" class="mini iconbtn" aria-label="雲端儲存" title="雲端儲存"><svg class="ic" aria-hidden="true"><use href="#i-cloud"></use></svg></button>
+          <div class="voice-player">
+            <span class="voice-player-title">結果</span>
+            <audio id="sing-result" class="voice-audio" controls controlsList="nodownload noplaybackrate" preload="metadata"></audio>
+            <div class="player-menu">
+              <button class="icon-btn player-menu-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-label="結果音檔功能選單" title="功能選單">⋮</button>
+              <div class="player-menu-list" role="menu" hidden>
+                <button id="sing-download" type="button" role="menuitem">下載</button>
+                <button id="sing-save" type="button" role="menuitem">雲端儲存</button>
+              </div>
+            </div>
           </div>
         </div>
       </section>
@@ -2334,10 +2426,16 @@
           <div id="pitch-paras" class="pitch-paras"></div>
         </div>
         <div id="pitch-result-wrap" class="voice-result" hidden>
-          <audio id="pitch-result" class="voice-audio" controls preload="metadata"></audio>
-          <div class="voice-result-actions">
-            <button id="pitch-download" type="button" class="mini iconbtn" aria-label="下載" title="下載"><svg class="ic" aria-hidden="true"><use href="#i-download"></use></svg></button>
-            <button id="pitch-save" type="button" class="mini iconbtn" aria-label="雲端儲存" title="雲端儲存"><svg class="ic" aria-hidden="true"><use href="#i-cloud"></use></svg></button>
+          <div class="voice-player">
+            <span class="voice-player-title">結果</span>
+            <audio id="pitch-result" class="voice-audio" controls controlsList="nodownload noplaybackrate" preload="metadata"></audio>
+            <div class="player-menu">
+              <button class="icon-btn player-menu-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-label="結果音檔功能選單" title="功能選單">⋮</button>
+              <div class="player-menu-list" role="menu" hidden>
+                <button id="pitch-download" type="button" role="menuitem">下載</button>
+                <button id="pitch-save" type="button" role="menuitem">雲端儲存</button>
+              </div>
+            </div>
           </div>
         </div>
       </section>
@@ -2477,7 +2575,7 @@
       </form>
     </dialog>
 
-    <script src="./app.js?v=27" type="module"></script>
-    <script src="./voice.js?v=23" type="module"></script>
+    <script src="./app.js?v=28" type="module"></script>
+    <script src="./voice.js?v=26" type="module"></script>
   </body>
 </html>
