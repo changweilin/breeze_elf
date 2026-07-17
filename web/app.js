@@ -30,6 +30,11 @@ const els = {
   aboutBackend: document.querySelector("#about-backend"),
 };
 
+// Buttons are icon-only; swap the sprite glyph instead of writing text (which would wipe the icon).
+function iconSvg(id) {
+  return `<svg class="ic" aria-hidden="true"><use href="#${id}"></use></svg>`;
+}
+
 const AUDIO_CHUNK_MS = 250;
 const MAX_WS_BUFFERED_BYTES = 256 * 1024;
 const THEME_STORAGE_KEY = "breeze-elf-theme";
@@ -348,14 +353,20 @@ function languageButtonText() {
 
 function updateLangButton() {
   if (els.lang) {
-    els.lang.textContent = languageButtonText();
+    const text = languageButtonText().replace(/^🌐\s*/u, "");
+    els.lang.title = text;
+    els.lang.setAttribute("aria-label", text);
   }
 }
 
 function updateGlossaryButton() {
   if (els.glossary) {
     const count = state.glossary.length;
-    els.glossary.textContent = count ? `📖 慣用詞庫 (${count})` : "📖 慣用詞庫";
+    const label = count ? `慣用詞庫(${count} 筆)` : "慣用詞庫";
+    els.glossary.title = label;
+    els.glossary.setAttribute("aria-label", label);
+    els.glossary.dataset.count = count ? String(count) : "";
+    els.glossary.classList.toggle("has-count", count > 0);
   }
 }
 
@@ -640,7 +651,9 @@ function setRunning(isRunning) {
   els.toggle.disabled = false;
   els.toggle.classList.toggle("primary", !isRunning);
   els.toggle.classList.toggle("recording", isRunning);
-  els.toggle.textContent = isRunning ? "■ 停止" : "▶ 開始";
+  els.toggle.innerHTML = iconSvg(isRunning ? "i-stop" : "i-play");
+  els.toggle.title = isRunning ? "停止辨識" : "開始辨識";
+  els.toggle.setAttribute("aria-label", isRunning ? "停止辨識" : "開始辨識");
   els.toggle.setAttribute("aria-pressed", String(isRunning));
   els.load.disabled = DEMO_MODE || isRunning;
   setAudioActions();
@@ -2048,7 +2061,6 @@ function applyRuntimeMode() {
   }
 
   els.backend.textContent = "GitHub Actions 示意 · 隱私功能凍結";
-  els.save.textContent = "儲存凍結";
   els.save.setAttribute("title", "示意模式不會寫入遠端主機");
   els.save.setAttribute("aria-label", "雲端儲存已凍結");
   els.stats.textContent = "示意模式";

@@ -120,9 +120,9 @@
         min-height: 0;
         margin: 0 auto;
         display: grid;
-        /* header / controls / controls-secondary / transcript(1fr) / audio-panel / status / footer.
-           transcript must own the flexible row so the data area — not the language row — gets the space. */
-        grid-template-rows: auto auto auto minmax(0, 1fr) auto auto auto;
+        /* header / controls / transcript(1fr) / audio-panel / status / footer.
+           transcript owns the flexible row so the data area gets the space. */
+        grid-template-rows: auto auto minmax(0, 1fr) auto auto auto;
         gap: 14px;
         padding: max(18px, env(safe-area-inset-top)) 16px 14px;
       }
@@ -249,10 +249,19 @@
         white-space: nowrap;
       }
 
+      /* One flexible row: action icons (載入/開始/清除) on the left, the scenario select
+         stretches to fill, language/glossary icons trail on the right. Wraps only if forced. */
       .controls {
-        display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 10px;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .controls .iconbtn {
+        width: 42px;
+        min-width: 42px;
+        min-height: 42px;
       }
 
       button {
@@ -307,6 +316,66 @@
         opacity: 0.48;
       }
 
+      /* ---- Inline SVG icon system (offline sprite, same stroke language as tab icons) ---- */
+      .ic {
+        width: 20px;
+        height: 20px;
+        display: block;
+        flex: 0 0 auto;
+        stroke: currentColor;
+        fill: none;
+        stroke-width: 1.9;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        pointer-events: none;
+      }
+
+      /* icon-only button: compact square, glyph centered, tooltip via title/aria-label */
+      .iconbtn {
+        display: inline-grid;
+        place-items: center;
+        width: 44px;
+        min-width: 44px;
+        min-height: 44px;
+        padding: 0;
+      }
+
+      .mini.iconbtn {
+        width: 40px;
+        min-width: 40px;
+        min-height: 36px;
+      }
+
+      /* icon + text (used where a bare glyph would be ambiguous) */
+      .btniconlabel {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 7px;
+      }
+
+      /* small count badge on an icon button (e.g. 慣用詞庫 entry count) */
+      .iconbtn.has-count {
+        position: relative;
+      }
+
+      .iconbtn.has-count::after {
+        content: attr(data-count);
+        position: absolute;
+        top: 1px;
+        right: 1px;
+        min-width: 15px;
+        height: 15px;
+        padding: 0 3px;
+        border-radius: 999px;
+        background: var(--warn);
+        color: var(--warn-contrast);
+        font-size: 0.62rem;
+        font-weight: 800;
+        line-height: 15px;
+        text-align: center;
+      }
+
       .theme-toggle {
         width: 42px;
         min-width: 42px;
@@ -337,12 +406,14 @@
       .transcript > .partial { grid-row: 4; }
 
       /* Two stacked rows: 顯示頁籤 on top, 後處理/複製/下載/雲端儲存 below. */
+      /* Single row: view-tabs stretch on the left, action icons trail on the right. */
       .bar {
         display: flex;
-        flex-direction: column;
-        align-items: stretch;
+        flex-direction: row;
+        align-items: center;
+        flex-wrap: wrap;
         gap: 8px;
-        padding: 11px 12px;
+        padding: 8px 10px;
         border-bottom: 1px solid var(--line);
         color: var(--muted);
         font-size: 0.88rem;
@@ -350,15 +421,9 @@
       }
 
       .bar-actions {
-        display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 8px;
-        width: 100%;
-      }
-
-      .bar-actions > * {
-        min-width: 0;
-        width: 100%;
+        display: flex;
+        flex: 0 0 auto;
+        gap: 6px;
       }
 
       .mini {
@@ -380,9 +445,11 @@
         background: var(--warn);
       }
 
-      /* 逐字稿顯示頁籤(上排,等寬填滿):文字 / 文字+簡譜 / 基頻分析 */
+      /* 逐字稿顯示頁籤(圖示分段控制):文字 / 文字+簡譜 / 基頻分析 */
       .view-tabs {
         display: flex;
+        flex: 1 1 auto;
+        min-width: 0;
         gap: 2px;
         padding: 3px;
         border: 1px solid var(--line);
@@ -393,8 +460,10 @@
       .view-tab {
         flex: 1 1 0;
         min-width: 0;
-        min-height: 30px;
-        padding: 0 9px;
+        min-height: 34px;
+        display: grid;
+        place-items: center;
+        padding: 0 6px;
         border: 0;
         border-radius: 7px;
         background: transparent;
@@ -879,20 +948,33 @@
         flex: none;
       }
 
-      /* 語言 / 詞庫 設定列(主控制列下方,靠左的小按鈕) */
-      .controls-secondary {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
-        margin-top: -2px;
+      /* 情境 select sits inline in the controls row and stretches to fill the gap
+         between the action icons and the language/glossary icons. */
+      #scenario-field {
+        display: inline-flex;
+        align-items: center;
+        flex: 1 1 96px;
+        min-width: 88px;
+        min-height: 42px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        overflow: hidden;
       }
 
-      .controls-secondary .mini {
-        flex: 1 1 0;
+      #scenario {
+        width: 100%;
         min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+        min-height: 40px;
+        border: 0;
+        border-radius: 8px;
+        background: none;
+        color: var(--ink);
+        font: inherit;
+        font-weight: 720;
+        font-size: 0.84rem;
+        padding: 0 8px;
+        cursor: pointer;
       }
 
       .lang-hint {
@@ -1882,16 +1964,43 @@
       }
 
       @media (max-width: 520px) {
+        /* Mobile is height-constrained: trim the fixed chrome (gaps, paddings, header,
+           control/action rows) so the transcript — the data — keeps the room. */
         .shell {
-          gap: 12px;
-          padding-inline: 12px;
+          gap: 8px;
+          padding: max(12px, env(safe-area-inset-top)) 12px 8px;
         }
 
-        /* 2×2 instead of 3-col-with-4-items: 載入音檔+情境 (檔案) on top, 開始+清除 below —
-           no stranded button, bigger tap targets. */
+        /* 3 items (載入 / 開始 / 清除) fill the base 3-col grid in a single row now that
+           情境 moved to the settings row. */
         .controls {
-          grid-template-columns: 1fr 1fr;
           gap: 8px;
+        }
+
+        header {
+          gap: 8px;
+        }
+
+        .brand-mark {
+          width: 34px;
+          height: 34px;
+        }
+
+        h1 {
+          font-size: 1.2rem;
+        }
+
+        button {
+          min-height: 46px;
+        }
+
+        .bar {
+          padding: 8px 10px;
+          gap: 6px;
+        }
+
+        .bar-actions {
+          gap: 6px;
         }
 
         #lines {
@@ -1905,6 +2014,7 @@
         .mini {
           width: 100%;
           min-width: 0;
+          min-height: 32px;
         }
 
         .entry-main {
@@ -1922,15 +2032,6 @@
       }
 
       @media (max-width: 360px) {
-        .brand-mark {
-          width: 36px;
-          height: 36px;
-        }
-
-        h1 {
-          font-size: 1.18rem;
-        }
-
         .status {
           min-width: 0;
           padding-inline: 8px;
@@ -1944,6 +2045,28 @@
     </style>
   </head>
   <body data-page="transcribe">
+    <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+      <defs>
+        <symbol id="i-load" viewBox="0 0 24 24"><path d="M14 3v4a1 1 0 0 0 1 1h4"/><path d="M18 21H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h8l5 5v12a1 1 0 0 1-1 1z"/><path d="M12 11v6"/><path d="M9.5 14.5 12 17l2.5-2.5"/></symbol>
+        <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 5.5v13a.5.5 0 0 0 .77.42l10-6.5a.5.5 0 0 0 0-.84l-10-6.5A.5.5 0 0 0 7 5.5z"/></symbol>
+        <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></symbol>
+        <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12"/><path d="M9 7V4h6v3"/></symbol>
+        <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.5 2.5 3.8 5.7 3.8 9S14.5 18.5 12 21c-2.5-2.5-3.8-5.7-3.8-9S9.5 5.5 12 3z"/></symbol>
+        <symbol id="i-book" viewBox="0 0 24 24"><path d="M5 4h11a2 2 0 0 1 2 2v14H7a2 2 0 0 1-2-2z"/><path d="M18 16H7a2 2 0 0 0-2 2"/></symbol>
+        <symbol id="i-text" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></symbol>
+        <symbol id="i-music" viewBox="0 0 24 24"><circle cx="6.5" cy="17.5" r="2.5"/><circle cx="17" cy="15.5" r="2.5"/><path d="M9 17.5V6l10-2v11.5"/></symbol>
+        <symbol id="i-wave" viewBox="0 0 24 24"><path d="M3 12h3l2.5-7 4 14 3-10 1.8 3H21"/></symbol>
+        <symbol id="i-wand" viewBox="0 0 24 24"><path d="M12 4l1.8 4.2L18 10l-4.2 1.8L12 16l-1.8-4.2L6 10l4.2-1.8z"/><path d="M5 3v3M3.5 4.5h3"/><path d="M18 15v3M16.5 16.5h3"/></symbol>
+        <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M6 15H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v1"/></symbol>
+        <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12"/><path d="M7.5 10.5 12 15l4.5-4.5"/><path d="M5 20h14"/></symbol>
+        <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M7 18h10a3.5 3.5 0 0 0 .5-6.96A5 5 0 0 0 7.6 9.5 4 4 0 0 0 7 18z"/><path d="M12 21v-6"/><path d="M9.5 17.5 12 15l2.5 2.5"/></symbol>
+        <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/></symbol>
+        <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 20V8"/><path d="M7.5 12.5 12 8l4.5 4.5"/><path d="M5 4h14"/></symbol>
+        <symbol id="i-swap" viewBox="0 0 24 24"><path d="M4 8h13M14 5l3 3-3 3"/><path d="M20 16H7M10 13l-3 3 3 3"/></symbol>
+        <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/></symbol>
+        <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+      </defs>
+    </svg>
     <div class="pages">
     <main id="page-transcribe" class="shell page" aria-label="語音轉文字">
       <header>
@@ -1956,7 +2079,9 @@
 
       <section class="controls" aria-label="controls">
         <input id="file" class="visually-hidden" type="file" accept="audio/*" />
-        <button id="load" type="button" aria-label="載入音檔分析" title="載入音檔進行辨識">⤵ 載入音檔</button>
+        <button id="load" class="iconbtn" type="button" aria-label="載入音檔進行辨識" title="載入音檔進行辨識"><svg class="ic" aria-hidden="true"><use href="#i-load"></use></svg></button>
+        <button id="toggle" class="iconbtn primary" type="button" aria-pressed="false" aria-label="開始辨識" title="開始辨識"><svg class="ic" aria-hidden="true"><use href="#i-play"></use></svg></button>
+        <button id="clear" class="iconbtn" type="button" aria-label="清除逐字稿" title="清除逐字稿"><svg class="ic" aria-hidden="true"><use href="#i-trash"></use></svg></button>
         <label id="scenario-field" title="載入音檔的後製情境:音樂會先用 Demucs 分離人聲再辨識歌詞">
           <span class="visually-hidden">音檔後製情境</span>
           <select id="scenario" aria-label="音檔後製情境">
@@ -1964,27 +2089,22 @@
             <option value="music">🎵 音樂(分離人聲)</option>
           </select>
         </label>
-        <button id="toggle" class="primary" type="button" aria-pressed="false">▶ 開始</button>
-        <button id="clear" type="button">清除</button>
-      </section>
-
-      <section class="controls-secondary" aria-label="辨識設定">
-        <button id="lang" class="mini" type="button" aria-haspopup="dialog" aria-controls="lang-dialog" title="設定辨識語言(最多 4 種,或自由偵測)">🌐 語言</button>
-        <button id="glossary" class="mini" type="button" aria-haspopup="dialog" aria-controls="glossary-dialog" title="慣用詞庫:你在逐字稿改的字會被記住,調整之後的辨識">📖 慣用詞庫</button>
+        <button id="lang" class="iconbtn" type="button" aria-haspopup="dialog" aria-controls="lang-dialog" aria-label="設定辨識語言" title="設定辨識語言(最多 4 種,或自由偵測)"><svg class="ic" aria-hidden="true"><use href="#i-globe"></use></svg></button>
+        <button id="glossary" class="iconbtn" type="button" aria-haspopup="dialog" aria-controls="glossary-dialog" aria-label="慣用詞庫" title="慣用詞庫:你在逐字稿改的字會被記住,調整之後的辨識"><svg class="ic" aria-hidden="true"><use href="#i-book"></use></svg></button>
       </section>
 
       <section class="transcript" aria-label="transcript">
         <div class="bar">
           <div class="view-tabs" role="tablist" aria-label="逐字稿顯示方式">
-            <button class="view-tab" type="button" data-view="text" role="tab" aria-selected="true">文字</button>
-            <button class="view-tab" type="button" data-view="jianpu" role="tab" aria-selected="false">文字+簡譜</button>
-            <button class="view-tab" type="button" data-view="spectrum" role="tab" aria-selected="false">基頻分析</button>
+            <button class="view-tab" type="button" data-view="text" role="tab" aria-selected="true" aria-label="文字" title="文字"><svg class="ic" aria-hidden="true"><use href="#i-text"></use></svg></button>
+            <button class="view-tab" type="button" data-view="jianpu" role="tab" aria-selected="false" aria-label="文字加簡譜" title="文字+簡譜"><svg class="ic" aria-hidden="true"><use href="#i-music"></use></svg></button>
+            <button class="view-tab" type="button" data-view="spectrum" role="tab" aria-selected="false" aria-label="基頻分析" title="基頻分析"><svg class="ic" aria-hidden="true"><use href="#i-wave"></use></svg></button>
           </div>
           <div class="bar-actions">
-            <button id="analyze" class="mini" type="button" disabled aria-label="後處理:重新計算音階與基頻分析" title="後處理:用更精準的演算法重新計算每個字的音階與簡譜,並產生基頻分析(後續計算,有進度條)">後處理</button>
-            <button id="copy" class="mini" type="button" disabled>複製</button>
-            <button id="download" class="mini" type="button" disabled>下載</button>
-            <button id="save" class="mini" type="button" disabled>雲端儲存</button>
+            <button id="analyze" class="mini iconbtn" type="button" disabled aria-label="後處理" title="後處理:用更精準的演算法重新計算每個字的音階與簡譜,並產生基頻分析(後續計算,有進度條)"><svg class="ic" aria-hidden="true"><use href="#i-wand"></use></svg></button>
+            <button id="copy" class="mini iconbtn" type="button" disabled aria-label="複製" title="複製逐字稿"><svg class="ic" aria-hidden="true"><use href="#i-copy"></use></svg></button>
+            <button id="download" class="mini iconbtn" type="button" disabled aria-label="下載" title="下載逐字稿"><svg class="ic" aria-hidden="true"><use href="#i-download"></use></svg></button>
+            <button id="save" class="mini iconbtn" type="button" disabled aria-label="雲端儲存" title="雲端儲存逐字稿"><svg class="ic" aria-hidden="true"><use href="#i-cloud"></use></svg></button>
           </div>
         </div>
         <div id="analyze-progress" class="voice-progress" hidden aria-live="polite">
@@ -2003,8 +2123,8 @@
       <section id="audio-panel" class="recording" aria-label="錄音" hidden>
         <audio id="recording" controls preload="metadata"></audio>
         <div class="audio-actions">
-          <button id="audio-download" class="mini" type="button" disabled>下載音檔</button>
-          <button id="audio-save" class="mini" type="button" disabled>雲端儲存音檔</button>
+          <button id="audio-download" class="mini iconbtn" type="button" disabled aria-label="下載音檔" title="下載音檔"><svg class="ic" aria-hidden="true"><use href="#i-download"></use></svg></button>
+          <button id="audio-save" class="mini iconbtn" type="button" disabled aria-label="雲端儲存音檔" title="雲端儲存音檔"><svg class="ic" aria-hidden="true"><use href="#i-cloud"></use></svg></button>
         </div>
       </section>
 
@@ -2046,8 +2166,8 @@
           目前目標聲音:<strong id="voice-target-name">尚未選擇</strong>
         </p>
         <div class="voice-source">
-          <button id="vc-record" type="button" class="primary" data-idle-label="● 錄音新增聲音">● 錄音新增聲音</button>
-          <button id="vc-upload" type="button">⤵ 上傳音檔新增</button>
+          <button id="vc-record" type="button" class="primary btniconlabel" data-idle-label="錄音新增聲音"><svg class="ic" aria-hidden="true"><use href="#i-mic"></use></svg><span class="btn-label">錄音新增聲音</span></button>
+          <button id="vc-upload" type="button" class="btniconlabel"><svg class="ic" aria-hidden="true"><use href="#i-upload"></use></svg><span class="btn-label">上傳音檔</span></button>
           <input id="vc-file" class="visually-hidden" type="file" accept="audio/*" />
         </div>
         <p class="voice-hint voice-hint-sub">錄製或上傳後會自動建立聲紋,並設為目標聲音;在清單中點名稱可改名、☆ 設為最愛。</p>
@@ -2056,10 +2176,10 @@
       </section>
 
       <div class="subtabs" role="tablist" aria-label="變聲功能">
-        <button class="subtab" type="button" data-panel="convert" role="tab" aria-selected="true">聲音轉換</button>
-        <button class="subtab" type="button" data-panel="tts" role="tab" aria-selected="false">文字轉換</button>
-        <button class="subtab" type="button" data-panel="sing" role="tab" aria-selected="false">簡譜唱歌</button>
-        <button class="subtab" type="button" data-panel="pitch" role="tab" aria-selected="false">基頻唱歌</button>
+        <button class="subtab" type="button" data-panel="convert" role="tab" aria-selected="true" aria-label="聲音轉換" title="聲音轉換"><svg class="ic" aria-hidden="true"><use href="#i-swap"></use></svg><span class="subtab-label">聲音轉換</span></button>
+        <button class="subtab" type="button" data-panel="tts" role="tab" aria-selected="false" aria-label="文字轉換" title="文字轉換"><svg class="ic" aria-hidden="true"><use href="#i-text"></use></svg><span class="subtab-label">文字轉換</span></button>
+        <button class="subtab" type="button" data-panel="sing" role="tab" aria-selected="false" aria-label="簡譜唱歌" title="簡譜唱歌"><svg class="ic" aria-hidden="true"><use href="#i-music"></use></svg><span class="subtab-label">簡譜唱歌</span></button>
+        <button class="subtab" type="button" data-panel="pitch" role="tab" aria-selected="false" aria-label="基頻唱歌" title="基頻唱歌"><svg class="ic" aria-hidden="true"><use href="#i-wave"></use></svg><span class="subtab-label">基頻唱歌</span></button>
       </div>
 
       <section id="vpanel-convert" class="voice-card vpanel">
@@ -2069,8 +2189,8 @@
         </div>
         <p class="voice-hint voice-desc" hidden>錄一段或上傳你的聲音,系統會自動用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」重新詮釋。</p>
         <div class="voice-source">
-          <button id="cv-record" type="button" class="primary" data-idle-label="● 錄音並轉換">● 錄音並轉換</button>
-          <button id="cv-upload" type="button">⤵ 上傳並轉換</button>
+          <button id="cv-record" type="button" class="primary btniconlabel" data-idle-label="錄音並轉換"><svg class="ic" aria-hidden="true"><use href="#i-mic"></use></svg><span class="btn-label">錄音並轉換</span></button>
+          <button id="cv-upload" type="button" class="btniconlabel"><svg class="ic" aria-hidden="true"><use href="#i-upload"></use></svg><span class="btn-label">上傳並轉換</span></button>
           <input id="cv-file" class="visually-hidden" type="file" accept="audio/*" />
         </div>
         <div id="cv-result-wrap" class="voice-result" hidden>
@@ -2101,8 +2221,8 @@
             <audio id="cv-result" class="voice-audio" controls preload="metadata"></audio>
           </div>
           <div class="voice-result-actions">
-            <button id="cv-bundle-download" type="button" class="mini">打包下載</button>
-            <button id="cv-bundle-save" type="button" class="mini">打包雲端儲存</button>
+            <button id="cv-bundle-download" type="button" class="mini iconbtn" aria-label="打包下載" title="打包下載"><svg class="ic" aria-hidden="true"><use href="#i-download"></use></svg></button>
+            <button id="cv-bundle-save" type="button" class="mini iconbtn" aria-label="打包雲端儲存" title="打包雲端儲存"><svg class="ic" aria-hidden="true"><use href="#i-cloud"></use></svg></button>
           </div>
         </div>
       </section>
@@ -2114,8 +2234,8 @@
         </div>
         <p class="voice-hint voice-desc" hidden>輸入或上傳文字,用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」念出來。</p>
         <div class="voice-source">
-          <button id="tts-upload" type="button">⤵ 上傳文字檔(.txt)</button>
-          <button id="tts-run" type="button" class="primary icon-run" title="用目標聲音念出來" aria-label="用目標聲音念出來" disabled>▶</button>
+          <button id="tts-upload" type="button" class="btniconlabel"><svg class="ic" aria-hidden="true"><use href="#i-upload"></use></svg><span class="btn-label">上傳文字檔</span></button>
+          <button id="tts-run" type="button" class="primary icon-run" title="用目標聲音念出來" aria-label="用目標聲音念出來" disabled><svg class="ic" aria-hidden="true"><use href="#i-play"></use></svg></button>
         </div>
         <input id="tts-file" class="visually-hidden" type="file" accept=".txt,text/plain" />
         <div class="voice-params">
@@ -2130,8 +2250,8 @@
         <div id="tts-result-wrap" class="voice-result" hidden>
           <audio id="tts-result" class="voice-audio" controls preload="metadata"></audio>
           <div class="voice-result-actions">
-            <button id="tts-download" type="button" class="mini">下載</button>
-            <button id="tts-save" type="button" class="mini">雲端儲存</button>
+            <button id="tts-download" type="button" class="mini iconbtn" aria-label="下載" title="下載"><svg class="ic" aria-hidden="true"><use href="#i-download"></use></svg></button>
+            <button id="tts-save" type="button" class="mini iconbtn" aria-label="雲端儲存" title="雲端儲存"><svg class="ic" aria-hidden="true"><use href="#i-cloud"></use></svg></button>
           </div>
         </div>
       </section>
@@ -2145,8 +2265,8 @@
           上傳逐字稿(含音高的 .json),或直接編輯下面的簡譜:<strong>一句一排</strong>,上排是<strong>簡譜</strong>(空格分隔,如 <code>1 1 5</code>;滑音用 <code>3↗5</code>;高八度加 <code>'</code>、低八度加 <code>,</code>),下排是<strong>文字</strong>(逐字),兩者可各自編輯,用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」唱出來。想依實測音高、抑揚頓挫演唱,請改用「基頻唱歌」。
         </p>
         <div class="voice-source">
-          <button id="sing-upload" type="button">⤵ 上傳逐字稿 JSON</button>
-          <button id="sing-run" type="button" class="primary icon-run" title="用目標聲音唱出來" aria-label="用目標聲音唱出來" disabled>▶</button>
+          <button id="sing-upload" type="button" class="btniconlabel"><svg class="ic" aria-hidden="true"><use href="#i-upload"></use></svg><span class="btn-label">上傳逐字稿 JSON</span></button>
+          <button id="sing-run" type="button" class="primary icon-run" title="用目標聲音唱出來" aria-label="用目標聲音唱出來" disabled><svg class="ic" aria-hidden="true"><use href="#i-play"></use></svg></button>
         </div>
         <input id="sing-file" class="visually-hidden" type="file" accept="application/json,.json" />
         <div class="voice-params">
@@ -2158,12 +2278,12 @@
           </label>
         </div>
         <div id="sing-blocks" class="sing-blocks"></div>
-        <button id="sing-add" type="button" class="mini">＋ 新增一句</button>
+        <button id="sing-add" type="button" class="mini btniconlabel"><svg class="ic" aria-hidden="true"><use href="#i-plus"></use></svg><span class="btn-label">新增一句</span></button>
         <div id="sing-result-wrap" class="voice-result" hidden>
           <audio id="sing-result" class="voice-audio" controls preload="metadata"></audio>
           <div class="voice-result-actions">
-            <button id="sing-download" type="button" class="mini">下載</button>
-            <button id="sing-save" type="button" class="mini">雲端儲存</button>
+            <button id="sing-download" type="button" class="mini iconbtn" aria-label="下載" title="下載"><svg class="ic" aria-hidden="true"><use href="#i-download"></use></svg></button>
+            <button id="sing-save" type="button" class="mini iconbtn" aria-label="雲端儲存" title="雲端儲存"><svg class="ic" aria-hidden="true"><use href="#i-cloud"></use></svg></button>
           </div>
         </div>
       </section>
@@ -2177,8 +2297,8 @@
           載入「基頻分析(.csv)」後,下方會按段落完整呈現<strong>基頻</strong>(青色音高曲線)、<strong>強度</strong>(橘色填色)與<strong>文字</strong>(上方標記)的對應關係,再用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」依實測音高、抑揚頓挫與氣音重新唱出來。CSV 由逐字稿頁「後處理」後匯出。
         </p>
         <div class="voice-source">
-          <button id="pitch-analysis-upload" type="button">⤵ 載入基頻分析 (.csv)</button>
-          <button id="pitch-run" type="button" class="primary icon-run" title="用目標聲音唱出來" aria-label="用目標聲音唱出來" disabled>▶</button>
+          <button id="pitch-analysis-upload" type="button" class="btniconlabel"><svg class="ic" aria-hidden="true"><use href="#i-load"></use></svg><span class="btn-label">載入基頻分析 (.csv)</span></button>
+          <button id="pitch-run" type="button" class="primary icon-run" title="用目標聲音唱出來" aria-label="用目標聲音唱出來" disabled><svg class="ic" aria-hidden="true"><use href="#i-play"></use></svg></button>
         </div>
         <input id="pitch-analysis-file" class="visually-hidden" type="file" accept="text/csv,.csv" />
         <div class="voice-params solo">
@@ -2200,8 +2320,8 @@
         <div id="pitch-result-wrap" class="voice-result" hidden>
           <audio id="pitch-result" class="voice-audio" controls preload="metadata"></audio>
           <div class="voice-result-actions">
-            <button id="pitch-download" type="button" class="mini">下載</button>
-            <button id="pitch-save" type="button" class="mini">雲端儲存</button>
+            <button id="pitch-download" type="button" class="mini iconbtn" aria-label="下載" title="下載"><svg class="ic" aria-hidden="true"><use href="#i-download"></use></svg></button>
+            <button id="pitch-save" type="button" class="mini iconbtn" aria-label="雲端儲存" title="雲端儲存"><svg class="ic" aria-hidden="true"><use href="#i-cloud"></use></svg></button>
           </div>
         </div>
       </section>
