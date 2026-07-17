@@ -120,7 +120,9 @@
         min-height: 0;
         margin: 0 auto;
         display: grid;
-        grid-template-rows: auto auto minmax(0, 1fr) auto auto auto;
+        /* header / controls / controls-secondary / transcript(1fr) / audio-panel / status / footer.
+           transcript must own the flexible row so the data area — not the language row — gets the space. */
+        grid-template-rows: auto auto auto minmax(0, 1fr) auto auto auto;
         gap: 14px;
         padding: max(18px, env(safe-area-inset-top)) 16px 14px;
       }
@@ -322,10 +324,17 @@
         border-radius: 8px;
         background: var(--panel);
         display: grid;
-        grid-template-rows: auto minmax(0, 1fr) auto;
+        grid-template-rows: auto auto minmax(0, 1fr) auto;
         overflow: hidden;
         box-shadow: 0 1px 2px var(--shadow);
       }
+
+      /* Pin rows explicitly so #lines always owns the flexible track — otherwise when
+         #analyze-progress unhides during 後處理 it auto-places into the 1fr and collapses the data. */
+      .transcript > .bar { grid-row: 1; }
+      .transcript > #analyze-progress { grid-row: 2; }
+      .transcript > #lines { grid-row: 3; }
+      .transcript > .partial { grid-row: 4; }
 
       /* Two stacked rows: 顯示頁籤 on top, 後處理/複製/下載/雲端儲存 below. */
       .bar {
@@ -879,7 +888,11 @@
       }
 
       .controls-secondary .mini {
-        flex: 1 1 auto;
+        flex: 1 1 0;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
 
       .lang-hint {
@@ -1874,8 +1887,10 @@
           padding-inline: 12px;
         }
 
+        /* 2×2 instead of 3-col-with-4-items: 載入音檔+情境 (檔案) on top, 開始+清除 below —
+           no stranded button, bigger tap targets. */
         .controls {
-          grid-template-columns: repeat(3, minmax(0, 1fr));
+          grid-template-columns: 1fr 1fr;
           gap: 8px;
         }
 
