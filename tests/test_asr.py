@@ -122,6 +122,103 @@ class ASRTests(unittest.TestCase):
         self.assertIn("Mike 學習", prompt)
         self.assertIn("布雷茲", prompt)
 
+    def test_context_precedes_base_prompt_and_glossary(self):
+        model = _StubWhisperModel(detected_language="zh")
+        engine = _fake_engine(model)
+
+        engine.transcribe(
+            np.zeros(16000, dtype=np.float32),
+            16000,
+            "zh",
+            languages=("zh",),
+            prompt_terms=("布雷茲",),
+            context="精靈 是主角",
+        )
+
+        prompt = model.calls[-1]["initial_prompt"]
+        # Context comes FIRST (whitespace-collapsed); the base prompt + glossary
+        # sit at the tail so they survive Whisper's initial_prompt truncation.
+        self.assertTrue(prompt.startswith("精靈 是主角"))
+        self.assertIn(TRADITIONAL_CHINESE_PROMPT, prompt)
+        self.assertTrue(prompt.endswith("布雷茲"))
+
+    def test_context_dropped_in_free_detect_mode(self):
+        # Free detection drops the whole prompt, context included, so it cannot
+        # bias the language guess.
+        model = _StubWhisperModel(detected_language="en")
+        engine = _fake_engine(model)
+
+        engine.transcribe(
+            np.zeros(16000, dtype=np.float32), 16000, "auto", context="先前的中文脈絡"
+        )
+
+        self.assertIsNone(model.calls[-1]["initial_prompt"])
+
+
+class _StubWord:
+    def __init__(self, word, start, end):
+        self.word = word
+        self.start = start
+        self.end = end
+
+
+class _StubSegment:
+    def __init__(self, text, start, end, words=()):
+        self.text = text
+        self.start = start
+        self.end = end
+        self.words = words
+
+
+class _StubBatched:
+    """Stand-in for faster-whisper's BatchedInferencePipeline."""
+
+    def __init__(self, segments):
+        self.segments = segments
+        self.calls = []
+
+    def transcribe(self, audio, **kwargs):
+        del audio
+        self.calls.append(kwargs)
+        info = SimpleNamespace(language=kwargs.get("language") or "zh")
+        return list(self.segments), info
+
+
+class BatchedFileASRTests(unittest.TestCase):
+    def test_mock_transcribe_file_returns_one_segment(self):
+        result = MockASR().transcribe_file(np.zeros(16000, dtype=np.float32), 16000, "zh")
+        self.assertEqual(len(result.segments), 1)
+        self.assertIn("批次測試", result.segments[0].text)
+        self.assertEqual(result.language, "zh")
+
+    def test_transcribe_file_maps_batched_segments_and_passes_batch_size(self):
+        engine = _fake_engine(_StubWhisperModel(detected_language="zh"))
+        words = [_StubWord("你好", 0.0, 0.5), _StubWord("世界", 0.5, 1.0)]
+        engine._batched = _StubBatched([_StubSegment("你好世界", 0.0, 1.0, words)])
+
+        result = engine.transcribe_file(
+            np.zeros(16000, dtype=np.float32), 16000, "auto", batch_size=8
+        )
+
+        self.assertEqual(len(result.segments), 1)
+        self.assertEqual(result.segments[0].text, "你好世界")
+        self.assertEqual(result.segments[0].start, 0.0)
+        self.assertEqual(result.segments[0].end, 1.0)
+        self.assertEqual(len(result.segments[0].words), 2)
+        # Auto (free-detect) drops the prompt; the batch size is threaded through.
+        self.assertIsNone(engine._batched.calls[-1]["initial_prompt"])
+        self.assertEqual(engine._batched.calls[-1]["batch_size"], 8)
+
+    def test_transcribe_file_drops_empty_segments(self):
+        engine = _fake_engine(_StubWhisperModel(detected_language="zh"))
+        engine._batched = _StubBatched(
+            [_StubSegment("  ", 0.0, 0.5), _StubSegment("有字", 0.5, 1.0)]
+        )
+
+        result = engine.transcribe_file(np.zeros(16000, dtype=np.float32), 16000, "auto")
+
+        self.assertEqual([seg.text for seg in result.segments], ["有字"])
+
 
 if __name__ == "__main__":
     unittest.main()

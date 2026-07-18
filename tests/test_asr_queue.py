@@ -18,18 +18,22 @@ class RecordingASR:
         self.active = 0
         self.calls = 0
         self.max_active = 0
+        self.last_context = None
         self.lock = threading.Lock()
 
     def load(self):
         return None
 
-    def transcribe(self, samples, sample_rate, language, *, languages=(), prompt_terms=()):
+    def transcribe(
+        self, samples, sample_rate, language, *, languages=(), prompt_terms=(), context=""
+    ):
         del samples, sample_rate, languages, prompt_terms
         with self.lock:
             self.active += 1
             self.calls += 1
             call = self.calls
             self.max_active = max(self.max_active, self.active)
+            self.last_context = context
         try:
             time.sleep(self.delay_seconds)
             return ASRResult(
@@ -56,8 +60,10 @@ class BlockingASR:
     def load(self):
         return None
 
-    def transcribe(self, samples, sample_rate, language, *, languages=(), prompt_terms=()):
-        del samples, sample_rate, languages, prompt_terms
+    def transcribe(
+        self, samples, sample_rate, language, *, languages=(), prompt_terms=(), context=""
+    ):
+        del samples, sample_rate, languages, prompt_terms, context
         self.calls += 1
         self.started.set()
         self.release.wait(timeout=1)
@@ -86,6 +92,16 @@ class ASRQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(asr.max_active, 1)
         self.assertEqual([item.result.text for item in results], ["job 1", "job 2", "job 3"])
         self.assertEqual(results[-1].queue_depth, 0)
+
+    async def test_threads_context_to_engine(self):
+        asr = RecordingASR()
+        queue = ASRQueue(asr, concurrency=1)
+        try:
+            await queue.transcribe(np.zeros(4, dtype=np.float32), 4, "zh", context="先前脈絡")
+        finally:
+            await queue.stop()
+
+        self.assertEqual(asr.last_context, "先前脈絡")
 
     async def test_cancelled_queued_job_is_not_transcribed(self):
         asr = BlockingASR()

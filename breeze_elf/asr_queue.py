@@ -26,6 +26,7 @@ class _ASRJob:
     future: asyncio.Future[QueuedASRResult]
     languages: tuple[str, ...] = ()
     prompt_terms: tuple[str, ...] = ()
+    context: str = ""
 
 
 class ASRQueue:
@@ -86,6 +87,7 @@ class ASRQueue:
         *,
         languages: tuple[str, ...] = (),
         prompt_terms: tuple[str, ...] = (),
+        context: str = "",
     ) -> QueuedASRResult:
         await self.start()
         loop = asyncio.get_running_loop()
@@ -99,6 +101,7 @@ class ASRQueue:
                 future=future,
                 languages=languages,
                 prompt_terms=prompt_terms,
+                context=context,
             )
         )
         try:
@@ -126,6 +129,7 @@ class ASRQueue:
                             job.language,
                             languages=job.languages,
                             prompt_terms=job.prompt_terms,
+                            context=job.context,
                         ),
                     )
                 except asyncio.CancelledError:

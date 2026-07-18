@@ -36,6 +36,26 @@ class ASRResult:
     words: tuple[WordTiming, ...] = ()
 
 
+@dataclass(frozen=True)
+class FileSegment:
+    """One segment of a whole-file (batched) transcription. ``start``/``end`` and
+    the per-word timings are absolute seconds from the start of the file."""
+
+    text: str
+    start: float
+    end: float
+    words: tuple[WordTiming, ...] = ()
+
+
+@dataclass(frozen=True)
+class FileTranscription:
+    segments: tuple[FileSegment, ...]
+    language: str
+    duration_ms: int
+    backend: str
+    device: str
+
+
 class ASREngine(Protocol):
     backend: str
     device: str
@@ -53,6 +73,7 @@ class ASREngine(Protocol):
         *,
         languages: Sequence[str] | None = None,
         prompt_terms: Sequence[str] | None = None,
+        context: str | None = None,
     ) -> ASRResult:
         ...
 
@@ -77,8 +98,9 @@ class MockASR:
         *,
         languages: Sequence[str] | None = None,
         prompt_terms: Sequence[str] | None = None,
+        context: str | None = None,
     ) -> ASRResult:
-        del languages, prompt_terms  # mock ignores restriction / 詞庫 biasing
+        del languages, prompt_terms, context  # mock ignores restriction / 詞庫 / 脈絡
         self._count += 1
         seconds = samples.size / sample_rate if sample_rate else 0
         text = f"測試字幕 {self._count} ({seconds:.1f}s)"
@@ -91,6 +113,31 @@ class MockASR:
             words=_even_word_timings(text, float(seconds)),
         )
 
+    def transcribe_file(
+        self,
+        samples: np.ndarray,
+        sample_rate: int,
+        language: str,
+        *,
+        languages: Sequence[str] | None = None,
+        prompt_terms: Sequence[str] | None = None,
+        context: str | None = None,
+        batch_size: int = 16,
+    ) -> FileTranscription:
+        del languages, prompt_terms, context, batch_size
+        seconds = samples.size / sample_rate if sample_rate else 0
+        text = f"批次測試 ({seconds:.1f}s)"
+        segment = FileSegment(
+            text=text, start=0.0, end=float(seconds), words=_even_word_timings(text, float(seconds))
+        )
+        return FileTranscription(
+            segments=(segment,),
+            language=language,
+            duration_ms=0,
+            backend=self.backend,
+            device=self.device,
+        )
+
 
 class FasterWhisperASR:
     backend = "faster-whisper"
@@ -101,6 +148,7 @@ class FasterWhisperASR:
         self.device = "unloaded"
         self.compute_type = "unloaded"
         self._model = None
+        self._batched = None
         self._converter = None
         self._lock = threading.Lock()
 
@@ -146,6 +194,7 @@ class FasterWhisperASR:
         *,
         languages: Sequence[str] | None = None,
         prompt_terms: Sequence[str] | None = None,
+        context: str | None = None,
     ) -> ASRResult:
         self.load()
         assert self._model is not None
@@ -170,8 +219,8 @@ class FasterWhisperASR:
             whisper_language = self._resolve_language(audio, allowed)
 
         # In free-detect mode we drop the prompt entirely so it cannot bias the
-        # detection (back toward zh, or toward 詞庫 terms on a melody).
-        initial_prompt = None if auto_detect else _build_prompt(allowed, prompt_terms)
+        # detection (back toward zh, or toward 詞庫 terms / recent 脈絡 on a melody).
+        initial_prompt = None if auto_detect else _build_prompt(allowed, prompt_terms, context)
         # OpenCC simplified→traditional only matters for Chinese output; skip it
         # for a pure non-zh restriction so shared CJK kanji aren't mangled.
         converter = self._converter if (auto_detect or "zh" in allowed) else None
@@ -204,6 +253,82 @@ class FasterWhisperASR:
             no_speech_prob=_max_segment_float(segment_list, "no_speech_prob"),
             words=self._collect_words(segment_list, converter),
         )
+
+    def transcribe_file(
+        self,
+        samples: np.ndarray,
+        sample_rate: int,
+        language: str,
+        *,
+        languages: Sequence[str] | None = None,
+        prompt_terms: Sequence[str] | None = None,
+        context: str | None = None,
+        batch_size: int = 16,
+    ) -> FileTranscription:
+        """Transcribe a whole recording in one batched pass (3-4x throughput on long
+        files). ``BatchedInferencePipeline`` runs its own internal VAD and batches the
+        chunks, so — unlike the live per-utterance path — it needs the entire audio at
+        once; word timings come back absolute to the file start. Language / prompt /
+        OpenCC handling mirrors :meth:`transcribe`."""
+        self.load()
+        assert self._model is not None
+
+        del sample_rate
+        audio = samples.astype(np.float32, copy=False)
+        allowed = _normalize_languages(languages, language)
+        auto_detect = not allowed or any(code in _AUTO_LANGUAGES for code in allowed)
+        if auto_detect:
+            whisper_language: str | None = None
+        elif len(allowed) == 1:
+            whisper_language = allowed[0]
+        else:
+            whisper_language = self._resolve_language(audio, allowed)
+        initial_prompt = None if auto_detect else _build_prompt(allowed, prompt_terms, context)
+        converter = self._converter if (auto_detect or "zh" in allowed) else None
+
+        started = time.perf_counter()
+        segments, info = self._ensure_batched().transcribe(
+            audio,
+            batch_size=max(1, batch_size),
+            language=whisper_language,
+            task="transcribe",
+            word_timestamps=True,
+            initial_prompt=initial_prompt,
+        )
+        file_segments: list[FileSegment] = []
+        for segment in segments:
+            text = _to_traditional(segment.text.strip(), converter)
+            if not text:
+                continue
+            start = float(getattr(segment, "start", 0.0) or 0.0)
+            end = float(getattr(segment, "end", start) or start)
+            file_segments.append(
+                FileSegment(
+                    text=text,
+                    start=start,
+                    end=max(start, end),
+                    words=self._collect_words([segment], converter),
+                )
+            )
+        detected_language = (
+            getattr(info, "language", None)
+            or whisper_language
+            or (allowed[0] if allowed else "auto")
+        )
+        return FileTranscription(
+            segments=tuple(file_segments),
+            language=detected_language,
+            duration_ms=round((time.perf_counter() - started) * 1000),
+            backend=self.backend,
+            device=f"{self.device}/{self.compute_type}",
+        )
+
+    def _ensure_batched(self):
+        if self._batched is None:
+            from faster_whisper import BatchedInferencePipeline
+
+            self._batched = BatchedInferencePipeline(self._model)
+        return self._batched
 
     def _resolve_language(self, audio: np.ndarray, allowed: tuple[str, ...]) -> str:
         """Pick the most likely language *within* ``allowed``; fall back to the
@@ -266,12 +391,22 @@ def _normalize_languages(
 
 
 def _build_prompt(
-    allowed: tuple[str, ...], prompt_terms: Sequence[str] | None
+    allowed: tuple[str, ...],
+    prompt_terms: Sequence[str] | None,
+    context: str | None = None,
 ) -> str | None:
-    """The Whisper ``initial_prompt``: the Traditional-Chinese base prompt when
-    zh is in scope, followed by the 慣用詞庫 terms so the model is biased toward
-    the user's preferred spellings. ``None`` when there is nothing to bias with."""
+    """The Whisper ``initial_prompt``: the recent transcript ``context`` (so proper
+    nouns stay consistent across segments), then the Traditional-Chinese base prompt
+    when zh is in scope, then the 慣用詞庫 terms biasing the user's preferred
+    spellings. ``None`` when there is nothing to bias with.
+
+    Context is placed *first* on purpose: faster-whisper keeps only the tail (~223
+    tokens) of an over-long ``initial_prompt``, so the higher-value base prompt +
+    glossary must sit last to survive; the softer context is what gets evicted."""
     parts: list[str] = []
+    tail = " ".join((context or "").split())
+    if tail:
+        parts.append(tail)
     if "zh" in allowed:
         parts.append(TRADITIONAL_CHINESE_PROMPT)
     terms = [term.strip() for term in (prompt_terms or ()) if term and term.strip()]

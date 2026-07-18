@@ -83,6 +83,24 @@ class Settings:
     asr_concurrency: int = 1
     asr_no_speech_prob_threshold: float = 0.6
     asr_hallucination_rms_threshold: float = 0.02
+    # Cross-segment context: how many trailing characters of the committed
+    # transcript to feed the next utterance's Whisper ``initial_prompt`` (alongside
+    # the 慣用詞庫) so proper nouns stay consistent across segments. ``0`` (default)
+    # keeps the current stateless behaviour — opt-in because seeding recent text can
+    # coax Whisper into echoing it on a short/quiet utterance. Bounded to cap prompt
+    # growth; only applies when a language is fixed (free-detect drops the prompt).
+    asr_context_chars: int = 0
+    # Loaded-file transcription via faster-whisper's BatchedInferencePipeline
+    # (3-4x throughput on long files by batching the whole recording's VAD chunks).
+    # ``0`` (default) keeps the per-utterance streaming file path; > 0 enables the
+    # POST /api/transcribe/file batched endpoint and is the batch_size. Live mic
+    # streaming is never affected. Bounded to keep GPU memory sane.
+    asr_file_batch_size: int = 0
+    # Upper bound (decoded bytes) on a base64 PCM upload to the whole-file endpoints
+    # (/api/transcribe/file, /api/enhance/separate), checked before decoding so an
+    # oversized body can't OOM the host. Default ~256 MB ≈ 2.2 h of 16 kHz mono;
+    # ``0`` disables the cap. This is a local single-user app, so the bound is loose.
+    max_audio_upload_bytes: int = 256_000_000
     stop_drain_timeout_seconds: float = 60.0
     remote_storage_dir: str = "remote_transcripts"
     search_enabled: bool = True
@@ -184,6 +202,9 @@ def get_settings() -> Settings:
         asr_concurrency=max(1, _int_env("BREEZE_ASR_CONCURRENCY", 1)),
         asr_no_speech_prob_threshold=_float_env("BREEZE_ASR_NO_SPEECH_PROB_THRESHOLD", 0.6),
         asr_hallucination_rms_threshold=_float_env("BREEZE_ASR_HALLUCINATION_RMS_THRESHOLD", 0.02),
+        asr_context_chars=min(2000, max(0, _int_env("BREEZE_ASR_CONTEXT_CHARS", 0))),
+        asr_file_batch_size=min(32, max(0, _int_env("BREEZE_ASR_FILE_BATCH_SIZE", 0))),
+        max_audio_upload_bytes=max(0, _int_env("BREEZE_MAX_AUDIO_UPLOAD_BYTES", 256_000_000)),
         stop_drain_timeout_seconds=max(0.1, _float_env("BREEZE_STOP_DRAIN_TIMEOUT_SECONDS", 60.0)),
         remote_storage_dir=os.getenv("BREEZE_REMOTE_STORAGE_DIR", "remote_transcripts"),
         search_enabled=_bool_env("BREEZE_SEARCH_ENABLED", True),

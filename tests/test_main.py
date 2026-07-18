@@ -37,8 +37,10 @@ class ImmediateASRQueue:
     device = "cpu"
     queue_depth = 0
 
-    async def transcribe(self, samples, sample_rate, language, *, languages=(), prompt_terms=()):
-        del samples, sample_rate, languages, prompt_terms
+    async def transcribe(
+        self, samples, sample_rate, language, *, languages=(), prompt_terms=(), context=""
+    ):
+        del samples, sample_rate, languages, prompt_terms, context
         return QueuedASRResult(
             result=ASRResult(
                 text="最後一句",
@@ -60,8 +62,10 @@ class RecordingASRQueue:
     def __init__(self):
         self.received_rms = 0.0
 
-    async def transcribe(self, samples, sample_rate, language, *, languages=(), prompt_terms=()):
-        del sample_rate, languages, prompt_terms
+    async def transcribe(
+        self, samples, sample_rate, language, *, languages=(), prompt_terms=(), context=""
+    ):
+        del sample_rate, languages, prompt_terms, context
         self.received_rms = calculate_rms(samples)
         return QueuedASRResult(
             result=ASRResult(
@@ -254,9 +258,9 @@ class MainTests(unittest.IsolatedAsyncioTestCase):
 
         class _FixedTextQueue(ImmediateASRQueue):
             async def transcribe(
-                self, samples, sample_rate, language, *, languages=(), prompt_terms=()
+                self, samples, sample_rate, language, *, languages=(), prompt_terms=(), context=""
             ):
-                del samples, sample_rate, languages, prompt_terms
+                del samples, sample_rate, languages, prompt_terms, context
                 return QueuedASRResult(
                     result=ASRResult(
                         text="機器學習很有趣",
@@ -284,6 +288,117 @@ class MainTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final["text"], "Mike 學習很有趣")
         self.assertEqual(final["transcript"], "Mike 學習很有趣")
 
+    async def test_process_windows_seeds_context_when_enabled(self):
+        sample_rate = 16_000
+        time_axis = np.arange(sample_rate, dtype=np.float32) / sample_rate
+        samples = (0.05 * np.sin(2 * np.pi * 220.0 * time_axis)).astype(np.float32)
+        window = AudioWindow(
+            index=0,
+            start_seconds=0.0,
+            end_seconds=1.0,
+            samples=samples,
+            rms=calculate_rms(samples),
+            is_speech=True,
+            kind="utterance",
+        )
+
+        class _ContextQueue(ImmediateASRQueue):
+            def __init__(self):
+                self.contexts = []
+
+            async def transcribe(
+                self, samples, sample_rate, language, *, languages=(), prompt_terms=(), context=""
+            ):
+                del samples, sample_rate, languages, prompt_terms
+                self.contexts.append(context)
+                return QueuedASRResult(
+                    result=ASRResult(
+                        text="新的一句",
+                        language=language,
+                        duration_ms=0,
+                        backend=self.backend,
+                        device=self.device,
+                    ),
+                    queue_wait_ms=0,
+                    queue_depth=0,
+                )
+
+        state = StreamState(started=True, queue=asyncio.Queue(maxsize=1))
+        # 8-char transcript with a 4-char cap so real truncation is exercised — a
+        # regression to an unguarded `[-0:]`/`[-chars:]` slice would return the whole
+        # string and be caught here (it also silently turns the opt-in feature on).
+        state.transcript = "上一段的文字內容"
+        await state.queue.put(window)
+        state.stop_event.set()
+
+        async def send_json(payload):
+            del payload
+
+        queue = _ContextQueue()
+        with patch.object(
+            main,
+            "settings",
+            replace(main.settings, asr_context_chars=4, sample_rate=sample_rate),
+        ):
+            await main._process_windows(state, send_json, queue, ("zh",), ())
+
+        self.assertEqual(queue.contexts[0], "文字內容")
+
+    async def test_process_windows_omits_context_when_disabled(self):
+        # The off-by-default invariant: asr_context_chars=0 must pass "" (never the
+        # whole transcript), guarding against the `s[-0:]` == full-string footgun.
+        sample_rate = 16_000
+        time_axis = np.arange(sample_rate, dtype=np.float32) / sample_rate
+        samples = (0.05 * np.sin(2 * np.pi * 220.0 * time_axis)).astype(np.float32)
+        window = AudioWindow(
+            index=0,
+            start_seconds=0.0,
+            end_seconds=1.0,
+            samples=samples,
+            rms=calculate_rms(samples),
+            is_speech=True,
+            kind="utterance",
+        )
+
+        class _ContextQueue(ImmediateASRQueue):
+            def __init__(self):
+                self.contexts = []
+
+            async def transcribe(
+                self, samples, sample_rate, language, *, languages=(), prompt_terms=(), context=""
+            ):
+                del samples, sample_rate, languages, prompt_terms
+                self.contexts.append(context)
+                return QueuedASRResult(
+                    result=ASRResult(
+                        text="一句話",
+                        language=language,
+                        duration_ms=0,
+                        backend=self.backend,
+                        device=self.device,
+                    ),
+                    queue_wait_ms=0,
+                    queue_depth=0,
+                )
+
+        state = StreamState(started=True, queue=asyncio.Queue(maxsize=1))
+        state.transcript = "已經有很多內容了"
+        await state.queue.put(window)
+        state.stop_event.set()
+
+        async def send_json(payload):
+            del payload
+
+        queue = _ContextQueue()
+        with patch.object(
+            main,
+            "settings",
+            replace(main.settings, asr_context_chars=0, sample_rate=sample_rate),
+        ):
+            await main._process_windows(state, send_json, queue, ("zh",), ())
+
+        self.assertEqual(queue.contexts[0], "")
+
     async def test_process_windows_attaches_translation_and_speaker_on_final(self):
         from breeze_elf.diarize import OnlineSpeakerClusterer
 
@@ -302,9 +417,9 @@ class MainTests(unittest.IsolatedAsyncioTestCase):
 
         class _FixedTextQueue(ImmediateASRQueue):
             async def transcribe(
-                self, samples, sample_rate, language, *, languages=(), prompt_terms=()
+                self, samples, sample_rate, language, *, languages=(), prompt_terms=(), context=""
             ):
-                del samples, sample_rate, languages, prompt_terms
+                del samples, sample_rate, languages, prompt_terms, context
                 return QueuedASRResult(
                     result=ASRResult(
                         text="你好世界", language=language, duration_ms=0,
@@ -354,9 +469,9 @@ class MainTests(unittest.IsolatedAsyncioTestCase):
 
         class _FixedTextQueue(ImmediateASRQueue):
             async def transcribe(
-                self, samples, sample_rate, language, *, languages=(), prompt_terms=()
+                self, samples, sample_rate, language, *, languages=(), prompt_terms=(), context=""
             ):
-                del samples, sample_rate, languages, prompt_terms
+                del samples, sample_rate, languages, prompt_terms, context
                 return QueuedASRResult(
                     result=ASRResult(text="嗨", language=language, duration_ms=0,
                                      backend=self.backend, device=self.device),
@@ -375,6 +490,85 @@ class MainTests(unittest.IsolatedAsyncioTestCase):
         final = next(event for event in events if event["type"] == "final")
         self.assertIsNone(final["translation"])  # translate defaulted off
         self.assertIsNone(final["speaker"])  # no clusterer built
+
+
+class _BatchEngine:
+    backend = "batch-test"
+    device = "cpu"
+
+    def transcribe_file(
+        self, samples, sample_rate, language, *, languages=None, prompt_terms=None,
+        context=None, batch_size=16,
+    ):
+        del samples, sample_rate, language, languages, prompt_terms, context, batch_size
+        from breeze_elf.asr import FileSegment, FileTranscription, WordTiming
+
+        segment = FileSegment(
+            text="機器學習", start=0.0, end=1.0, words=(WordTiming("機器學習", 0.0, 1.0),)
+        )
+        return FileTranscription(
+            segments=(segment,), language="zh", duration_ms=3,
+            backend=self.backend, device=self.device,
+        )
+
+
+class BatchedFileEndpointTests(unittest.IsolatedAsyncioTestCase):
+    async def test_returns_blocks_with_glossary_applied(self):
+        pcm = np.full(1600, 1000, dtype="<i2").tobytes()
+        payload = main.FileTranscribeRequest(
+            pcmBase64=base64.b64encode(pcm).decode("ascii"),
+            sampleRate=16000,
+            glossary=[{"from": "機器學習", "to": "Mike 學習"}],
+        )
+        with patch.object(main, "asr_engine", _BatchEngine()), patch.object(
+            main, "settings", replace(main.settings, asr_file_batch_size=8)
+        ):
+            response = await main.transcribe_file_endpoint(payload)
+
+        data = json.loads(response.body)
+        self.assertTrue(data["ok"])
+        self.assertEqual(len(data["blocks"]), 1)
+        # Glossary rewrites the display text, but per-character timings stay on the
+        # raw recognised word (same as the streaming path), so chars come from 機器學習.
+        self.assertEqual(data["blocks"][0]["text"], "Mike 學習")
+        self.assertEqual(data["blocks"][0]["characters"][0]["char"], "機")
+        self.assertEqual(len(data["blocks"][0]["characters"]), 4)
+        self.assertEqual(data["transcript"], "Mike 學習")
+        self.assertEqual(data["batchSize"], 8)
+
+    async def test_disabled_returns_503(self):
+        payload = main.FileTranscribeRequest(
+            pcmBase64=base64.b64encode(np.zeros(8, dtype="<i2").tobytes()).decode("ascii")
+        )
+        with patch.object(main, "settings", replace(main.settings, asr_file_batch_size=0)):
+            with self.assertRaises(main.HTTPException) as ctx:
+                await main.transcribe_file_endpoint(payload)
+        self.assertEqual(ctx.exception.status_code, 503)
+
+    async def test_oversized_payload_returns_413(self):
+        # 4000 decoded bytes against a 1000-byte cap → 413 before any decode/transcribe.
+        big = base64.b64encode(np.zeros(2000, dtype="<i2").tobytes()).decode("ascii")
+        payload = main.FileTranscribeRequest(pcmBase64=big)
+        with patch.object(main, "asr_engine", _BatchEngine()), patch.object(
+            main,
+            "settings",
+            replace(main.settings, asr_file_batch_size=8, max_audio_upload_bytes=1000),
+        ):
+            with self.assertRaises(main.HTTPException) as ctx:
+                await main.transcribe_file_endpoint(payload)
+        self.assertEqual(ctx.exception.status_code, 413)
+
+    async def test_wrong_sample_rate_returns_400(self):
+        payload = main.FileTranscribeRequest(
+            pcmBase64=base64.b64encode(np.zeros(1600, dtype="<i2").tobytes()).decode("ascii"),
+            sampleRate=48000,
+        )
+        with patch.object(main, "asr_engine", _BatchEngine()), patch.object(
+            main, "settings", replace(main.settings, asr_file_batch_size=8)
+        ):
+            with self.assertRaises(main.HTTPException) as ctx:
+                await main.transcribe_file_endpoint(payload)
+        self.assertEqual(ctx.exception.status_code, 400)
 
 
 class CharacterPayloadTests(unittest.TestCase):

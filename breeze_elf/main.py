@@ -50,6 +50,8 @@ from .protocol import (
     ProtocolError,
     StartMessage,
     StopMessage,
+    _parse_glossary,
+    _parse_languages,
     parse_client_text,
     server_event,
 )
@@ -483,6 +485,9 @@ async def health() -> JSONResponse:
             "asrConcurrency": settings.asr_concurrency,
             "asrQueueDepth": app.state.asr_queue.queue_depth,
             "asrError": app.state.asr_error,
+            "asrFileBatch": settings.asr_file_batch_size,
+            "fileBatchAvailable": settings.asr_file_batch_size > 0
+            and hasattr(asr_engine, "transcribe_file"),
             "enhanceLive": live_enhancer.name,
             "enhanceFile": file_enhancer.name,
             "enhanceDevice": settings.enhance_device,
@@ -665,6 +670,26 @@ def _decode_audio(audio_base64: str | None) -> bytes | None:
         raise HTTPException(status_code=400, detail="invalid audio encoding") from exc
 
 
+def _decode_pcm_payload(pcm_base64: str) -> np.ndarray:
+    """Decode a base64 16-bit PCM upload to float32, bounded so a huge body can't
+    OOM the host. The size is checked *before* decoding (413), then the bytes are
+    decoded (400 on garbage) and rejected if empty (400). Shared by the whole-file
+    endpoints (/api/transcribe/file, /api/enhance/separate)."""
+    max_bytes = settings.max_audio_upload_bytes
+    if max_bytes and (len(pcm_base64) * 3) // 4 > max_bytes:
+        raise HTTPException(
+            status_code=413, detail=f"audio payload exceeds {max_bytes} bytes"
+        )
+    try:
+        raw = base64.b64decode(pcm_base64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="invalid PCM payload") from exc
+    samples = pcm16le_to_float32(raw)
+    if samples.size == 0:
+        raise HTTPException(status_code=400, detail="audio payload is empty")
+    return samples
+
+
 def _remote_storage_dir() -> Path:
     configured = Path(settings.remote_storage_dir).expanduser()
     if configured.is_absolute():
@@ -766,6 +791,119 @@ async def analyze_transcript(payload: TranscriptAnalyzeRequest) -> JSONResponse:
 @app.get("/api/transcript/analyze/status")
 async def analyze_transcript_status() -> JSONResponse:
     return JSONResponse({"ok": True, **analyze_state.snapshot(include_result=True)})
+
+
+class FileTranscribeRequest(BaseModel):
+    # Raw 16-bit little-endian mono PCM (base64) — the same format the audio
+    # WebSocket streams, so the client reuses its decoder; the whole recording is
+    # sent once for a single batched pass. 16 kHz only (like the streaming path).
+    pcmBase64: str = Field(min_length=1)
+    sampleRate: int = 16_000
+    languages: list[str] | None = None
+    glossary: list[dict[str, str]] | None = None
+    translate: bool = False
+    translateTarget: str | None = None
+
+
+# The batched file endpoint runs OUTSIDE the live ASRQueue on purpose: a long file
+# must not head-of-line-block live-mic utterances stuck behind it in a single-worker
+# queue. This lock instead serialises concurrent *file* requests so two batched
+# pipelines can't run at once and double the shared model's VRAM.
+_file_batch_lock = asyncio.Lock()
+
+
+@app.post("/api/transcribe/file")
+async def transcribe_file_endpoint(payload: FileTranscribeRequest) -> JSONResponse:
+    """Whole-file batched transcription (opt-in ``BREEZE_ASR_FILE_BATCH_SIZE`` > 0).
+
+    Unlike the streaming file path, this returns every block at once from a single
+    ``BatchedInferencePipeline`` pass (3-4x on long files). Per-character 基頻/簡譜 is
+    left to the offline ``/api/transcript/analyze`` pass, which re-measures pitch
+    against a single global 主音 and is more accurate than the live per-window pass.
+    """
+    batch_size = settings.asr_file_batch_size
+    if batch_size <= 0 or not hasattr(asr_engine, "transcribe_file"):
+        raise HTTPException(
+            status_code=503,
+            detail="batched file transcription is disabled (set BREEZE_ASR_FILE_BATCH_SIZE>0)",
+        )
+    # 16 kHz only: the model is fixed-rate and the samples are fed in verbatim, so a
+    # different rate would silently produce a garbled (wrong-speed) transcript.
+    if payload.sampleRate != settings.sample_rate:
+        raise HTTPException(
+            status_code=400, detail=f"sampleRate must be {settings.sample_rate}"
+        )
+    samples = _decode_pcm_payload(payload.pcmBase64)
+
+    languages = _parse_languages(payload.languages, "auto")
+    glossary = _parse_glossary(payload.glossary)
+    replacements = sorted(
+        ((entry.source, entry.target) for entry in glossary),
+        key=lambda pair: len(pair[0]),
+        reverse=True,
+    )
+    prompt_terms = tuple(dict.fromkeys(entry.target for entry in glossary))
+    want_translate = payload.translate and translator.available
+    target = (payload.translateTarget or "").strip().lower() or translate_target
+
+    loop = asyncio.get_running_loop()
+    try:
+        async with _file_batch_lock:
+            transcription = await loop.run_in_executor(
+                None,
+                lambda: asr_engine.transcribe_file(
+                    samples,
+                    payload.sampleRate,
+                    languages[0],
+                    languages=languages,
+                    prompt_terms=prompt_terms,
+                    batch_size=batch_size,
+                ),
+            )
+    except Exception as exc:
+        LOGGER.exception("Batched file transcription failed")
+        raise HTTPException(status_code=500, detail=f"file transcription failed: {exc}") from exc
+
+    blocks: list[dict[str, Any]] = []
+    transcript_parts: list[str] = []
+    for segment in transcription.segments:
+        display_text = _apply_glossary(segment.text, replacements)
+        if not display_text.strip():
+            continue
+        translation = ""
+        if want_translate:
+            translation = await loop.run_in_executor(
+                None, translator.translate, display_text, transcription.language, target
+            )
+        characters = [
+            {"char": char, "startSeconds": round(start, 3), "endSeconds": round(end, 3)}
+            for char, start, end in _split_words_to_chars(segment.words)
+        ]
+        blocks.append(
+            {
+                "text": display_text,
+                "startSeconds": round(segment.start, 2),
+                "endSeconds": round(segment.end, 2),
+                "segmentKind": "utterance",
+                "characters": characters,
+                "translation": translation or None,
+            }
+        )
+        transcript_parts.append(display_text)
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "language": transcription.language,
+            "blocks": blocks,
+            "transcript": " ".join(transcript_parts).strip(),
+            "backend": transcription.backend,
+            "device": transcription.device,
+            "batchSize": batch_size,
+            "translate": want_translate,
+            "translateTarget": target if want_translate else "",
+        }
+    )
 
 
 @app.get("/api/voices")
@@ -873,13 +1011,7 @@ async def separate_audio(payload: SeparateRequest) -> JSONResponse:
             detail="source separation not installed; install torch (CUDA) + demucs "
             "(see README 'Speech Enhancement & Source Separation')",
         )
-    try:
-        raw = base64.b64decode(payload.pcmBase64, validate=True)
-    except (binascii.Error, ValueError) as exc:
-        raise HTTPException(status_code=400, detail="invalid PCM payload") from exc
-    samples = pcm16le_to_float32(raw)
-    if samples.size == 0:
-        raise HTTPException(status_code=400, detail="audio payload is empty")
+    samples = _decode_pcm_payload(payload.pcmBase64)
 
     loop = asyncio.get_running_loop()
     try:
@@ -1308,12 +1440,21 @@ async def _process_windows(
                     asr_samples = await loop.run_in_executor(
                         None, enhancer.enhance, asr_samples, settings.sample_rate
                     )
+                # Cross-segment 脈絡: seed the prompt with the tail of what has
+                # already been committed so proper nouns stay consistent. Off by
+                # default (chars == 0); the ASR engine drops it in free-detect mode.
+                context = (
+                    state.transcript[-settings.asr_context_chars :]
+                    if settings.asr_context_chars > 0
+                    else ""
+                )
                 queued_result = await asr_queue.transcribe(
                     asr_samples,
                     settings.sample_rate,
                     primary_language,
                     languages=languages,
                     prompt_terms=prompt_terms,
+                    context=context,
                 )
                 result = queued_result.result
                 asr_queue_wait_ms = queued_result.queue_wait_ms
@@ -1940,7 +2081,26 @@ def _dedupe_chars(text: str) -> list[tuple[str, int]]:
     return chars
 
 
-def run() -> None:
+def run(argv: list[str] | None = None) -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="breeze-elf", description="Breeze Elf local ASR server.")
+    sub = parser.add_subparsers(dest="command")
+    doctor_parser = sub.add_parser(
+        "doctor", help="Check GPU/torch/cuDNN/models and print an actionable report."
+    )
+    doctor_parser.add_argument(
+        "--load",
+        action="store_true",
+        help="Also load the Whisper model to confirm the resolved device/compute type.",
+    )
+    args = parser.parse_args(argv)
+
+    if args.command == "doctor":
+        from .doctor import run_doctor
+
+        raise SystemExit(run_doctor(load_model=args.load))
+
     import uvicorn
 
     logging.basicConfig(level=logging.INFO)

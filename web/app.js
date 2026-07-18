@@ -186,6 +186,9 @@ const state = {
   savingAudio: false,
   analyzingPitch: false,
   fileLanguageShown: false,
+  // Whether the server offers whole-file batched transcription (BREEZE_ASR_FILE_BATCH_SIZE>0);
+  // resolved once from /health. null = not yet checked → fall back to WS streaming.
+  fileBatchAvailable: null,
   openBlocks: new Set(),
   demoRunning: false,
   demoTimers: [],
@@ -2536,6 +2539,27 @@ async function analyzeFile(file) {
   els.stats.textContent = "0 ms";
   renderLevel(0);
 
+  // Long recordings: one batched pass (3-4x) when the server offers it, instead of
+  // streaming utterance-by-utterance. No live partials; per-character 基頻/簡譜 comes
+  // from 校準音準 (the offline analyze pass) afterwards.
+  await ensureServerCapabilities();
+  if (state.fileBatchAvailable) {
+    startClock();
+    try {
+      await transcribeFileBatched(decoded);
+      setStatus("待命");
+    } catch (error) {
+      console.error("batched analyzeFile failed", error);
+      setStatus(error?.message || "分析失敗", "error");
+    } finally {
+      state.analyzing = false;
+      state.stopping = false;
+      setRunning(false);
+      stopClock();
+    }
+    return;
+  }
+
   try {
     const ws = connectSocket();
     await waitForOpen(ws);
@@ -2567,6 +2591,61 @@ async function analyzeFile(file) {
     setRunning(false);
     state.ws?.close();
     setStatus(error?.message || "分析失敗", "error");
+  }
+}
+
+let capabilitiesPromise = null;
+
+// Resolve server capabilities once (cached). Only /health.fileBatchAvailable is needed
+// today; a failed fetch leaves the flag false so file loads use the WS streaming path.
+function ensureServerCapabilities() {
+  if (!capabilitiesPromise) {
+    capabilitiesPromise = fetch("/health")
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data) => {
+        state.fileBatchAvailable = Boolean(data?.fileBatchAvailable);
+      })
+      .catch(() => {
+        state.fileBatchAvailable = false;
+      });
+  }
+  return capabilitiesPromise;
+}
+
+async function transcribeFileBatched(decoded) {
+  setStatus("辨識中(批次)", "live");
+  const response = await fetch("/api/transcribe/file", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      pcmBase64: pcmToBase64(decoded.pcm),
+      sampleRate: decoded.sampleRate,
+      // Loaded files use free detection (see the streaming path); 慣用詞庫 + 翻譯 still apply.
+      languages: ["auto"],
+      glossary: state.glossary,
+      translate: state.translateEnabled,
+    }),
+  });
+  if (!response.ok) {
+    let detail = `HTTP ${response.status}`;
+    try {
+      detail = (await response.json())?.detail || detail;
+    } catch {
+      // non-JSON error body; keep the status line
+    }
+    throw new Error(detail);
+  }
+  const data = await response.json();
+  (data.blocks || []).forEach((block) => appendTranscriptBlock(block, { persist: false }));
+  // The server returns the space-joined transcript; keep it for copy/save/search
+  // (block display already covers the on-screen view).
+  if (typeof data.transcript === "string" && data.transcript) {
+    state.transcript = data.transcript;
+  }
+  setTranscriptActions(Boolean(state.transcript.trim()));
+  scheduleSessionPersist();
+  if (data.language) {
+    flashStats(`偵測語言 ${data.language}`);
   }
 }
 

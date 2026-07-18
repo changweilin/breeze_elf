@@ -22,6 +22,21 @@ Open the HTTPS Tailscale Serve URL on your phone, allow microphone access, then 
 
 If the Tailscale command reports access denied on Windows, run the command from an Administrator PowerShell.
 
+## Diagnostics (`breeze doctor`)
+
+Before chasing a slow / CPU-only run, check the environment in one shot:
+
+```powershell
+uv run python -m breeze_elf doctor
+```
+
+It prints a PASS/WARN/FAIL line for the ASR runtime, GPU visibility (ctranslate2 for
+Whisper, torch for the optional enhance/voice stages), the Windows cuDNN DLL, the opt-in
+extras, and whether each configured local model is present — each with the exact fix. It
+never loads a model, so it is safe to run on a broken setup. Add `--load` to also load
+Whisper and confirm the resolved device / compute type. Exit code is non-zero if any
+check fails.
+
 ## Remote Transcript Saving
 
 The web app can save the current transcript back to the Breeze Elf host. Tap `遠端儲存`
@@ -71,6 +86,12 @@ automatic language detection rather than forcing Traditional Chinese, so music o
 non-Chinese audio is no longer transcribed as Chinese gibberish. Note that a speech model
 still hallucinates lyrics on purely instrumental tracks — for melodies the pitch / 簡譜
 output is the meaningful result.
+
+For long recordings, set `BREEZE_ASR_FILE_BATCH_SIZE` (e.g. `16`) to transcribe the whole
+file in one batched `BatchedInferencePipeline` pass (3–4× faster) via
+`POST /api/transcribe/file`, instead of streaming it utterance-by-utterance. The batched
+pass returns all blocks at once (no live partials); run `校準音準` afterwards for the
+per-character 基頻/簡譜, which the offline pass measures against a single global 主音.
 
 ## Speech Enhancement & Source Separation (optional)
 
@@ -249,6 +270,9 @@ Environment variables:
 | `BREEZE_ASR_LOAD_ON_STARTUP` | `1` | Load Whisper during server startup. |
 | `BREEZE_ASR_NO_SPEECH_PROB_THRESHOLD` | `0.6` | Drop low-energy ASR results above this Whisper no-speech probability. |
 | `BREEZE_ASR_HALLUCINATION_RMS_THRESHOLD` | `0.02` | RMS ceiling used when filtering likely silence hallucinations. |
+| `BREEZE_ASR_CONTEXT_CHARS` | `0` | Cross-segment context: trailing characters of the committed transcript fed into the next utterance's `initial_prompt` (with the 慣用詞庫) for proper-noun consistency. `0` disables it. Opt-in and bounded (max 2000) — seeding recent text can make Whisper echo it on a short/quiet utterance, and it only applies when a language is fixed (free-detect drops the prompt). |
+| `BREEZE_ASR_FILE_BATCH_SIZE` | `0` | Whole-file batched transcription via faster-whisper's `BatchedInferencePipeline` (3–4× throughput on long recordings). `0` keeps the per-utterance streaming file path; a value `1`–`32` enables the `POST /api/transcribe/file` endpoint and is the batch size. Live-mic streaming is never affected. |
+| `BREEZE_MAX_AUDIO_UPLOAD_BYTES` | `256000000` | Upper bound (decoded bytes) on a base64 PCM upload to the whole-file endpoints (`/api/transcribe/file`, `/api/enhance/separate`), checked before decoding so an oversized body returns `413` instead of exhausting host memory. ~256 MB ≈ 2.2 h of 16 kHz mono; `0` disables the cap. |
 | `BREEZE_STOP_DRAIN_TIMEOUT_SECONDS` | `60.0` | Time allowed to transcribe the final flushed utterance after stop. |
 | `BREEZE_RMS_THRESHOLD` | `0.008` | Silence gate threshold. |
 | `BREEZE_REMOTE_STORAGE_DIR` | `remote_transcripts` | Host-side directory for remotely saved transcript `.txt` files. |
