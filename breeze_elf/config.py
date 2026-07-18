@@ -87,6 +87,15 @@ class Settings:
     remote_storage_dir: str = "remote_transcripts"
     search_enabled: bool = True
     search_max_results: int = 50
+    # Post-meeting summary. ``extractive`` is stdlib-only (no model/VRAM/network);
+    # ``ollama`` calls a LOCAL Ollama daemon (transcript stays on the box) and
+    # degrades to extractive on failure; ``off`` disables it. No cloud path exists.
+    summary_provider: str = "extractive"
+    summary_model: str = "qwen3:4b-instruct"
+    summary_ollama_url: str = "http://127.0.0.1:11434"
+    summary_timeout_seconds: float = 60.0
+    summary_max_chars: int = 8000
+    summary_max_sentences: int = 5
     voice_provider: str = "mock"
     voice_storage_dir: str = "voices"
     voice_output_dir: str = "voice_outputs"
@@ -158,6 +167,14 @@ def get_settings() -> Settings:
         remote_storage_dir=os.getenv("BREEZE_REMOTE_STORAGE_DIR", "remote_transcripts"),
         search_enabled=_bool_env("BREEZE_SEARCH_ENABLED", True),
         search_max_results=max(1, _int_env("BREEZE_SEARCH_MAX_RESULTS", 50)),
+        summary_provider=_choice_env(
+            "BREEZE_SUMMARY_PROVIDER", "extractive", {"off", "extractive", "ollama"}
+        ),
+        summary_model=os.getenv("BREEZE_SUMMARY_MODEL", "qwen3:4b-instruct"),
+        summary_ollama_url=os.getenv("BREEZE_SUMMARY_OLLAMA_URL", "http://127.0.0.1:11434"),
+        summary_timeout_seconds=max(1.0, _float_env("BREEZE_SUMMARY_TIMEOUT_SECONDS", 60.0)),
+        summary_max_chars=max(200, _int_env("BREEZE_SUMMARY_MAX_CHARS", 8000)),
+        summary_max_sentences=max(1, _int_env("BREEZE_SUMMARY_MAX_SENTENCES", 5)),
         voice_provider=_choice_env(
             "BREEZE_VOICE_PROVIDER",
             "mock",

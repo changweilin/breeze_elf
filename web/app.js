@@ -10,6 +10,9 @@ const els = {
   searchDialog: document.querySelector("#search-dialog"),
   searchInput: document.querySelector("#search-input"),
   searchResults: document.querySelector("#search-results"),
+  summarize: document.querySelector("#summarize"),
+  summaryDialog: document.querySelector("#summary-dialog"),
+  summaryBody: document.querySelector("#summary-body"),
   viewTabs: Array.from(document.querySelectorAll(".view-tab")),
   analyze: document.querySelector("#analyze"),
   analyzeProgress: document.querySelector("#analyze-progress"),
@@ -1627,6 +1630,9 @@ function setTranscriptActions(hasTranscript) {
   els.copy.disabled = !hasTranscript;
   els.download.disabled = !hasTranscript;
   els.save.disabled = DEMO_MODE || !hasTranscript || state.savingRemote;
+  if (els.summarize) {
+    els.summarize.disabled = DEMO_MODE || !hasTranscript;
+  }
   updateAnalyzeButton();
 }
 
@@ -1851,6 +1857,66 @@ function loadTranscriptRecord(data) {
   setTranscriptActions(Boolean(state.transcript.trim()));
   persistSessionNow();
   flashStats(`已開啟:${data.title || data.id}`);
+}
+
+// --- 會後摘要 ---------------------------------------------------------------
+
+async function openSummary() {
+  if (DEMO_MODE) {
+    flashStats("示意模式無法摘要");
+    return;
+  }
+  const text = state.transcript.trim();
+  if (!text) {
+    flashStats("沒有可摘要的逐字稿");
+    return;
+  }
+  const dialog = els.summaryDialog;
+  if (!dialog || typeof dialog.showModal !== "function") {
+    return;
+  }
+  const body = els.summaryBody;
+  const copyButton = dialog.querySelector(".summary-copy");
+  body.textContent = "摘要中…";
+  body.classList.add("loading");
+  if (copyButton) {
+    copyButton.disabled = true;
+  }
+  dialog.showModal();
+
+  const seq = (state.summarySeq = (state.summarySeq || 0) + 1);
+  try {
+    const response = await fetch("/api/summary", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (seq !== state.summarySeq || !dialog.open) {
+      return;
+    }
+    if (!response.ok) {
+      body.textContent = response.status === 503 ? "摘要功能未啟用" : "摘要失敗";
+      body.classList.remove("loading");
+      return;
+    }
+    const data = await response.json();
+    if (seq !== state.summarySeq || !dialog.open) {
+      return;
+    }
+    const summary = (data.summary || "").trim();
+    body.textContent = summary || "(無摘要)";
+    body.classList.remove("loading");
+    if (copyButton && summary) {
+      copyButton.disabled = false;
+    }
+  } catch (error) {
+    if (seq !== state.summarySeq) {
+      return;
+    }
+    console.error("summary failed", error);
+    body.textContent = "摘要失敗";
+    body.classList.remove("loading");
+  }
 }
 
 function scheduleSessionPersist() {
@@ -2742,6 +2808,22 @@ if (els.searchDialog) {
   els.searchDialog.querySelector("form")?.addEventListener("submit", (event) => {
     event.preventDefault();
     void runSearch(els.searchInput.value);
+  });
+}
+if (els.summarize) {
+  els.summarize.addEventListener("click", () => void openSummary());
+}
+if (els.summaryDialog) {
+  els.summaryDialog
+    .querySelector(".summary-close")
+    ?.addEventListener("click", () => els.summaryDialog.close());
+  els.summaryDialog.querySelector(".summary-copy")?.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(els.summaryBody.textContent || "");
+      flashStats("已複製摘要");
+    } catch {
+      flashStats("複製失敗");
+    }
   });
 }
 els.clear.addEventListener("click", () => {

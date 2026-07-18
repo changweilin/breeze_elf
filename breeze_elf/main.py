@@ -54,6 +54,7 @@ from .protocol import (
 )
 from .search_index import build_search_index
 from .storage import load_transcript, safe_transcript_id, save_transcript
+from .summarize import build_summarizer
 from .voice import build_voice_from_env
 from .voice_storage import (
     decode_wav,
@@ -348,6 +349,12 @@ effective_vad_detector = make_speech_detector(
 live_enhancer = build_enhancer("live", settings)
 file_enhancer = build_enhancer("file", settings)
 separator = build_separator(settings)
+summarizer = build_summarizer(
+    settings.summary_provider,
+    model=settings.summary_model,
+    ollama_url=settings.summary_ollama_url,
+    timeout=settings.summary_timeout_seconds,
+)
 voice_engine = build_voice_from_env(settings)
 voice_load_state = VoiceLoadState()
 analyze_state = AnalyzeState()
@@ -468,6 +475,7 @@ async def health() -> JSONResponse:
             "separatorAvailable": separator.available,
             "searchEnabled": search_index.available,
             "searchIndexed": search_indexed,
+            "summaryProvider": summarizer.name,
             "voiceProvider": settings.voice_provider,
             "voiceBackend": voice_engine.backend,
             "voiceModel": getattr(voice_engine, "model_name", "unknown"),
@@ -592,6 +600,30 @@ async def read_remote_transcript(doc_id: str) -> JSONResponse:
             "blocks": record.blocks,
         }
     )
+
+
+class SummaryRequest(BaseModel):
+    text: str
+    maxSentences: int | None = None
+
+
+@app.post("/api/summary")
+async def summarize_transcript(payload: SummaryRequest) -> JSONResponse:
+    if not summarizer.available:
+        raise HTTPException(status_code=503, detail="summary is disabled")
+    text = (payload.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text must not be empty")
+
+    # Cap input so a very long transcript can't stall the LLM / blow the context.
+    text = text[: settings.summary_max_chars]
+    max_sentences = payload.maxSentences or settings.summary_max_sentences
+    max_sentences = max(1, min(int(max_sentences), 20))
+
+    summary = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: summarizer.summarize(text, max_sentences=max_sentences)
+    )
+    return JSONResponse({"ok": True, "provider": summarizer.name, "summary": summary})
 
 
 def _structured_payload(payload: TranscriptSaveRequest) -> dict[str, Any] | None:

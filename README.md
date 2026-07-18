@@ -211,6 +211,12 @@ Environment variables:
 | `BREEZE_REMOTE_STORAGE_DIR` | `remote_transcripts` | Host-side directory for remotely saved transcript `.txt` files. |
 | `BREEZE_SEARCH_ENABLED` | `true` | Cross-transcript full-text search (SQLite FTS5 trigram, no extra dependency). Auto-disables if the runtime SQLite lacks FTS5/trigram. |
 | `BREEZE_SEARCH_MAX_RESULTS` | `50` | Maximum search results returned per query. |
+| `BREEZE_SUMMARY_PROVIDER` | `extractive` | Post-meeting summary: `extractive` (stdlib, no model/VRAM/network), `ollama` (local Ollama daemon, degrades to extractive on failure), or `off`. No cloud path — transcripts never leave the machine. |
+| `BREEZE_SUMMARY_MODEL` | `qwen3:4b-instruct` | Ollama model tag used when `BREEZE_SUMMARY_PROVIDER=ollama`. |
+| `BREEZE_SUMMARY_OLLAMA_URL` | `http://127.0.0.1:11434` | Local Ollama endpoint. Keep it loopback to preserve the privacy-first, on-device guarantee. |
+| `BREEZE_SUMMARY_TIMEOUT_SECONDS` | `60.0` | Request timeout for the local Ollama call; raise it for a slow local model. |
+| `BREEZE_SUMMARY_MAX_CHARS` | `8000` | Transcript is truncated to this many characters before summarizing. |
+| `BREEZE_SUMMARY_MAX_SENTENCES` | `5` | Default number of points/sentences in a summary. |
 | `BREEZE_VOICE_PROVIDER` | `mock` | Voice studio engine: `mock` (DSP, no downloads) or `openvoice` (OpenVoice v2 + MeloTTS). |
 | `BREEZE_VOICE_STORAGE_DIR` | `voices` | Host-side directory for saved voice profiles (embedding + reference `.wav` + metadata). |
 | `BREEZE_VOICE_SAMPLE_RATE` | `16000` | Sample rate used for voice capture and mock synthesis. |
