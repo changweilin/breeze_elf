@@ -284,6 +284,98 @@ class MainTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final["text"], "Mike 學習很有趣")
         self.assertEqual(final["transcript"], "Mike 學習很有趣")
 
+    async def test_process_windows_attaches_translation_and_speaker_on_final(self):
+        from breeze_elf.diarize import OnlineSpeakerClusterer
+
+        sample_rate = 16_000
+        time_axis = np.arange(sample_rate, dtype=np.float32) / sample_rate
+        samples = (0.05 * np.sin(2 * np.pi * 220.0 * time_axis)).astype(np.float32)
+        window = AudioWindow(
+            index=0,
+            start_seconds=0.0,
+            end_seconds=1.0,
+            samples=samples,
+            rms=calculate_rms(samples),
+            is_speech=True,
+            kind="utterance",
+        )
+
+        class _FixedTextQueue(ImmediateASRQueue):
+            async def transcribe(
+                self, samples, sample_rate, language, *, languages=(), prompt_terms=()
+            ):
+                del samples, sample_rate, languages, prompt_terms
+                return QueuedASRResult(
+                    result=ASRResult(
+                        text="你好世界", language=language, duration_ms=0,
+                        backend=self.backend, device=self.device,
+                    ),
+                    queue_wait_ms=0, queue_depth=0,
+                )
+
+        class _FakeTranslator:
+            available = True
+
+            def translate(self, text, src, tgt):
+                return f"[{tgt}]{text}"
+
+        class _FakeEmbedder:
+            def embed(self, samples, sample_rate):
+                return np.array([1.0, 0.0, 0.0], dtype=np.float32)
+
+        state = StreamState(started=True, queue=asyncio.Queue(maxsize=1))
+        state.clusterer = OnlineSpeakerClusterer(max_speakers=4, threshold=0.75)
+        await state.queue.put(window)
+        state.stop_event.set()
+        events = []
+
+        async def send_json(payload):
+            events.append(payload)
+
+        with patch.object(main, "translator", _FakeTranslator()), patch.object(
+            main, "diarizer", _FakeEmbedder()
+        ):
+            await main._process_windows(
+                state, send_json, _FixedTextQueue(), ("zh",), (),
+                translate=True, translate_target="en",
+            )
+
+        final = next(event for event in events if event["type"] == "final")
+        self.assertEqual(final["translation"], "[en]你好世界")
+        self.assertEqual(final["speaker"], 0)  # first speaker, 0-based
+
+    async def test_process_windows_no_translation_or_speaker_when_disabled(self):
+        tone = 0.05 * np.sin(2 * np.pi * 220.0 * np.arange(16_000) / 16_000)
+        window = AudioWindow(
+            index=0, start_seconds=0.0, end_seconds=1.0,
+            samples=tone.astype(np.float32),
+            rms=0.03, is_speech=True, kind="utterance",
+        )
+
+        class _FixedTextQueue(ImmediateASRQueue):
+            async def transcribe(
+                self, samples, sample_rate, language, *, languages=(), prompt_terms=()
+            ):
+                del samples, sample_rate, languages, prompt_terms
+                return QueuedASRResult(
+                    result=ASRResult(text="嗨", language=language, duration_ms=0,
+                                     backend=self.backend, device=self.device),
+                    queue_wait_ms=0, queue_depth=0,
+                )
+
+        state = StreamState(started=True, queue=asyncio.Queue(maxsize=1))  # no clusterer
+        await state.queue.put(window)
+        state.stop_event.set()
+        events = []
+
+        async def send_json(payload):
+            events.append(payload)
+
+        await main._process_windows(state, send_json, _FixedTextQueue(), ("zh",), ())
+        final = next(event for event in events if event["type"] == "final")
+        self.assertIsNone(final["translation"])  # translate defaulted off
+        self.assertIsNone(final["speaker"])  # no clusterer built
+
 
 class CharacterPayloadTests(unittest.TestCase):
     def test_character_payloads_attach_jianpu_and_absolute_timing(self):

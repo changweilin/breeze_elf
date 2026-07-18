@@ -6,6 +6,7 @@ const els = {
   clear: document.querySelector("#clear"),
   lang: document.querySelector("#lang"),
   glossary: document.querySelector("#glossary"),
+  translate: document.querySelector("#translate"),
   search: document.querySelector("#search"),
   searchDialog: document.querySelector("#search-dialog"),
   searchInput: document.querySelector("#search-input"),
@@ -193,6 +194,8 @@ const state = {
   autoDetectLang: Boolean(INITIAL_SETTINGS.autoDetectLang),
   // 載入音檔的後製情境:"general" 直接辨識,"music" 先 Demucs 分離人聲再辨識歌詞。
   scenario: INITIAL_SETTINGS.scenario === "music" ? "music" : "general",
+  // 翻譯:辨識後把每段翻成繁體中文(伺服器需啟用 NLLB;預設關)。雙語堆疊顯示。
+  translateEnabled: Boolean(INITIAL_SETTINGS.translateEnabled),
   glossary: loadStoredGlossary(),
   editingIndex: null,
 };
@@ -272,6 +275,7 @@ function persistSettings() {
         languages: state.languages,
         autoDetectLang: state.autoDetectLang,
         scenario: state.scenario,
+        translateEnabled: state.translateEnabled,
       }),
     );
   } catch {
@@ -709,6 +713,8 @@ function appendTranscriptBlock(data, { persist = true } = {}) {
     windowIndex: Number.isInteger(data.windowIndex) ? data.windowIndex : null,
     pitch: normalizePitch(data.pitch),
     characters: normalizeCharacters(data.characters),
+    translation: typeof data.translation === "string" ? data.translation : null,
+    speaker: Number.isInteger(data.speaker) ? data.speaker : null,
   });
   renderTranscriptView({ scrollToEnd: true });
   setTranscriptActions(Boolean(state.transcript.trim()));
@@ -761,6 +767,10 @@ function renderTranscriptEntry(block, index) {
 
   const meta = document.createElement("span");
   meta.className = "entry-meta";
+  // 語者分離:匿名的 session 內說話者標籤(說話者 1／2…),顏色依索引區分。
+  if (Number.isInteger(block.speaker)) {
+    meta.append(createSpeakerChip(block.speaker));
+  }
   // 段落播放 of the original recording — available in 文字/簡譜/基頻 views alike.
   const playButton = createSegmentPlayButton(block, index);
   if (playButton) {
@@ -798,6 +808,10 @@ function renderTranscriptEntry(block, index) {
     const body = document.createElement("span");
     body.className = "entry-body";
     body.append(text);
+    // 雙語堆疊行:翻譯掛在整段之下(只在 final 產生,restore/儲存也帶著)。
+    if (block.translation) {
+      body.append(createTranslationLine(block.translation));
+    }
     main.append(body, meta);
   }
 
@@ -823,6 +837,40 @@ function renderTranscriptEntry(block, index) {
     entry.append(details);
   }
   return entry;
+}
+
+// Distinct chip colours per anonymous speaker (cycled; white text sits legibly on
+// all of them). The server label is 0-based, so the UI shows `speaker + 1`.
+const SPEAKER_COLORS = ["#2f80ed", "#27ae60", "#eb5757", "#9b51e0", "#f2994a", "#0aa2c0"];
+
+function createSpeakerChip(speaker) {
+  const chip = document.createElement("span");
+  chip.className = "speaker-chip";
+  chip.style.setProperty("--speaker-color", SPEAKER_COLORS[speaker % SPEAKER_COLORS.length]);
+  chip.textContent = `說話者 ${speaker + 1}`;
+  return chip;
+}
+
+function createTranslationLine(translation) {
+  const line = document.createElement("span");
+  line.className = "entry-translation";
+  line.textContent = translation;
+  return line;
+}
+
+function setTranslateEnabled(on) {
+  state.translateEnabled = Boolean(on);
+  persistSettings();
+  updateTranslateButton();
+  flashStats(state.translateEnabled ? "翻譯已開啟(下次開始生效)" : "翻譯已關閉");
+}
+
+function updateTranslateButton() {
+  if (!els.translate) {
+    return;
+  }
+  els.translate.classList.toggle("on", state.translateEnabled);
+  els.translate.setAttribute("aria-pressed", String(state.translateEnabled));
 }
 
 // ── 逐字稿編輯 → 慣用詞庫學習 ─────────────────────────────────────────────────
@@ -1681,6 +1729,8 @@ function normalizeTranscriptBlockForRestore(block) {
     windowIndex: Number.isInteger(block.windowIndex) ? block.windowIndex : null,
     pitch: normalizePitch(block.pitch),
     characters: normalizeCharacters(block.characters),
+    translation: typeof block.translation === "string" ? block.translation : null,
+    speaker: Number.isInteger(block.speaker) ? block.speaker : null,
   };
 }
 
@@ -2415,6 +2465,7 @@ async function start() {
         languages: startLanguages(),
         glossary: state.glossary,
         chunkMs: AUDIO_CHUNK_MS,
+        translate: state.translateEnabled,
       }),
     );
     setStatus("收音中", "live");
@@ -2499,6 +2550,7 @@ async function analyzeFile(file) {
         glossary: state.glossary,
         chunkMs: AUDIO_CHUNK_MS,
         mode: "file",
+        translate: state.translateEnabled,
       }),
     );
     startClock();
@@ -2771,6 +2823,8 @@ updateLangButton();
 updateGlossaryButton();
 els.lang?.addEventListener("click", openLanguageDialog);
 els.glossary?.addEventListener("click", openGlossaryDialog);
+els.translate?.addEventListener("click", () => setTranslateEnabled(!state.translateEnabled));
+updateTranslateButton();
 SYSTEM_DARK_QUERY.addEventListener("change", syncSystemTheme);
 els.toggle.addEventListener("click", handleToggle);
 els.load.addEventListener("click", () => {
@@ -3049,6 +3103,8 @@ function serializeBlocksForSave() {
     segmentKind: block.segmentKind || "",
     pitch: block.pitch || null,
     characters: Array.isArray(block.characters) ? block.characters : [],
+    translation: block.translation || null,
+    speaker: Number.isInteger(block.speaker) ? block.speaker : null,
   }));
 }
 

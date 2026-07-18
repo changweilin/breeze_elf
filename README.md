@@ -114,6 +114,49 @@ BREEZE_ENHANCE_LIVE=deepfilter uv run python -m breeze_elf
 `GET /health` reports the active stage via `enhanceLive` / `enhanceFile` / `enhanceDevice`
 / `separatorAvailable`, and each stream's `ready` event carries the active `enhance` name.
 
+## 翻譯 (Translation, optional)
+
+Translate any recognised language into Traditional Chinese (or another target), one
+segment at a time, shown as a bilingual stacked line under the original. It runs on the
+**ctranslate2** runtime faster-whisper already ships — **no torch, no new CUDA/DLL** — and
+only adds the lightweight `sentencepiece` tokenizer (`[translate]` extra). Any missing
+model / dependency degrades to a no-op, so recognition is never affected.
+
+> **License:** NLLB-200 is **CC-BY-NC-4.0 (non-commercial)**, so this is strictly opt-in
+> and never enabled by default. Do not ship it enabled in a commercial product.
+
+1. Convert an NLLB-200 model to CT2 into a **local** directory (offline-first — the model
+   is never downloaded on demand), keeping its sentencepiece file alongside:
+
+   ```bash
+   ct2-transformers-converter --model facebook/nllb-200-distilled-600M \
+     --output_dir models/nllb-200-distilled-600M-ct2 --quantization int8
+   # copy sentencepiece.bpe.model into that dir (or point BREEZE_TRANSLATE_SPM at it)
+   ```
+
+2. Enable it: `BREEZE_TRANSLATE=nllb` (target defaults to 繁中 via `BREEZE_TRANSLATE_TARGET=zh`).
+3. In the transcribe page, toggle the **翻譯** button before 開始; each committed segment then
+   carries a translated line (only on `final`, never the low-latency partial). The choice
+   persists in `localStorage`.
+
+`GET /health` reports `translateProvider` / `translateAvailable` / `translateTarget`. The
+~0.6 GB (int8) model plus Whisper `medium` fit together on a 12 GB card.
+
+## 語者分離 (Speaker Diarization, optional)
+
+Tag each utterance with an anonymous, **session-local** speaker label (`說話者 1／2…`) shown
+as a coloured chip on the segment. It is **fully local and torch-free**: a pure-numpy
+log-mel front-end feeds an ONNX speaker-embedding model over `onnxruntime` (the runtime
+faster-whisper already bundles for Silero VAD), and a pure-numpy online clusterer assigns
+labels. Supply a permissively-licensed ONNX speaker-embedding model at
+`models/speaker_embedding.onnx` (or set `BREEZE_DIARIZE_MODEL`); without it the feature is a
+no-op.
+
+Enable with `BREEZE_DIARIZE=on`. **Privacy:** embeddings are computed from the *raw*
+utterance audio (not the denoised ASR audio), are never stored, and the clusterer resets
+every connection — there is no cross-session voiceprint linkage. `GET /health` reports
+`diarizeEnabled` / `diarizeAvailable`.
+
 ## 變聲工作室 (Voice Studio)
 
 The bottom icon tabs switch between the transcribe page (`逐字稿`) and a voice page
@@ -217,6 +260,20 @@ Environment variables:
 | `BREEZE_SUMMARY_TIMEOUT_SECONDS` | `60.0` | Request timeout for the local Ollama call; raise it for a slow local model. |
 | `BREEZE_SUMMARY_MAX_CHARS` | `8000` | Transcript is truncated to this many characters before summarizing. |
 | `BREEZE_SUMMARY_MAX_SENTENCES` | `5` | Default number of points/sentences in a summary. |
+| `BREEZE_TRANSLATE` | `off` | Post-recognition translation: `off` or `nllb` (NLLB-200 on the ctranslate2 runtime, no torch; needs the `[translate]` extra + a local CT2 model). CC-BY-NC-4.0 — opt-in, non-commercial. |
+| `BREEZE_TRANSLATE_TARGET` | `zh` | Target language for translation (a language/flores code; `zh` → 繁中). |
+| `BREEZE_TRANSLATE_MODEL` | `models/nllb-200-distilled-600M-ct2` | Local CT2 NLLB model directory. Never downloaded on demand (offline-first). |
+| `BREEZE_TRANSLATE_SPM` | *(auto)* | Override path to the sentencepiece model; defaults to the `*.model` file inside the model dir. |
+| `BREEZE_TRANSLATE_DEVICE` | `auto` | Translation device: `auto`, `cuda`, or `cpu`. |
+| `BREEZE_TRANSLATE_COMPUTE_TYPE` | `auto` | ctranslate2 compute type (`auto` → `default`; e.g. `int8`, `float16`). |
+| `BREEZE_TRANSLATE_BEAM` | `1` | Translation beam size. |
+| `BREEZE_DIARIZE` | `off` | Anonymous in-session speaker diarization: `off` or `on` (needs a local ONNX speaker-embedding model + onnxruntime; torch-free). Degrades to a no-op when unavailable. |
+| `BREEZE_DIARIZE_MODEL` | `models/speaker_embedding.onnx` | Local ONNX speaker-embedding model file. |
+| `BREEZE_DIARIZE_MAX_SPEAKERS` | `6` | Maximum distinct speakers per session before new voices fold into the nearest. |
+| `BREEZE_DIARIZE_THRESHOLD` | `0.75` | Cosine similarity below which an utterance starts a new speaker. |
+| `BREEZE_DIARIZE_MIN_DURATION` | `0.4` | Utterances shorter than this (seconds) are not labelled (too noisy to cluster). |
+| `BREEZE_DIARIZE_DEVICE` | `cpu` | Embedder device: `cpu` or `cuda`. |
+| `BREEZE_DIARIZE_N_MELS` | `80` | Log-mel bands fed to the ONNX speaker model; match your model's expected feature dimension. |
 | `BREEZE_VOICE_PROVIDER` | `mock` | Voice studio engine: `mock` (DSP, no downloads) or `openvoice` (OpenVoice v2 + MeloTTS). |
 | `BREEZE_VOICE_STORAGE_DIR` | `voices` | Host-side directory for saved voice profiles (embedding + reference `.wav` + metadata). |
 | `BREEZE_VOICE_SAMPLE_RATE` | `16000` | Sample rate used for voice capture and mock synthesis. |

@@ -96,6 +96,27 @@ class Settings:
     summary_timeout_seconds: float = 60.0
     summary_max_chars: int = 8000
     summary_max_sentences: int = 5
+    # Post-recognition translation. ``off`` (default) keeps the base install free of
+    # sentencepiece; ``nllb`` runs NLLB-200 on the ctranslate2 runtime faster-whisper
+    # already ships (no torch). NLLB-200 is CC-BY-NC-4.0 (non-commercial) → opt-in.
+    # The model loads from a LOCAL dir only (offline-first — never downloaded on demand).
+    translate_provider: str = "off"
+    translate_target: str = "zh"
+    translate_model: str = "models/nllb-200-distilled-600M-ct2"
+    translate_spm: str = ""
+    translate_device: str = "auto"
+    translate_compute_type: str = "auto"
+    translate_beam: int = 1
+    # Anonymous in-session speaker diarization. ``off`` (default) means no speaker
+    # labels; ``on`` needs a local ONNX speaker-embedding model + onnxruntime (the
+    # runtime faster-whisper already bundles), otherwise it degrades to no-op.
+    diarize_enabled: bool = False
+    diarize_model: str = "models/speaker_embedding.onnx"
+    diarize_max_speakers: int = 6
+    diarize_threshold: float = 0.75
+    diarize_min_duration: float = 0.4
+    diarize_device: str = "cpu"
+    diarize_n_mels: int = 80
     voice_provider: str = "mock"
     voice_storage_dir: str = "voices"
     voice_output_dir: str = "voice_outputs"
@@ -175,6 +196,24 @@ def get_settings() -> Settings:
         summary_timeout_seconds=max(1.0, _float_env("BREEZE_SUMMARY_TIMEOUT_SECONDS", 60.0)),
         summary_max_chars=max(200, _int_env("BREEZE_SUMMARY_MAX_CHARS", 8000)),
         summary_max_sentences=max(1, _int_env("BREEZE_SUMMARY_MAX_SENTENCES", 5)),
+        translate_provider=_choice_env("BREEZE_TRANSLATE", "off", {"off", "nllb"}),
+        translate_target=os.getenv("BREEZE_TRANSLATE_TARGET", "zh"),
+        translate_model=os.getenv(
+            "BREEZE_TRANSLATE_MODEL", "models/nllb-200-distilled-600M-ct2"
+        ),
+        translate_spm=os.getenv("BREEZE_TRANSLATE_SPM", ""),
+        translate_device=_choice_env(
+            "BREEZE_TRANSLATE_DEVICE", "auto", {"auto", "cuda", "cpu"}
+        ),
+        translate_compute_type=os.getenv("BREEZE_TRANSLATE_COMPUTE_TYPE", "auto"),
+        translate_beam=max(1, _int_env("BREEZE_TRANSLATE_BEAM", 1)),
+        diarize_enabled=_bool_env("BREEZE_DIARIZE", False),
+        diarize_model=os.getenv("BREEZE_DIARIZE_MODEL", "models/speaker_embedding.onnx"),
+        diarize_max_speakers=max(1, _int_env("BREEZE_DIARIZE_MAX_SPEAKERS", 6)),
+        diarize_threshold=min(1.0, max(0.0, _float_env("BREEZE_DIARIZE_THRESHOLD", 0.75))),
+        diarize_min_duration=max(0.0, _float_env("BREEZE_DIARIZE_MIN_DURATION", 0.4)),
+        diarize_device=_choice_env("BREEZE_DIARIZE_DEVICE", "cpu", {"cpu", "cuda"}),
+        diarize_n_mels=max(8, _int_env("BREEZE_DIARIZE_N_MELS", 80)),
         voice_provider=_choice_env(
             "BREEZE_VOICE_PROVIDER",
             "mock",

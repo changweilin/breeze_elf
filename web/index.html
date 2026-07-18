@@ -264,6 +264,13 @@
         min-height: 42px;
       }
 
+      /* An enabled toggle (翻譯) gets the live accent so its on/off state is obvious. */
+      .controls .iconbtn.on {
+        border-color: var(--live);
+        color: var(--live);
+        background: color-mix(in srgb, var(--live) 15%, transparent);
+      }
+
       button {
         min-width: 0;
         min-height: 48px;
@@ -594,6 +601,34 @@
       .pitch-value {
         color: var(--warn);
         font-weight: 780;
+      }
+
+      /* 語者分離:匿名說話者色票(白字配彩底,顏色由 --speaker-color 逐段設定)。 */
+      .speaker-chip {
+        display: inline-flex;
+        align-items: center;
+        padding: 1px 8px;
+        border-radius: 999px;
+        background: var(--speaker-color, var(--accent));
+        color: #fff;
+        font-size: 0.72rem;
+        font-weight: 760;
+        white-space: nowrap;
+      }
+
+      /* 翻譯雙語堆疊行:掛在原文之下,較淡、可換行。 */
+      .entry-translation {
+        display: block;
+        margin-top: 4px;
+        color: var(--muted);
+        font-size: 0.94rem;
+        line-height: 1.45;
+        overflow-wrap: anywhere;
+      }
+
+      .entry-translation::before {
+        content: "↳ ";
+        opacity: 0.7;
       }
 
       .entry-chevron {
@@ -2244,6 +2279,7 @@
         <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
         <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></symbol>
         <symbol id="i-summary" viewBox="0 0 24 24"><path d="M5 5h14M5 10h14M5 15h9M5 20h6"/></symbol>
+        <symbol id="i-translate" viewBox="0 0 24 24"><path d="M3 5h7"/><path d="M6.5 5v1.5c0 3-1.5 5.2-3.5 6.5"/><path d="M4 9.5c0 2 1.8 3.6 4.5 4.3"/><path d="M12.5 21l3.5-9 3.5 9"/><path d="M13.8 18h4.4"/></symbol>
       </defs>
     </svg>
     <div class="pages">
@@ -2269,6 +2305,7 @@
           </select>
         </label>
         <button id="lang" class="iconbtn" type="button" aria-haspopup="dialog" aria-controls="lang-dialog" aria-label="設定辨識語言" title="設定辨識語言(最多 4 種,或自由偵測)"><svg class="ic" aria-hidden="true"><use href="#i-globe"></use></svg></button>
+        <button id="translate" class="iconbtn" type="button" aria-pressed="false" aria-label="翻譯成繁體中文" title="翻譯:辨識後把每段翻成繁體中文並雙語顯示(需伺服器啟用 NLLB 模型)"><svg class="ic" aria-hidden="true"><use href="#i-translate"></use></svg></button>
         <button id="glossary" class="iconbtn" type="button" aria-haspopup="dialog" aria-controls="glossary-dialog" aria-label="慣用詞庫" title="慣用詞庫:你在逐字稿改的字會被記住,調整之後的辨識"><svg class="ic" aria-hidden="true"><use href="#i-book"></use></svg></button>
         <button id="search" class="iconbtn" type="button" aria-haspopup="dialog" aria-controls="search-dialog" aria-label="搜尋逐字稿" title="搜尋已儲存的逐字稿"><svg class="ic" aria-hidden="true"><use href="#i-search"></use></svg></button>
       </section>
@@ -2683,7 +2720,7 @@
       </form>
     </dialog>
 
-    <script src="./app.js?v=32" type="module"></script>
+    <script src="./app.js?v=33" type="module"></script>
     <script src="./voice.js?v=26" type="module"></script>
   </body>
 </html>

@@ -36,6 +36,10 @@ class StartMessage:
     # detection). ``language`` stays as the primary/back-compat single code.
     languages: tuple[str, ...] = ()
     glossary: tuple[GlossaryEntry, ...] = ()
+    # Opt-in post-recognition translation (server also needs BREEZE_TRANSLATE=nllb).
+    # ``translate_target`` is a language/flores code; empty means the server default.
+    translate: bool = False
+    translate_target: str = ""
 
 
 @dataclass(frozen=True)
@@ -82,6 +86,8 @@ def parse_client_text(raw: str) -> ClientMessage:
             mode=mode,
             languages=languages,
             glossary=_parse_glossary(payload.get("glossary")),
+            translate=bool(payload.get("translate", False)),
+            translate_target=str(payload.get("translateTarget", "")).strip().lower(),
         )
 
     if message_type == "stop":

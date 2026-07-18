@@ -42,6 +42,7 @@ from .audio import (
     summarize_pitch,
 )
 from .config import get_settings
+from .diarize import OnlineSpeakerClusterer, build_clusterer, build_diarizer
 from .enhance import build_enhancer, build_separator, preload_torch_cudnn
 from .protocol import (
     GlossaryEntry,
@@ -55,6 +56,7 @@ from .protocol import (
 from .search_index import build_search_index
 from .storage import load_transcript, safe_transcript_id, save_transcript
 from .summarize import build_summarizer
+from .translate import build_translator
 from .voice import build_voice_from_env
 from .voice_storage import (
     decode_wav,
@@ -132,6 +134,10 @@ class TranscriptBlock(BaseModel):
     segmentKind: str | None = None
     pitch: dict[str, Any] | None = None
     characters: list[TranscriptCharacter] = Field(default_factory=list)
+    # Optional post-recognition annotations: the translated line (#4) and the
+    # anonymous per-session speaker index (#3, 0-based; UI shows index + 1).
+    translation: str | None = None
+    speaker: int | None = None
 
 
 class TranscriptSaveRequest(BaseModel):
@@ -355,6 +361,14 @@ summarizer = build_summarizer(
     ollama_url=settings.summary_ollama_url,
     timeout=settings.summary_timeout_seconds,
 )
+# Post-recognition NLLB translator (NullTranslator when off / no model). Shared
+# module-scope; its own lock serialises inference across streams.
+translator = build_translator(settings, base_dir=ROOT_DIR)
+translate_target = settings.translate_target
+# Shared speaker-embedding model (NullDiarizer when off / no model). The embedder
+# is shared (one model, own lock); each connection gets its own clusterer so
+# speaker labels are anonymous and reset per session.
+diarizer = build_diarizer(settings, base_dir=ROOT_DIR)
 voice_engine = build_voice_from_env(settings)
 voice_load_state = VoiceLoadState()
 analyze_state = AnalyzeState()
@@ -476,6 +490,11 @@ async def health() -> JSONResponse:
             "searchEnabled": search_index.available,
             "searchIndexed": search_indexed,
             "summaryProvider": summarizer.name,
+            "translateProvider": settings.translate_provider,
+            "translateAvailable": translator.available,
+            "translateTarget": settings.translate_target,
+            "diarizeEnabled": settings.diarize_enabled,
+            "diarizeAvailable": diarizer.available,
             "voiceProvider": settings.voice_provider,
             "voiceBackend": voice_engine.backend,
             "voiceModel": getattr(voice_engine, "model_name", "unknown"),
@@ -1046,6 +1065,9 @@ class StreamState:
     transcript: str = ""
     dropped_windows: int = 0
     started_at: float = field(default_factory=time.monotonic)
+    # Per-connection speaker clusterer (diarization). Built at start only when the
+    # embedder is available, so labels are anonymous and reset every session.
+    clusterer: OnlineSpeakerClusterer | None = None
     # End (absolute seconds) of the last speech segment that reached the dedupe,
     # so the next utterance can tell a disjoint segment (real repeat → keep) from
     # a force-split continuation that re-includes the pre-roll (overlap → trim).
@@ -1125,6 +1147,11 @@ async def _handle_text_message(
 
         state.mode = message.mode
         state.segmenter = _build_segmenter(message.sample_rate)
+        # A fresh clusterer per connection → anonymous, session-local speaker labels.
+        state.clusterer = build_clusterer(settings) if diarizer.available else None
+        # Translate only when both the client asked and the server has a model.
+        want_translate = message.translate and translator.available
+        target = message.translate_target or translate_target
         # File analysis streams a whole recording at once; an unbounded queue
         # keeps every window so nothing is dropped to backpressure. Live mic
         # streaming stays bounded so latency cannot snowball.
@@ -1133,7 +1160,13 @@ async def _handle_text_message(
         state.stop_event.clear()
         state.processor_task = asyncio.create_task(
             _process_windows(
-                state, send_json, asr_queue, message.languages, message.glossary
+                state,
+                send_json,
+                asr_queue,
+                message.languages,
+                message.glossary,
+                translate=want_translate,
+                translate_target=target,
             )
         )
         state.started = True
@@ -1153,6 +1186,9 @@ async def _handle_text_message(
                 model=asr_queue.model,
                 computeType=asr_queue.compute_type,
                 enhance=(file_enhancer if message.mode == "file" else live_enhancer).name,
+                translate=want_translate,
+                translateTarget=target if want_translate else "",
+                diarize=state.clusterer is not None,
             )
         )
         return False
@@ -1210,6 +1246,9 @@ async def _process_windows(
     asr_queue: ASRQueue,
     languages: tuple[str, ...],
     glossary: tuple[GlossaryEntry, ...],
+    *,
+    translate: bool = False,
+    translate_target: str = "",
 ) -> None:
     assert state.queue is not None
 
@@ -1321,6 +1360,20 @@ async def _process_windows(
                 )
                 if novel_text:
                     state.transcript = f"{state.transcript}{novel_text}".strip()
+                    # Both run only on the committed (final) segment, never the
+                    # low-latency partial. Translation is of the block's own text so
+                    # the bilingual view stays 1:1 with blocks (no overlap-window
+                    # duplication). Speaker uses the RAW utterance audio.
+                    translation = ""
+                    if translate:
+                        translation = await loop.run_in_executor(
+                            None,
+                            translator.translate,
+                            novel_text,
+                            result.language,
+                            translate_target,
+                        )
+                    speaker = await _assign_speaker(loop, state, window, sample_rate)
                     await send_json(
                         server_event(
                             "final",
@@ -1333,6 +1386,8 @@ async def _process_windows(
                             endSeconds=round(window.end_seconds, 2),
                             pitch=pitch,
                             characters=characters,
+                            translation=translation or None,
+                            speaker=speaker,
                         )
                     )
 
@@ -1355,6 +1410,31 @@ async def _process_windows(
             )
         finally:
             state.queue.task_done()
+
+
+async def _assign_speaker(
+    loop: asyncio.AbstractEventLoop,
+    state: StreamState,
+    window: AudioWindow,
+    sample_rate: int,
+) -> int | None:
+    """The anonymous session speaker index for this utterance, or ``None``.
+
+    Very short or low-energy utterances are gated out (their embedding is noisy
+    and would pollute a centroid). The embedding is taken from the **raw**
+    ``window.samples`` — never the denoised ``asr_samples``, whose dereverb/denoise
+    strips the very voiceprint cues the speaker model relies on.
+    """
+    clusterer = state.clusterer
+    if clusterer is None:
+        return None
+    duration = window.end_seconds - window.start_seconds
+    if duration < settings.diarize_min_duration or window.rms < settings.rms_threshold:
+        return None
+    embedding = await loop.run_in_executor(None, diarizer.embed, window.samples, sample_rate)
+    if embedding is None:
+        return None
+    return clusterer.assign(embedding)
 
 
 async def _stop_state(state: StreamState, drain_timeout: float = 2.0) -> None:
