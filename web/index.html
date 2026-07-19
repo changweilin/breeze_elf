@@ -996,12 +996,23 @@
       /* 多檔案下載/儲存的勾選對話框 */
       dialog.pick-dialog {
         width: min(360px, 90vw);
+        /* Bound to the viewport so content never spills outside the rounded box.
+           Without this, the UA caps a modal at 100vh but overflow:visible lets the
+           form (含關閉鈕)溢出到框外、疊在 backdrop 上 — 手機橫向/鍵盤開啟時的「混疊」主因。 */
+        max-height: 88svh;
+        overflow: hidden;
         padding: 0;
         border: 1px solid var(--line);
         border-radius: 12px;
         background: var(--panel);
         color: var(--ink);
         box-shadow: 0 18px 48px var(--shadow);
+      }
+
+      /* [open] 限定:裸 display:flex 會蓋掉 UA 對關閉狀態的 display:none(同特異度、作者勝),導致關閉的對話框外洩。 */
+      dialog.pick-dialog[open] {
+        display: flex;
+        flex-direction: column;
       }
 
       dialog.pick-dialog::backdrop {
@@ -1014,6 +1025,34 @@
         gap: 14px;
         padding: 18px;
         margin: 0;
+        min-height: 0;
+      }
+
+      /* 固定的標題/輸入/說明/動作列不壓縮;唯一的捲動區(清單/結果/摘要)吃掉剩餘空間並自行捲動。 */
+      .pick-form > * {
+        flex-shrink: 0;
+      }
+
+      .pick-list,
+      .lang-grid,
+      .gloss-list,
+      .search-results,
+      .summary-body {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+      }
+
+      /* Items inside the flex-column scroll lists must NOT shrink: a .search-result
+         is a <button>, and the global button{min-height} gives it an explicit floor,
+         so flex-shrink:1 would compress each row to ~46px and its taller content would
+         spill out over the neighbouring rows(即先前的「混疊在一起」). Pin them to
+         content height and let the list scroll instead. */
+      .pick-list > *,
+      .gloss-list > *,
+      .search-results > * {
+        flex-shrink: 0;
       }
 
       .pick-title {
@@ -1100,7 +1139,41 @@
         color: var(--muted, #888);
         white-space: nowrap;
         overflow: hidden;
+      }
+
+      /* 內容沒超出時維持靜止並以 … 收尾;超出時由 JS 加上 .marquee 啟動跑馬燈。 */
+      .search-result-snippet .marquee-inner {
+        display: inline-block;
+        max-width: 100%;
+        overflow: hidden;
         text-overflow: ellipsis;
+        vertical-align: bottom;
+        will-change: transform;
+      }
+
+      .search-result-snippet.marquee .marquee-inner {
+        max-width: none;
+        overflow: visible;
+        /* 位移量(負值)與時間由 JS 依溢出長度設定,速度才會一致。 */
+        animation: snippet-marquee var(--marquee-dur, 6s) ease-in-out infinite alternate;
+      }
+
+      @keyframes snippet-marquee {
+        0%, 10% {
+          transform: translateX(0);
+        }
+        90%, 100% {
+          transform: translateX(var(--marquee-shift, 0));
+        }
+      }
+
+      /* 尊重系統的減少動態偏好:退回靜態 … 截斷。 */
+      @media (prefers-reduced-motion: reduce) {
+        .search-result-snippet.marquee .marquee-inner {
+          max-width: 100%;
+          overflow: hidden;
+          animation: none;
+        }
       }
 
       #summary-dialog {
@@ -2814,7 +2887,7 @@
       </form>
     </dialog>
 
-    <script src="./app.js?v=35" type="module"></script>
+    <script src="./app.js?v=36" type="module"></script>
     <script src="./voice.js?v=26" type="module"></script>
   </body>
 </html>

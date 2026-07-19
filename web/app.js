@@ -1852,11 +1852,33 @@ function buildSearchResult(item) {
   if (item.snippet) {
     const snippet = document.createElement("span");
     snippet.className = "search-result-snippet";
-    snippet.textContent = item.snippet;
+    const inner = document.createElement("span");
+    inner.className = "marquee-inner";
+    inner.textContent = item.snippet;
+    snippet.append(inner);
     entry.append(snippet);
+    // Measure after layout: only run the marquee when the content actually
+    // overflows its block, so short snippets stay still.
+    requestAnimationFrame(() => setupSnippetMarquee(snippet, inner));
   }
   entry.addEventListener("click", () => void openSearchResult(item.id));
   return entry;
+}
+
+// A snippet that doesn't fit its block scrolls back and forth (跑馬燈). Distance and
+// duration are derived from the overflow so every row scrolls at the same ~40px/s.
+function setupSnippetMarquee(viewport, inner) {
+  const overflow = inner.scrollWidth - viewport.clientWidth;
+  if (overflow <= 2) {
+    viewport.classList.remove("marquee");
+    viewport.style.removeProperty("--marquee-shift");
+    viewport.style.removeProperty("--marquee-dur");
+    return;
+  }
+  const duration = Math.max(4, overflow / 40 + 2); // seconds, incl. end pauses
+  viewport.style.setProperty("--marquee-shift", `-${Math.round(overflow)}px`);
+  viewport.style.setProperty("--marquee-dur", `${duration.toFixed(1)}s`);
+  viewport.classList.add("marquee");
 }
 
 function formatSearchDate(value) {
