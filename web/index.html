@@ -1900,6 +1900,13 @@
         display: none;
       }
 
+      /* 錄音播放器的 ⋮ 選單位在畫面下緣(狀態列/頁籤之上),往下展開會超出邊界點不到
+         → 改往上展開;上方是逐字稿區,空間充足。 */
+      #audio-panel .player-menu-list {
+        top: auto;
+        bottom: calc(100% + 4px);
+      }
+
       .player-menu-list button {
         min-height: 38px;
         border: 0;
