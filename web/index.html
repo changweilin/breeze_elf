@@ -264,8 +264,9 @@
         min-height: 42px;
       }
 
-      /* An enabled toggle (翻譯) gets the live accent so its on/off state is obvious. */
-      .controls .iconbtn.on {
+      /* An enabled toggle (翻譯) gets the live accent so its on/off state is obvious.
+         Unscoped so it also applies once 翻譯 lives inside the settings menu. */
+      .iconbtn.on {
         border-color: var(--live);
         color: var(--live);
         background: color-mix(in srgb, var(--live) 15%, transparent);
@@ -392,6 +393,77 @@
         place-items: center;
         font-size: 1.08rem;
         line-height: 1;
+      }
+
+      /* 標題列右側:主題切換 + 設定齒輪並排。 */
+      .header-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex: 0 0 auto;
+      }
+
+      /* 齒輪鍵沿用主題鍵的尺寸,但自成一類:.theme-toggle 是 JS 綁定的鉤子
+         (applyTheme 會覆寫其 textContent),不能讓它動到齒輪的 SVG。 */
+      .settings-btn {
+        width: 42px;
+        min-width: 42px;
+        min-height: 42px;
+        padding: 0;
+        display: inline-grid;
+        place-items: center;
+      }
+
+      .settings-btn .ic {
+        width: 21px;
+        height: 21px;
+      }
+
+      /* 齒輪彈出選單:錨定在齒輪鍵下方、靠右對齊。 */
+      .settings-menu {
+        position: relative;
+        flex: 0 0 auto;
+      }
+
+      .settings-panel {
+        position: absolute;
+        top: calc(100% + 6px);
+        right: 0;
+        z-index: 30;
+        min-width: 13rem;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        padding: 6px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--panel);
+        box-shadow: 0 12px 32px var(--shadow);
+      }
+
+      .settings-panel[hidden] {
+        display: none;
+      }
+
+      /* 每列 = 原本的圖示鍵 + 文字說明;整列可點,點文字會轉觸發按鈕。 */
+      .settings-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 2px 10px 2px 2px;
+        border-radius: 8px;
+        cursor: pointer;
+      }
+
+      .settings-row:hover {
+        background: var(--button-hover);
+      }
+
+      .settings-row-label {
+        font-size: 0.9rem;
+        font-weight: 700;
+        color: var(--ink);
+        white-space: nowrap;
       }
 
       .transcript {
@@ -2187,8 +2259,8 @@
           padding: max(12px, env(safe-area-inset-top)) 12px 8px;
         }
 
-        /* 3 items (載入 / 開始 / 清除) fill the base 3-col grid in a single row now that
-           情境 moved to the settings row. */
+        /* 收音鍵那列只剩 載入 / 開始 / 清除 + 情境 select(語言/翻譯/詞庫/搜尋已移入齒輪選單),
+           在手機端維持單排。 */
         .controls {
           gap: 8px;
         }
@@ -2249,7 +2321,8 @@
           padding-inline: 8px;
         }
 
-        .theme-toggle {
+        .theme-toggle,
+        .settings-btn {
           width: 38px;
           min-width: 38px;
         }
@@ -2280,6 +2353,7 @@
         <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></symbol>
         <symbol id="i-summary" viewBox="0 0 24 24"><path d="M5 5h14M5 10h14M5 15h9M5 20h6"/></symbol>
         <symbol id="i-translate" viewBox="0 0 24 24"><path d="M3 5h7"/><path d="M6.5 5v1.5c0 3-1.5 5.2-3.5 6.5"/><path d="M4 9.5c0 2 1.8 3.6 4.5 4.3"/><path d="M12.5 21l3.5-9 3.5 9"/><path d="M13.8 18h4.4"/></symbol>
+        <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 13a1.65 1.65 0 0 0 .33 1.82l.05.05a2 2 0 1 1-2.83 2.83l-.05-.05a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.05.05a2 2 0 1 1-2.83-2.83l.05-.05a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.05-.05a2 2 0 1 1 2.83-2.83l.05.05a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.05-.05a2 2 0 1 1 2.83 2.83l-.05.05a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></symbol>
       </defs>
     </svg>
     <div class="pages">
@@ -2289,7 +2363,31 @@
           <img class="brand-mark" src="./favicon.svg" width="42" height="42" alt="" />
           <h1>Breeze Elf</h1>
         </div>
-        <button id="theme" class="theme-toggle" type="button" aria-label="切換深色模式" aria-pressed="false" title="切換深色模式">☾</button>
+        <div class="header-actions">
+          <!-- 非核心工具(語言/翻譯/慣用詞庫/搜尋)收進齒輪選單,讓收音鍵那一列在手機端維持一排。 -->
+          <div class="settings-menu">
+            <button id="settings" class="settings-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="settings-panel" aria-label="更多設定與工具" title="更多設定與工具"><svg class="ic" aria-hidden="true"><use href="#i-gear"></use></svg></button>
+            <div id="settings-panel" class="settings-panel" role="menu" hidden>
+              <div class="settings-row" role="menuitem">
+                <button id="lang" class="iconbtn" type="button" aria-haspopup="dialog" aria-controls="lang-dialog" aria-label="設定辨識語言" title="設定辨識語言(最多 4 種,或自由偵測)"><svg class="ic" aria-hidden="true"><use href="#i-globe"></use></svg></button>
+                <span class="settings-row-label">辨識語言</span>
+              </div>
+              <div class="settings-row" role="menuitem">
+                <button id="translate" class="iconbtn" type="button" aria-pressed="false" aria-label="翻譯成繁體中文" title="翻譯:辨識後把每段翻成繁體中文並雙語顯示(需伺服器啟用 NLLB 模型)"><svg class="ic" aria-hidden="true"><use href="#i-translate"></use></svg></button>
+                <span class="settings-row-label">翻譯(繁中)</span>
+              </div>
+              <div class="settings-row" role="menuitem">
+                <button id="glossary" class="iconbtn" type="button" aria-haspopup="dialog" aria-controls="glossary-dialog" aria-label="慣用詞庫" title="慣用詞庫:你在逐字稿改的字會被記住,調整之後的辨識"><svg class="ic" aria-hidden="true"><use href="#i-book"></use></svg></button>
+                <span class="settings-row-label">慣用詞庫</span>
+              </div>
+              <div class="settings-row" role="menuitem">
+                <button id="search" class="iconbtn" type="button" aria-haspopup="dialog" aria-controls="search-dialog" aria-label="搜尋逐字稿" title="搜尋已儲存的逐字稿"><svg class="ic" aria-hidden="true"><use href="#i-search"></use></svg></button>
+                <span class="settings-row-label">搜尋逐字稿</span>
+              </div>
+            </div>
+          </div>
+          <button id="theme" class="theme-toggle" type="button" aria-label="切換深色模式" aria-pressed="false" title="切換深色模式">☾</button>
+        </div>
       </header>
 
       <section class="controls" aria-label="controls">
@@ -2304,10 +2402,6 @@
             <option value="music">🎵 音樂(分離人聲)</option>
           </select>
         </label>
-        <button id="lang" class="iconbtn" type="button" aria-haspopup="dialog" aria-controls="lang-dialog" aria-label="設定辨識語言" title="設定辨識語言(最多 4 種,或自由偵測)"><svg class="ic" aria-hidden="true"><use href="#i-globe"></use></svg></button>
-        <button id="translate" class="iconbtn" type="button" aria-pressed="false" aria-label="翻譯成繁體中文" title="翻譯:辨識後把每段翻成繁體中文並雙語顯示(需伺服器啟用 NLLB 模型)"><svg class="ic" aria-hidden="true"><use href="#i-translate"></use></svg></button>
-        <button id="glossary" class="iconbtn" type="button" aria-haspopup="dialog" aria-controls="glossary-dialog" aria-label="慣用詞庫" title="慣用詞庫:你在逐字稿改的字會被記住,調整之後的辨識"><svg class="ic" aria-hidden="true"><use href="#i-book"></use></svg></button>
-        <button id="search" class="iconbtn" type="button" aria-haspopup="dialog" aria-controls="search-dialog" aria-label="搜尋逐字稿" title="搜尋已儲存的逐字稿"><svg class="ic" aria-hidden="true"><use href="#i-search"></use></svg></button>
       </section>
 
       <section class="transcript" aria-label="transcript">
@@ -2720,7 +2814,7 @@
       </form>
     </dialog>
 
-    <script src="./app.js?v=34" type="module"></script>
+    <script src="./app.js?v=35" type="module"></script>
     <script src="./voice.js?v=26" type="module"></script>
   </body>
 </html>

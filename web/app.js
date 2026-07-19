@@ -28,6 +28,8 @@ const els = {
   audioDownload: document.querySelector("#audio-download"),
   audioSave: document.querySelector("#audio-save"),
   theme: document.querySelector("#theme"),
+  settings: document.querySelector("#settings"),
+  settingsPanel: document.querySelector("#settings-panel"),
   themeColor: document.querySelector("meta[name='theme-color']"),
   status: document.querySelector("#status"),
   stats: document.querySelector("#stats"),
@@ -2885,6 +2887,52 @@ void restoreAudioSession();
 document.querySelectorAll(".theme-toggle").forEach((button) => {
   button.addEventListener("click", toggleTheme);
 });
+
+// ── 齒輪設定選單 ──────────────────────────────────────────────────────────────
+// 收納語言/翻譯/慣用詞庫/搜尋。內含按鈕沿用原本的 id 與處理器,這裡只管開合。
+function closeSettingsMenu() {
+  if (!els.settings || !els.settingsPanel || els.settingsPanel.hidden) {
+    return;
+  }
+  els.settingsPanel.hidden = true;
+  els.settings.setAttribute("aria-expanded", "false");
+}
+
+if (els.settings && els.settingsPanel) {
+  els.settings.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const willOpen = els.settingsPanel.hidden;
+    els.settingsPanel.hidden = !willOpen;
+    els.settings.setAttribute("aria-expanded", String(willOpen));
+  });
+
+  // 整列可點:點文字說明轉觸發該列按鈕;選了任一項就收合選單。
+  els.settingsPanel.querySelectorAll(".settings-row").forEach((row) => {
+    row.addEventListener("click", (event) => {
+      const button = row.querySelector("button");
+      if (!button) {
+        return;
+      }
+      if (!event.target.closest("button")) {
+        button.click();
+      }
+      closeSettingsMenu();
+    });
+  });
+
+  // 點選單外 / 按 Esc 收合。
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest(".settings-menu")) {
+      closeSettingsMenu();
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      closeSettingsMenu();
+    }
+  });
+}
+
 els.backend.addEventListener("click", openAbout);
 document.addEventListener("breeze:page", (event) => {
   if (event.detail?.page !== "transcribe" && (state.running || state.analyzing)) {
