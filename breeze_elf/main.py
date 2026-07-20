@@ -45,7 +45,7 @@ from .audio import (
 )
 from .config import get_settings
 from .diarize import OnlineSpeakerClusterer, build_clusterer, build_diarizer
-from .enhance import build_enhancer, build_separator, preload_torch_cudnn
+from .enhance import build_denoiser, build_enhancer, build_separator, preload_torch_cudnn
 from .protocol import (
     GlossaryEntry,
     PingMessage,
@@ -188,6 +188,12 @@ class SeparateRequest(BaseModel):
     pcmBase64: str = Field(min_length=1)
     sampleRate: int = Field(default=16_000, ge=8_000, le=48_000)
     scenario: str = Field(default="music", max_length=16)
+
+
+class DenoiseRequest(BaseModel):
+    # Same raw 16-bit LE mono PCM upload as SeparateRequest; no scenario needed.
+    pcmBase64: str = Field(min_length=1)
+    sampleRate: int = Field(default=16_000, ge=8_000, le=48_000)
 
 
 class VoiceTtsRequest(BaseModel):
@@ -430,6 +436,9 @@ effective_vad_detector = make_speech_detector(
 live_enhancer = build_enhancer("live", settings)
 file_enhancer = build_enhancer("file", settings)
 separator = build_separator(settings)
+# Whole-recording denoise for the 原始/降噪 A/B compare — always DeepFilterNet,
+# regardless of the ASR enhance settings.
+denoiser = build_denoiser(settings)
 summarizer = build_summarizer(
     settings.summary_provider,
     model=settings.summary_model,
@@ -572,6 +581,7 @@ async def health() -> JSONResponse:
             "enhanceFile": file_enhancer.name,
             "enhanceDevice": settings.enhance_device,
             "separatorAvailable": separator.available,
+            "denoiseAvailable": denoiser.available,
             "searchEnabled": search_index.available,
             "searchIndexed": search_indexed,
             "summaryProvider": summarizer.name,
@@ -1218,6 +1228,47 @@ async def separate_audio(payload: SeparateRequest) -> JSONResponse:
             else 0.0,
             "model": separator.name,
             "device": separator.device,
+        }
+    )
+
+
+@app.post("/api/enhance/denoise")
+async def denoise_audio(payload: DenoiseRequest) -> JSONResponse:
+    """DeepFilterNet3 denoise+dereverb over a whole recording, for A/B compare.
+
+    Runs the full clip through the same model the ASR pipeline uses per utterance,
+    but in one pass (no window-edge artifacts) — so the returned clip is a fair,
+    slightly cleaner stand-in for what recognition hears. Independent of the ASR
+    enhance settings so the compare works even when live/file enhancement is off.
+    """
+    if not denoiser.available:
+        raise HTTPException(
+            status_code=503,
+            detail="speech denoise not installed; install torch + deepfilternet "
+            "(see README 'Speech Enhancement & Source Separation')",
+        )
+    samples = _decode_pcm_payload(payload.pcmBase64)
+
+    loop = asyncio.get_running_loop()
+    try:
+        enhanced = await loop.run_in_executor(
+            None, denoiser.enhance, samples, payload.sampleRate
+        )
+    except Exception as exc:
+        LOGGER.exception("Speech denoise failed")
+        raise HTTPException(status_code=500, detail=f"speech denoise failed: {exc}") from exc
+
+    pcm = (np.clip(enhanced, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
+    return JSONResponse(
+        {
+            "ok": True,
+            "pcmBase64": base64.b64encode(pcm).decode("ascii"),
+            "sampleRate": payload.sampleRate,
+            "durationSeconds": round(enhanced.size / payload.sampleRate, 3)
+            if payload.sampleRate
+            else 0.0,
+            "model": denoiser.name,
+            "device": denoiser.device,
         }
     )
 

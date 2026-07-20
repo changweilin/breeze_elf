@@ -27,6 +27,12 @@ const els = {
   audioPlayer: document.querySelector("#recording"),
   audioDownload: document.querySelector("#audio-download"),
   audioSave: document.querySelector("#audio-save"),
+  audioDenoise: document.querySelector("#audio-denoise"),
+  audioSeparate: document.querySelector("#audio-separate"),
+  comparePanel: document.querySelector("#compare-panel"),
+  compareAudio: document.querySelector("#compare-audio"),
+  compareTitle: document.querySelector("#compare-title"),
+  compareDownload: document.querySelector("#compare-download"),
   theme: document.querySelector("#theme"),
   settings: document.querySelector("#settings"),
   settingsPanel: document.querySelector("#settings-panel"),
@@ -197,6 +203,14 @@ const state = {
   // Whether the server offers whole-file batched transcription (BREEZE_ASR_FILE_BATCH_SIZE>0);
   // resolved once from /health. null = not yet checked → fall back to WS streaming.
   fileBatchAvailable: null,
+  // 原始/降噪 A/B compare: whether the server can run each pass (resolved from
+  // /health), plus the current generated clip's object URL + blob for download.
+  denoiseAvailable: null,
+  separateAvailable: null,
+  compareObjectUrl: "",
+  compareBlob: null,
+  compareFilename: "",
+  compareBusy: false,
   openBlocks: new Set(),
   demoRunning: false,
   demoTimers: [],
@@ -2264,6 +2278,11 @@ function setAudioActions() {
   const hasAudio = state.audioBytes > 0;
   els.audioDownload.disabled = !hasAudio;
   els.audioSave.disabled = DEMO_MODE || !hasAudio || state.savingAudio || state.running;
+  // 降噪比較: gated on a recording, the matching server pass being installed, and
+  // no other run in flight. Disabled (not hidden) so the reason is discoverable.
+  const compareBlocked = DEMO_MODE || !hasAudio || state.running || state.compareBusy;
+  els.audioDenoise.disabled = compareBlocked || !state.denoiseAvailable;
+  els.audioSeparate.disabled = compareBlocked || !state.separateAvailable;
   // Audio availability gates 校準音準 too, so keep that button in sync.
   updateAnalyzeButton();
 }
@@ -2271,6 +2290,9 @@ function setAudioActions() {
 function refreshAudioPreview() {
   window.clearTimeout(state.audioPreviewTimer);
   state.audioPreviewTimer = 0;
+
+  // Any change to the recording invalidates a previously generated 降噪 clip.
+  resetComparePanel();
 
   if (state.audioObjectUrl) {
     URL.revokeObjectURL(state.audioObjectUrl);
@@ -2816,18 +2838,24 @@ async function analyzeFile(file) {
 
 let capabilitiesPromise = null;
 
-// Resolve server capabilities once (cached). Only /health.fileBatchAvailable is needed
-// today; a failed fetch leaves the flag false so file loads use the WS streaming path.
+// Resolve server capabilities once (cached): file-batch transcription plus the
+// two 降噪比較 passes. A failed fetch leaves every flag false so file loads use the
+// WS streaming path and the compare buttons stay disabled.
 function ensureServerCapabilities() {
   if (!capabilitiesPromise) {
     capabilitiesPromise = fetch("/health")
       .then((response) => (response.ok ? response.json() : null))
       .then((data) => {
         state.fileBatchAvailable = Boolean(data?.fileBatchAvailable);
+        state.denoiseAvailable = Boolean(data?.denoiseAvailable);
+        state.separateAvailable = Boolean(data?.separatorAvailable);
       })
       .catch(() => {
         state.fileBatchAvailable = false;
-      });
+        state.denoiseAvailable = false;
+        state.separateAvailable = false;
+      })
+      .finally(() => setAudioActions());
   }
   return capabilitiesPromise;
 }
@@ -2905,6 +2933,126 @@ function base64ToPcm(base64) {
     bytes[index] = binary.charCodeAt(index);
   }
   return new Int16Array(bytes.buffer, 0, bytes.byteLength >> 1);
+}
+
+// ── 原始/降噪 A/B 比較 ───────────────────────────────────────────────────────
+// Each pass sends the whole recording once and plays the processed clip back in a
+// second player next to the original, so the user can hear what enhancement does.
+const COMPARE_MODES = {
+  denoise: {
+    endpoint: "/api/enhance/denoise",
+    title: "去噪音檔 (DeepFilter)",
+    progress: "去噪中(DeepFilter)",
+    filename: "denoise",
+  },
+  separate: {
+    endpoint: "/api/enhance/separate",
+    title: "人聲音檔 (Demucs)",
+    progress: "分離人聲中(Demucs)",
+    filename: "vocals",
+    body: { scenario: "music" },
+  },
+};
+
+// Flatten the recorded 16-bit PCM chunks (ArrayBuffers) into one Int16Array for
+// the whole-file enhance endpoints.
+function recordedPcm() {
+  const total = state.audioChunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  const out = new Int16Array(total >> 1);
+  let offset = 0;
+  for (const chunk of state.audioChunks) {
+    const view = new Int16Array(chunk);
+    out.set(view, offset);
+    offset += view.length;
+  }
+  return out;
+}
+
+function pcmToWavBlob(int16, sampleRate) {
+  const bytes = new Uint8Array(int16.buffer, int16.byteOffset, int16.byteLength);
+  const header = new ArrayBuffer(44);
+  const view = new DataView(header);
+  const blockAlign = AUDIO_CHANNEL_COUNT * AUDIO_BYTES_PER_SAMPLE;
+  const byteRate = sampleRate * blockAlign;
+  writeAscii(view, 0, "RIFF");
+  view.setUint32(4, 36 + bytes.byteLength, true);
+  writeAscii(view, 8, "WAVE");
+  writeAscii(view, 12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, AUDIO_CHANNEL_COUNT, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, AUDIO_BYTES_PER_SAMPLE * 8, true);
+  writeAscii(view, 36, "data");
+  view.setUint32(40, bytes.byteLength, true);
+  return new Blob([header, bytes], { type: "audio/wav" });
+}
+
+function resetComparePanel() {
+  if (state.compareObjectUrl) {
+    URL.revokeObjectURL(state.compareObjectUrl);
+    state.compareObjectUrl = "";
+  }
+  state.compareBlob = null;
+  if (els.comparePanel) {
+    els.comparePanel.hidden = true;
+    els.compareAudio.removeAttribute("src");
+    els.compareAudio.load();
+  }
+}
+
+async function runCompare(kind) {
+  const mode = COMPARE_MODES[kind];
+  if (!mode || DEMO_MODE || state.compareBusy || state.running || !state.audioBytes) {
+    return;
+  }
+  const pcm = recordedPcm();
+  if (!pcm.length) {
+    flashStats("沒有可處理的錄音");
+    return;
+  }
+
+  state.compareBusy = true;
+  setAudioActions();
+  window.clearTimeout(state.statsTimer);
+  const previousStats = els.stats.textContent;
+  els.stats.textContent = mode.progress;
+
+  try {
+    const response = await fetch(mode.endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pcmBase64: pcmToBase64(pcm),
+        sampleRate: state.audioSampleRate,
+        ...(mode.body || {}),
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) {
+      throw new Error(data.detail || "處理失敗");
+    }
+    const out = base64ToPcm(data.pcmBase64);
+    if (!out.length) {
+      throw new Error("處理結果為空");
+    }
+    resetComparePanel();
+    state.compareBlob = pcmToWavBlob(out, data.sampleRate || state.audioSampleRate);
+    state.compareObjectUrl = URL.createObjectURL(state.compareBlob);
+    state.compareFilename = mode.filename;
+    els.compareTitle.textContent = mode.title;
+    els.compareAudio.src = state.compareObjectUrl;
+    els.compareAudio.load();
+    els.comparePanel.hidden = false;
+    flashStats(`已產生${mode.title}`, previousStats);
+  } catch (error) {
+    flashStats(error.message || "處理失敗", previousStats);
+  } finally {
+    state.compareBusy = false;
+    setAudioActions();
+  }
 }
 
 async function streamPcmToSocket(ws, pcm) {
@@ -3101,6 +3249,11 @@ setRunning(false);
 setViewMode(state.viewMode, { persist: false });
 restoreTranscriptSession();
 void restoreAudioSession();
+// Resolve 降噪比較 availability up front so the menu items reflect it before the
+// first recording finishes (also refreshes the file-batch flag).
+if (!DEMO_MODE) {
+  void ensureServerCapabilities();
+}
 
 document.querySelectorAll(".theme-toggle").forEach((button) => {
   button.addEventListener("click", toggleTheme);
@@ -3394,6 +3547,23 @@ els.audioDownload.addEventListener("click", () => {
   const link = document.createElement("a");
   link.href = url;
   link.download = `breeze-elf-${stamp}.wav`;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  flashStats("已下載音檔");
+});
+
+els.audioDenoise.addEventListener("click", () => void runCompare("denoise"));
+els.audioSeparate.addEventListener("click", () => void runCompare("separate"));
+
+els.compareDownload.addEventListener("click", () => {
+  if (!state.compareBlob) {
+    return;
+  }
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const url = URL.createObjectURL(state.compareBlob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `breeze-elf-${state.compareFilename || "compare"}-${stamp}.wav`;
   link.click();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   flashStats("已下載音檔");

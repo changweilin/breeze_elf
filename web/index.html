@@ -1962,7 +1962,8 @@
 
       /* 錄音播放器的 ⋮ 選單位在畫面下緣(狀態列/頁籤之上),往下展開會超出邊界點不到
          → 改往上展開;上方是逐字稿區,空間充足。 */
-      #audio-panel .player-menu-list {
+      #audio-panel .player-menu-list,
+      #compare-panel .player-menu-list {
         top: auto;
         bottom: calc(100% + 4px);
       }
@@ -2580,6 +2581,19 @@
           <div class="player-menu-list" role="menu" hidden>
             <button id="audio-download" type="button" role="menuitem" disabled>下載音檔</button>
             <button id="audio-save" type="button" role="menuitem" disabled>雲端儲存音檔</button>
+            <button id="audio-denoise" type="button" role="menuitem" disabled>去噪比較 (DeepFilter)</button>
+            <button id="audio-separate" type="button" role="menuitem" disabled>分離人聲比較 (Demucs)</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="compare-panel" class="recording" aria-label="降噪比較" hidden>
+        <span class="voice-player-title" id="compare-title">降噪音檔</span>
+        <audio id="compare-audio" controls controlsList="nodownload noplaybackrate" preload="metadata"></audio>
+        <div class="player-menu">
+          <button class="icon-btn player-menu-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-label="降噪音檔功能選單" title="功能選單">⋮</button>
+          <div class="player-menu-list" role="menu" hidden>
+            <button id="compare-download" type="button" role="menuitem">下載此音檔</button>
           </div>
         </div>
       </section>
@@ -2967,7 +2981,7 @@
       </form>
     </dialog>
 
-    <script src="./app.js?v=37" type="module"></script>
+    <script src="./app.js?v=38" type="module"></script>
     <script src="./voice.js?v=26" type="module"></script>
   </body>
 </html>
