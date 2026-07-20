@@ -87,6 +87,19 @@ non-Chinese audio is no longer transcribed as Chinese gibberish. Note that a spe
 still hallucinates lyrics on purely instrumental tracks — for melodies the pitch / 簡譜
 output is the meaningful result.
 
+### Switching the ASR model
+
+The 模型與演算法 dialog (tap the backend line in the footer) has a model switcher at the
+top. It hot-swaps the running engine between **Breeze ASR** (`breeze`), **Whisper medium**,
+and **Whisper large-v3** without restarting the server — the new model loads in the
+background (a progress bar tracks it) and the old one is released once the swap completes.
+Switching is blocked while a recording is streaming, and the currently loaded model is
+always shown as the active option. The Whisper sizes are downloaded/cached by
+faster-whisper on first use; `breeze` is a local CTranslate2 directory (see
+`BREEZE_ASR_BREEZE_MODEL`) and reports a clear error if the directory is missing rather
+than reaching out to Hugging Face. Endpoints: `GET /api/asr/models`, `POST /api/asr/model`,
+`GET /api/asr/model/status`.
+
 For long recordings, set `BREEZE_ASR_FILE_BATCH_SIZE` (e.g. `16`) to transcribe the whole
 file in one batched `BatchedInferencePipeline` pass (3–4× faster) via
 `POST /api/transcribe/file`, instead of streaming it utterance-by-utterance. The batched
@@ -262,7 +275,8 @@ Environment variables:
 | `BREEZE_VAD_END_SILENCE_MS` | `700` | Silence required to finish an utterance. |
 | `BREEZE_VAD_MAX_SEGMENT_SECONDS` | `18.0` | Max utterance length before a forced split. The split lands at the quietest recent frame (a syllable gap) so a long sung phrase is never cut mid-note. |
 | `BREEZE_CHAR_VOICELESS_MARGIN` | `1.6` | Post-processing only: grow each 字's window outward through audio above `noise_floor × margin` (an unvoiced consonant/breath) the live VAD clipped. |
-| `BREEZE_ASR_MODEL` | `medium` | Whisper model name. |
+| `BREEZE_ASR_MODEL` | `medium` | Whisper model name loaded at startup. Also switchable at runtime from 模型與演算法 (see below). |
+| `BREEZE_ASR_BREEZE_MODEL` | `models/breeze-asr-25-ct2` | Local **CTranslate2** directory the `breeze` preset in the model switcher resolves to. Offline-first — faster-whisper only loads a CT2 model, so this is a converted Breeze ASR dir on disk, not a HF id. A relative path is resolved against the project root. |
 | `BREEZE_ASR_DEVICE` | `auto` | `auto`, `cuda`, or `cpu`. |
 | `BREEZE_ASR_COMPUTE_TYPE` | `int8` | Compute type for custom ASR device values. |
 | `BREEZE_ASR_CONCURRENCY` | `1` | Maximum concurrent ASR transcriptions. |

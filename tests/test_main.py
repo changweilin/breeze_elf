@@ -860,5 +860,145 @@ class StaticAssetsTests(unittest.TestCase):
             self.assertTrue((Path(main.WEB_DIR) / asset_name).is_file(), asset_name)
 
 
+class _FakeSwitchEngine:
+    backend = "faster-whisper"
+
+    def __init__(self, model_name, device_preference="auto"):
+        self.model_name = model_name
+        self.device_preference = device_preference
+        self.device = "cpu"
+        self.compute_type = "int8"
+        self.loaded = False
+
+    def load(self):
+        self.loaded = True
+
+
+class _FakeSwitchQueue:
+    def __init__(self, asr=None, concurrency=1):
+        self.asr = asr
+        self.started = False
+        self.stopped = False
+
+    async def start(self):
+        self.started = True
+
+    async def stop(self):
+        self.stopped = True
+
+
+class ASRModelSwitchEndpointTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        # The switch state is a module singleton; keep tests independent.
+        main.asr_switch_state.status = "idle"
+        main.asr_switch_state.error = None
+
+    async def test_list_endpoint_exposes_presets_and_active(self):
+        response = await main.list_asr_model_options()
+        body = json.loads(response.body)
+        ids = [m["id"] for m in body["models"]]
+        self.assertIn("breeze", ids)
+        self.assertIn("medium", ids)
+        self.assertIn("large-v3", ids)
+        self.assertIn("activeId", body)
+
+    async def test_unknown_model_id_returns_404(self):
+        with self.assertRaises(main.HTTPException) as ctx:
+            await main.switch_asr_model(main.ASRModelSwitchRequest(id="does-not-exist"))
+        self.assertEqual(ctx.exception.status_code, 404)
+
+    async def test_switch_rejected_while_streaming(self):
+        with patch.object(main, "_active_stream_count", 1):
+            with self.assertRaises(main.HTTPException) as ctx:
+                await main.switch_asr_model(main.ASRModelSwitchRequest(id="large-v3"))
+        self.assertEqual(ctx.exception.status_code, 409)
+
+    async def test_switch_to_active_model_is_noop(self):
+        current = getattr(main.asr_engine, "model_name", "")
+        active_id = main.active_model_id(main.settings, current)
+        response = await main.switch_asr_model(main.ASRModelSwitchRequest(id=active_id))
+        body = json.loads(response.body)
+        self.assertTrue(body.get("noop"))
+
+    async def test_switch_hot_swaps_engine_and_queue(self):
+        original_engine = main.asr_engine
+        original_queue = getattr(main.app.state, "asr_queue", None)
+        old_queue = _FakeSwitchQueue()
+        main.app.state.asr_queue = old_queue
+        try:
+            with (
+                patch.object(main, "FasterWhisperASR", _FakeSwitchEngine),
+                patch.object(main, "ASRQueue", _FakeSwitchQueue),
+                patch.object(main, "_active_stream_count", 0),
+            ):
+                await main.switch_asr_model(main.ASRModelSwitchRequest(id="large-v3"))
+                await main.app.state.asr_switch_task
+
+            self.assertEqual(main.asr_switch_state.snapshot()["status"], "ready")
+            self.assertEqual(main.asr_engine.model_name, "large-v3")
+            self.assertTrue(main.asr_engine.loaded)
+            self.assertTrue(old_queue.stopped)
+            self.assertIsInstance(main.app.state.asr_queue, _FakeSwitchQueue)
+            self.assertTrue(main.app.state.asr_queue.started)
+        finally:
+            main.asr_engine = original_engine
+            main.app.state.asr = original_engine
+            if original_queue is not None:
+                main.app.state.asr_queue = original_queue
+            main.asr_switch_state.status = "idle"
+            main.asr_switch_state.error = None
+
+    async def test_switch_to_breeze_missing_dir_reports_clear_error(self):
+        # Offline-first: a missing local CT2 dir must fail with an actionable message
+        # (and never fall through to a HuggingFace lookup).
+        original_engine = main.asr_engine
+        fake_settings = replace(main.settings, asr_breeze_model="models/__nope_breeze__")
+        try:
+            with (
+                patch.object(main, "settings", fake_settings),
+                patch.object(main, "_active_stream_count", 0),
+            ):
+                await main.switch_asr_model(main.ASRModelSwitchRequest(id="breeze"))
+                await main.app.state.asr_switch_task
+
+            snapshot = main.asr_switch_state.snapshot()
+            self.assertEqual(snapshot["status"], "error")
+            self.assertIn("找不到 Breeze 模型目錄", snapshot["error"])
+            self.assertIs(main.asr_engine, original_engine)
+        finally:
+            main.asr_engine = original_engine
+            main.asr_switch_state.status = "idle"
+            main.asr_switch_state.error = None
+
+    async def test_switch_reports_error_on_load_failure(self):
+        class _FailingEngine(_FakeSwitchEngine):
+            def load(self):
+                raise RuntimeError("model dir not found")
+
+        original_engine = main.asr_engine
+        original_queue = getattr(main.app.state, "asr_queue", None)
+        main.app.state.asr_queue = _FakeSwitchQueue()
+        try:
+            with (
+                patch.object(main, "FasterWhisperASR", _FailingEngine),
+                patch.object(main, "ASRQueue", _FakeSwitchQueue),
+                patch.object(main, "_active_stream_count", 0),
+            ):
+                await main.switch_asr_model(main.ASRModelSwitchRequest(id="large-v3"))
+                await main.app.state.asr_switch_task
+
+            snapshot = main.asr_switch_state.snapshot()
+            self.assertEqual(snapshot["status"], "error")
+            self.assertIn("model dir not found", snapshot["error"])
+            # A failed load must leave the running engine untouched.
+            self.assertIs(main.asr_engine, original_engine)
+        finally:
+            main.asr_engine = original_engine
+            if original_queue is not None:
+                main.app.state.asr_queue = original_queue
+            main.asr_switch_state.status = "idle"
+            main.asr_switch_state.error = None
+
+
 if __name__ == "__main__":
     unittest.main()

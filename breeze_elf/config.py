@@ -79,6 +79,10 @@ class Settings:
     asr_model: str = "medium"
     asr_device: str = "auto"
     asr_provider: str = "faster-whisper"
+    # Local CTranslate2 directory the "breeze" model preset resolves to (the model
+    # switcher in 模型與演算法). Offline-first — faster-whisper can only load a CT2
+    # model, so this points at a converted Breeze ASR dir on disk, not a HF id.
+    asr_breeze_model: str = "models/breeze-asr-25-ct2"
     asr_load_on_startup: bool = True
     asr_concurrency: int = 1
     asr_no_speech_prob_threshold: float = 0.6
@@ -198,6 +202,7 @@ def get_settings() -> Settings:
         asr_model=os.getenv("BREEZE_ASR_MODEL", "medium"),
         asr_device=os.getenv("BREEZE_ASR_DEVICE", "auto"),
         asr_provider=os.getenv("BREEZE_ASR_PROVIDER", "faster-whisper"),
+        asr_breeze_model=os.getenv("BREEZE_ASR_BREEZE_MODEL", "models/breeze-asr-25-ct2"),
         asr_load_on_startup=_bool_env("BREEZE_ASR_LOAD_ON_STARTUP", True),
         asr_concurrency=max(1, _int_env("BREEZE_ASR_CONCURRENCY", 1)),
         asr_no_speech_prob_threshold=_float_env("BREEZE_ASR_NO_SPEECH_PROB_THRESHOLD", 0.6),

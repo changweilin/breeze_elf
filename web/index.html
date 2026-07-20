@@ -1413,6 +1413,66 @@
         overflow-wrap: anywhere;
       }
 
+      /* 辨識模型切換:置於「模型與演算法」最上方,可熱切換 breeze / whisper。 */
+      .model-switch .model-switch-hint {
+        margin: 0 0 10px;
+        color: var(--muted);
+        font-size: 0.82rem;
+        line-height: 1.5;
+      }
+
+      .model-switch-options {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .model-switch-option {
+        flex: 1 1 auto;
+        min-width: 6rem;
+        min-height: 42px;
+        padding: 0 12px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        color: var(--ink);
+        font: inherit;
+        font-weight: 720;
+        font-size: 0.86rem;
+        cursor: pointer;
+      }
+
+      .model-switch-option[aria-pressed="true"] {
+        border-color: var(--live);
+        color: var(--live);
+        background: color-mix(in srgb, var(--live) 15%, transparent);
+      }
+
+      .model-switch-option:disabled {
+        cursor: not-allowed;
+        opacity: 0.55;
+      }
+
+      .model-switch-progress {
+        margin-top: 12px;
+        display: grid;
+        gap: 6px;
+      }
+
+      .model-switch-progress[hidden] {
+        display: none;
+      }
+
+      .model-switch-status {
+        margin: 10px 0 0;
+        font-size: 0.82rem;
+        color: var(--muted);
+      }
+
+      .model-switch-status.error {
+        color: var(--danger);
+      }
+
       .about-me-name {
         margin: 0 0 8px;
         font-size: 1rem;
@@ -2770,6 +2830,19 @@
         <button class="about-close" type="submit" value="close" aria-label="關閉">✕</button>
       </form>
       <div class="about-body">
+        <div class="about-section model-switch">
+          <h3>辨識模型</h3>
+          <p class="model-switch-hint">切換即時語音辨識使用的模型。切換會在本機載入新模型(需數秒),辨識進行中無法切換。</p>
+          <div class="model-switch-options" id="asr-model-options" role="group" aria-label="辨識模型"></div>
+          <div class="model-switch-progress" id="asr-switch-progress" hidden>
+            <div class="vp-head">
+              <span id="asr-switch-label">載入中</span>
+              <span id="asr-switch-pct">0%</span>
+            </div>
+            <div class="progress-track"><div class="progress-fill" id="asr-switch-bar"></div></div>
+          </div>
+          <p class="model-switch-status" id="asr-switch-status" aria-live="polite"></p>
+        </div>
         <div class="about-section">
           <h3>語音辨識</h3>
           <p>
@@ -2894,7 +2967,7 @@
       </form>
     </dialog>
 
-    <script src="./app.js?v=36" type="module"></script>
+    <script src="./app.js?v=37" type="module"></script>
     <script src="./voice.js?v=26" type="module"></script>
   </body>
 </html>

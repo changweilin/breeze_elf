@@ -38,6 +38,12 @@ const els = {
   backend: document.querySelector("#backend"),
   about: document.querySelector("#about"),
   aboutBackend: document.querySelector("#about-backend"),
+  asrModelOptions: document.querySelector("#asr-model-options"),
+  asrSwitchProgress: document.querySelector("#asr-switch-progress"),
+  asrSwitchLabel: document.querySelector("#asr-switch-label"),
+  asrSwitchPct: document.querySelector("#asr-switch-pct"),
+  asrSwitchBar: document.querySelector("#asr-switch-bar"),
+  asrSwitchStatus: document.querySelector("#asr-switch-status"),
 };
 
 // Buttons are icon-only; swap the sprite glyph instead of writing text (which would wipe the icon).
@@ -203,6 +209,8 @@ const state = {
   translateEnabled: Boolean(INITIAL_SETTINGS.translateEnabled),
   glossary: loadStoredGlossary(),
   editingIndex: null,
+  // 辨識模型熱切換(模型與演算法對話框):防重入,切換中禁點其他模型。
+  asrSwitching: false,
 };
 
 let audioDatabasePromise = null;
@@ -659,6 +667,194 @@ function openAbout() {
     }
   } else {
     els.about.setAttribute("open", "");
+  }
+  // Refresh the model switcher each open so it reflects the running model (and
+  // any switch a previous open kicked off).
+  void loadAsrModels();
+}
+
+// ── 辨識模型切換 ──────────────────────────────────────────────────────────────
+function setAsrSwitchStatus(text, isError) {
+  if (!els.asrSwitchStatus) {
+    return;
+  }
+  els.asrSwitchStatus.textContent = text || "";
+  els.asrSwitchStatus.classList.toggle("error", Boolean(isError));
+}
+
+function showAsrSwitchProgress(sw) {
+  if (!els.asrSwitchProgress) {
+    return;
+  }
+  const fraction = Math.max(0, Math.min(1, Number(sw?.progress) || 0));
+  els.asrSwitchProgress.hidden = false;
+  els.asrSwitchLabel.textContent = sw?.stage || "載入中";
+  els.asrSwitchPct.textContent = `${Math.round(fraction * 100)}%`;
+  els.asrSwitchBar.style.width = `${(fraction * 100).toFixed(0)}%`;
+  els.asrSwitchBar.classList.toggle("error", sw?.status === "error");
+}
+
+function hideAsrSwitchProgress() {
+  if (els.asrSwitchProgress) {
+    els.asrSwitchProgress.hidden = true;
+  }
+}
+
+function setAsrOptionsDisabled(disabled) {
+  els.asrModelOptions
+    ?.querySelectorAll(".model-switch-option")
+    .forEach((btn) => {
+      // Keep the active model non-interactive regardless; disable all while switching.
+      btn.disabled = disabled || btn.getAttribute("aria-pressed") === "true";
+    });
+}
+
+function backendLabelFromModels(data) {
+  const device = data.computeType ? `${data.device}/${data.computeType}` : data.device;
+  return [data.backend, data.activeModel, device, data.segmenter || "audio"]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+function renderAsrModels(data) {
+  if (!els.asrModelOptions) {
+    return;
+  }
+  const options = data.models || [];
+  const activeId = data.activeId;
+  const switching = data.switch?.status === "loading";
+  state.asrSwitching = switching;
+  els.asrModelOptions.replaceChildren();
+  options.forEach((opt) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "model-switch-option";
+    btn.textContent = opt.label;
+    btn.dataset.id = opt.id;
+    const isActive = opt.id === activeId;
+    btn.setAttribute("aria-pressed", String(isActive));
+    btn.disabled = switching || isActive;
+    btn.addEventListener("click", () => void switchAsrModel(opt.id, opt.label));
+    els.asrModelOptions.append(btn);
+  });
+
+  if (switching) {
+    showAsrSwitchProgress(data.switch);
+    void pollAsrSwitch();
+    return;
+  }
+  hideAsrSwitchProgress();
+  if (data.switch?.status === "error" && data.switch.error) {
+    setAsrSwitchStatus(`切換失敗:${data.switch.error}`, true);
+  } else {
+    const active = options.find((opt) => opt.id === activeId);
+    setAsrSwitchStatus(active ? `目前使用:${active.label}` : "", false);
+  }
+}
+
+async function loadAsrModels() {
+  if (!els.asrModelOptions) {
+    return;
+  }
+  if (DEMO_MODE) {
+    els.asrModelOptions.replaceChildren();
+    hideAsrSwitchProgress();
+    setAsrSwitchStatus("示意模式無法切換模型", false);
+    return;
+  }
+  try {
+    const response = await fetch("/api/asr/models");
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    renderAsrModels(await response.json());
+  } catch {
+    els.asrModelOptions.replaceChildren();
+    hideAsrSwitchProgress();
+    setAsrSwitchStatus("無法取得模型清單(伺服器未連線)", true);
+  }
+}
+
+async function switchAsrModel(id, label) {
+  if (state.asrSwitching) {
+    return;
+  }
+  state.asrSwitching = true;
+  setAsrOptionsDisabled(true);
+  setAsrSwitchStatus(`切換到 ${label}…`, false);
+  showAsrSwitchProgress({ progress: 0.05, stage: "準備中", status: "loading" });
+  try {
+    const response = await fetch("/api/asr/model", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(data?.detail || `HTTP ${response.status}`);
+    }
+    if (data?.noop) {
+      state.asrSwitching = false;
+      hideAsrSwitchProgress();
+      renderAsrModels(data);
+      return;
+    }
+    await pollAsrSwitch();
+  } catch (err) {
+    state.asrSwitching = false;
+    hideAsrSwitchProgress();
+    setAsrSwitchStatus(`切換失敗:${err.message}`, true);
+    void loadAsrModels();
+  }
+}
+
+let asrPollActive = false;
+
+async function pollAsrSwitch() {
+  // Single poller only: re-opening the dialog mid-switch must not start a rival loop.
+  if (asrPollActive) {
+    return;
+  }
+  asrPollActive = true;
+  // Poll the switch status until the load finishes; the model loads in a server
+  // worker thread, so this can take a few seconds for large-v3.
+  try {
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      let data;
+      try {
+        const response = await fetch("/api/asr/model/status");
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        data = await response.json();
+      } catch {
+        continue; // transient; keep polling
+      }
+      const sw = data.switch || {};
+      if (sw.status === "loading") {
+        showAsrSwitchProgress(sw);
+        continue;
+      }
+      state.asrSwitching = false;
+      hideAsrSwitchProgress();
+      if (sw.status === "error") {
+        setAsrSwitchStatus(`切換失敗:${sw.error || "未知錯誤"}`, true);
+        renderAsrModels(data);
+      } else {
+        // Reflect the new model in the footer + about backend line immediately.
+        const label = backendLabelFromModels(data);
+        els.backend.textContent = label;
+        if (els.aboutBackend) {
+          els.aboutBackend.textContent = label;
+        }
+        renderAsrModels(data);
+        setAsrSwitchStatus(`已切換到 ${data.activeModel}`, false);
+      }
+      return;
+    }
+  } finally {
+    asrPollActive = false;
   }
 }
 

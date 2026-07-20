@@ -21,7 +21,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.websockets import WebSocketState
 
-from .asr import ASRResult, WordTiming, build_asr_from_env
+from .asr import ASRResult, FasterWhisperASR, WordTiming, build_asr_from_env
+from .asr_models import active_model_id, find_asr_model, list_asr_models
 from .asr_queue import ASRQueue
 from .audio import (
     AudioUtteranceBuffer,
@@ -352,6 +353,65 @@ class AnalyzeState:
             return data
 
 
+@dataclass
+class ASRSwitchState:
+    """Thread-safe progress for a live ASR model hot-swap (模型與演算法 switcher).
+
+    Re-runnable like :class:`AnalyzeState`: the new model loads in an executor
+    thread while the frontend polls a status endpoint to drive a progress bar.
+    """
+
+    status: str = "idle"  # idle | loading | ready | error
+    progress: float = 0.0
+    stage: str = ""
+    error: str | None = None
+    target_id: str = ""
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def begin(self, target_id: str) -> bool:
+        with self.lock:
+            if self.status == "loading":
+                return False
+            self.status = "loading"
+            self.progress = 0.0
+            self.stage = "準備中"
+            self.error = None
+            self.target_id = target_id
+            return True
+
+    def report(self, fraction: float, stage: str) -> None:
+        with self.lock:
+            self.progress = max(0.0, min(1.0, float(fraction)))
+            self.stage = stage
+
+    def finish(self) -> None:
+        with self.lock:
+            self.status = "ready"
+            self.progress = 1.0
+            self.stage = "完成"
+            self.error = None
+
+    def fail(self, message: str) -> None:
+        with self.lock:
+            self.status = "error"
+            self.error = message
+
+    @property
+    def is_loading(self) -> bool:
+        with self.lock:
+            return self.status == "loading"
+
+    def snapshot(self) -> dict[str, Any]:
+        with self.lock:
+            return {
+                "status": self.status,
+                "progress": round(self.progress, 3),
+                "stage": self.stage,
+                "error": self.error,
+                "targetId": self.target_id,
+            }
+
+
 settings = get_settings()
 asr_engine = build_asr_from_env(settings)
 # Resolve the effective VAD detector once at startup so /health reports what will
@@ -387,6 +447,11 @@ diarizer = build_diarizer(settings, base_dir=ROOT_DIR)
 voice_engine = build_voice_from_env(settings)
 voice_load_state = VoiceLoadState()
 analyze_state = AnalyzeState()
+asr_switch_state = ASRSwitchState()
+# Live streams currently attached to the ASR queue. A model hot-swap is rejected
+# while > 0 so we never stop a queue out from under an in-flight recording. Mutated
+# only from event-loop coroutines (StartMessage / _stop_state), so a plain int is safe.
+_active_stream_count = 0
 
 
 @asynccontextmanager
@@ -399,6 +464,7 @@ async def lifespan(app: FastAPI):
     app.state.voice_load_task = None
     app.state.analyze = analyze_state
     app.state.analyze_task = None
+    app.state.asr_switch_task = None
     app.state.asr_queue = ASRQueue(asr_engine, settings.asr_concurrency)
     await app.state.asr_queue.start()
     loop = asyncio.get_running_loop()
@@ -494,6 +560,7 @@ async def health() -> JSONResponse:
             "asrBackend": asr_engine.backend,
             "asrDevice": asr_engine.device,
             "asrModel": getattr(asr_engine, "model_name", "unknown"),
+            "asrModelId": active_model_id(settings, getattr(asr_engine, "model_name", "")),
             "asrComputeType": getattr(asr_engine, "compute_type", "unknown"),
             "asrConcurrency": settings.asr_concurrency,
             "asrQueueDepth": app.state.asr_queue.queue_depth,
@@ -769,6 +836,107 @@ async def voice_status() -> JSONResponse:
     snapshot = voice_load_state.snapshot()
     meta = _voice_meta({"voiceCount": len(list_voices(_voice_storage_dir()))})
     return JSONResponse({"ok": True, **snapshot, **meta})
+
+
+class ASRModelSwitchRequest(BaseModel):
+    id: str = Field(min_length=1, max_length=64)
+
+
+def _asr_models_payload() -> dict[str, Any]:
+    """The switcher's view of the world: the presets, which one is loaded, and
+    enough backend detail to rebuild the footer label after a swap."""
+    current_model = getattr(asr_engine, "model_name", "")
+    return {
+        "models": [opt.to_public() for opt in list_asr_models(settings, current_model)],
+        "activeId": active_model_id(settings, current_model),
+        "activeModel": current_model,
+        "backend": asr_engine.backend,
+        "device": asr_engine.device,
+        "computeType": getattr(asr_engine, "compute_type", ""),
+        "segmenter": settings.segmenter,
+        "provider": settings.asr_provider,
+        "streaming": _active_stream_count > 0,
+        "switch": asr_switch_state.snapshot(),
+    }
+
+
+@app.get("/api/asr/models")
+async def list_asr_model_options() -> JSONResponse:
+    return JSONResponse({"ok": True, **_asr_models_payload()})
+
+
+@app.get("/api/asr/model/status")
+async def asr_model_switch_status() -> JSONResponse:
+    return JSONResponse({"ok": True, **_asr_models_payload()})
+
+
+async def _run_asr_switch(option) -> None:
+    """Load ``option`` into a fresh engine, then atomically swap it (and a new
+    queue) in. The new model is loaded *before* the old queue is stopped, so a
+    load failure leaves the running model untouched — at the cost of both models
+    briefly co-residing in VRAM (fine for medium/large-v3 on a 12 GB card)."""
+    global asr_engine
+    loop = asyncio.get_running_loop()
+    try:
+        model_ref = option.model
+        if option.kind == "breeze":
+            # Offline-first: breeze is a LOCAL CTranslate2 directory. Resolve it
+            # (CWD-independent) and fail with a clear message instead of letting
+            # faster-whisper fall through to a confusing HuggingFace 404 — and an
+            # unwanted network call — when the directory is absent.
+            path = Path(model_ref).expanduser()
+            if not path.is_absolute():
+                path = ROOT_DIR / path
+            if not path.exists():
+                raise RuntimeError(
+                    f"找不到 Breeze 模型目錄:{path}(請放入 CTranslate2 模型,"
+                    "或用 BREEZE_ASR_BREEZE_MODEL 指定路徑)"
+                )
+            model_ref = str(path)
+        asr_switch_state.report(0.1, "建立引擎")
+        new_engine = FasterWhisperASR(model_ref, settings.asr_device)
+        asr_switch_state.report(0.25, f"載入 {option.label}")
+        await loop.run_in_executor(None, new_engine.load)
+        # Identity/display uses the preset value (e.g. the relative breeze dir) so the
+        # switcher matches it back to its option; the absolute path was only needed to
+        # load the local model CWD-independently.
+        new_engine.model_name = option.model
+
+        asr_switch_state.report(0.85, "切換佇列")
+        new_queue = ASRQueue(new_engine, settings.asr_concurrency)
+        await new_queue.start()
+        old_queue = app.state.asr_queue
+        app.state.asr_queue = new_queue
+        app.state.asr = new_engine
+        app.state.asr_error = None
+        asr_engine = new_engine
+        # Drain and release the previous engine's queue; dropping the last reference
+        # lets CTranslate2 free the old model's VRAM on garbage collection.
+        await old_queue.stop()
+    except Exception as exc:  # noqa: BLE001 - surface any load/swap failure to the poller
+        LOGGER.exception("ASR model switch failed")
+        asr_switch_state.fail(str(exc))
+    else:
+        asr_switch_state.finish()
+
+
+@app.post("/api/asr/model")
+async def switch_asr_model(payload: ASRModelSwitchRequest) -> JSONResponse:
+    current_model = getattr(asr_engine, "model_name", "")
+    option = find_asr_model(settings, current_model, payload.id)
+    if option is None:
+        raise HTTPException(status_code=404, detail=f"未知的模型:{payload.id}")
+    # Already the running model (and nothing loading) → nothing to do.
+    if option.model == current_model and not asr_switch_state.is_loading:
+        return JSONResponse({"ok": True, "noop": True, **_asr_models_payload()})
+    if _active_stream_count > 0:
+        raise HTTPException(status_code=409, detail="辨識進行中,請先停止再切換模型")
+    if not asr_switch_state.begin(option.id):
+        # A switch is already in flight; report its progress instead of racing.
+        return JSONResponse({"ok": True, **_asr_models_payload()})
+
+    app.state.asr_switch_task = asyncio.create_task(_run_asr_switch(option))
+    return JSONResponse({"ok": True, **_asr_models_payload()})
 
 
 def _run_transcript_analysis(
@@ -1213,6 +1381,9 @@ class StreamState:
     processor_task: asyncio.Task[None] | None = None
     transcript: str = ""
     dropped_windows: int = 0
+    # Whether this stream has been tallied into ``_active_stream_count`` (so the
+    # decrement in ``_stop_state`` fires exactly once, even when called twice).
+    counted_active: bool = False
     started_at: float = field(default_factory=time.monotonic)
     # Per-connection speaker clusterer (diarization). Built at start only when the
     # embedder is available, so labels are anonymous and reset every session.
@@ -1293,6 +1464,11 @@ async def _handle_text_message(
         if state.started:
             await send_json(server_event("error", message="stream already started"))
             return False
+        # Closes the race where a stream starts mid-swap and captures a queue that
+        # ``_run_asr_switch`` is about to stop out from under it.
+        if asr_switch_state.is_loading:
+            await send_json(server_event("error", message="模型切換中,請稍後再試"))
+            return False
 
         state.mode = message.mode
         state.segmenter = _build_segmenter(message.sample_rate)
@@ -1319,6 +1495,9 @@ async def _handle_text_message(
             )
         )
         state.started = True
+        global _active_stream_count
+        _active_stream_count += 1
+        state.counted_active = True
         await send_json(
             server_event(
                 "ready",
@@ -1596,6 +1775,10 @@ async def _assign_speaker(
 
 
 async def _stop_state(state: StreamState, drain_timeout: float = 2.0) -> None:
+    if state.counted_active:
+        global _active_stream_count
+        _active_stream_count = max(0, _active_stream_count - 1)
+        state.counted_active = False
     if not state.stop_event.is_set() and state.segmenter is not None and hasattr(
         state.segmenter,
         "flush",
