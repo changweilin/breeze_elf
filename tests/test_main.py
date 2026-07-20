@@ -786,6 +786,50 @@ class SilenceHallucinationTests(unittest.TestCase):
 
         self.assertTrue(_should_drop_asr_result(window, result))
 
+    def test_drops_subtitle_credit_even_when_loud(self):
+        # The regression: loud 歌詞 hallucinate subtitle credits at high volume and
+        # low no_speech_prob, so the quiet-silence gate can never fire — they must
+        # still be dropped.
+        window = AudioWindow(
+            index=0,
+            start_seconds=0.0,
+            end_seconds=1.0,
+            samples=np.ones(16000, dtype=np.float32) * 0.2,
+            rms=0.2,
+            is_speech=True,
+        )
+        result = ASRResult(
+            text="字幕由 Amara.org 社群提供",
+            language="zh",
+            duration_ms=1,
+            backend="test",
+            device="cpu",
+            no_speech_prob=0.05,
+        )
+
+        self.assertTrue(_should_drop_asr_result(window, result))
+
+    def test_drops_subtitle_credit_wording_variant_when_loud(self):
+        # A variant org name / wording that is not a literal blocklist fragment.
+        window = AudioWindow(
+            index=0,
+            start_seconds=0.0,
+            end_seconds=1.0,
+            samples=np.ones(16000, dtype=np.float32) * 0.2,
+            rms=0.2,
+            is_speech=True,
+        )
+        result = ASRResult(
+            text="字幕提供由 華納 社群提供的字",
+            language="zh",
+            duration_ms=1,
+            backend="test",
+            device="cpu",
+            no_speech_prob=0.05,
+        )
+
+        self.assertTrue(_should_drop_asr_result(window, result))
+
     def test_keeps_normal_speech(self):
         window = AudioWindow(
             index=0,

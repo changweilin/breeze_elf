@@ -5,6 +5,7 @@ import base64
 import binascii
 import logging
 import math
+import re
 import threading
 import time
 from collections.abc import Awaitable, Callable
@@ -89,13 +90,25 @@ ROOT_STATIC_MEDIA_TYPES = {
     "icon-512.png": "image/png",
 }
 
-COMMON_SILENCE_HALLUCINATION_FRAGMENTS = (
-    "請不吝點贊訂閱轉發打賞支持明鏡與點點欄目",
-    "請不吝點讚訂閱轉發打賞支持明鏡與點點欄目",
-    "字幕由 Amara.org 社群提供",
-    "由 Amara.org 社群提供的字幕",
-    "歡迎訂閱按讚分享",
+# Pure subtitle-credit / sponsor boilerplate Whisper emits on *non-speech* (music,
+# singing, silence). No real speaker utters these, so they are dropped regardless of
+# loudness — this is what catches loud 歌詞, which the energy gate (built for quiet
+# silence) structurally cannot: singing is loud and the model is confident, so
+# ``low_energy``/``likely_no_speech`` never fire. Matched as regex against the
+# punctuation-stripped, casefolded form (see ``_normalize_hallucination_text``) so
+# org-name / wording variants ("字幕提供由 XXX 社群提供的字") still hit.
+HALLUCINATION_CREDIT_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"字幕.{0,20}社群提供",
+        r"社群提供.{0,8}字幕",
+        r"請不吝.{0,24}打賞",
+        r"明鏡與點點",
+    )
 )
+# Softer channel-outro phrases a real speaker *might* actually say; only dropped when
+# the audio is also quiet / no-speech so genuine speech is never lost.
+COMMON_SILENCE_HALLUCINATION_FRAGMENTS = ("歡迎訂閱按讚分享",)
 HALLUCINATION_TEXT_TRANSLATION = str.maketrans({"讚": "贊", "赞": "贊"})
 _JIANPU_GLIDE_UP = "↗"
 _JIANPU_GLIDE_DOWN = "↘"
@@ -870,6 +883,10 @@ async def transcribe_file_endpoint(payload: FileTranscribeRequest) -> JSONRespon
         display_text = _apply_glossary(segment.text, replacements)
         if not display_text.strip():
             continue
+        # A loaded song file hallucinates the same subtitle-credit lines per segment;
+        # the streaming gate never runs here, so filter them out by text alone.
+        if _is_credit_hallucination(display_text):
+            continue
         translation = ""
         if want_translate:
             translation = await loop.run_in_executor(
@@ -1625,6 +1642,11 @@ def _build_segmenter(sample_rate: int) -> AudioWindowBuffer | AudioUtteranceBuff
 
 
 def _should_drop_asr_result(window: AudioWindow, result: ASRResult) -> bool:
+    # Subtitle-credit / sponsor boilerplate is never real speech, so drop it whatever
+    # the energy. This is the loud-歌詞 case: singing produces these at high volume and
+    # high confidence, where the quiet-silence gate below can never fire.
+    if _is_credit_hallucination(result.text):
+        return True
     # Note (silero VAD): the silero detector can onset a segment on quiet far-field
     # voice whose whole-window RMS is below asr_hallucination_rms_threshold, so
     # ``low_energy`` is True for windows the RMS segmenter would never have emitted.
@@ -1960,6 +1982,16 @@ def _round_intensity(value: float | None) -> float:
     if value is None:
         return 0.0
     return round(float(value), 4)
+
+
+def _is_credit_hallucination(text: str) -> bool:
+    """True when the text is subtitle-credit / sponsor boilerplate. Dropped regardless
+    of energy (unlike the silence fragments) because loud singing emits these at high
+    volume + high confidence, where the energy / no_speech gate can never fire."""
+    normalized = _normalize_hallucination_text(text)
+    if not normalized:
+        return False
+    return any(pattern.search(normalized) for pattern in HALLUCINATION_CREDIT_PATTERNS)
 
 
 def _is_common_silence_hallucination(text: str) -> bool:
