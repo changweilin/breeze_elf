@@ -60,6 +60,11 @@ class Settings:
     vad_detector: str = "rms"
     vad_speech_threshold: float = 0.5
     vad_neg_threshold: float = 0.35
+    # RMS VAD attack/release hysteresis: a segment ends only once RMS falls below
+    # ``rms_threshold * vad_rms_release_ratio`` (onset still uses the full threshold).
+    # < 1.0 keeps a decaying 句尾 syllable attached to its utterance; 1.0 restores the
+    # old single-threshold gate. Clamped to [0, 1].
+    vad_rms_release_ratio: float = 0.5
     vad_silero_model_path: str = ""
     vad_frame_ms: int = 100
     vad_pre_roll_ms: int = 300
@@ -75,18 +80,79 @@ class Settings:
     # floor (an unvoiced consonant / breath) — kept while RMS stays above
     # ``noise_floor * char_voiceless_margin`` — so 基頻/簡譜 cover the whole 字.
     char_voiceless_margin: float = 1.6
+    # 基頻分析 post-processing: drop erratic f0 blobs that never settle and have no
+    # 平穩音高 (stable pitch) on either side — pitch-detection artifacts, not singing.
+    # Conservative by design (滑音/抖音 and other techniques are preserved); ``0``
+    # keeps the raw per-bin YIN track for the 基頻 curve.
+    f0_clean: bool = True
     language: str = "zh"
-    asr_model: str = "medium"
+    # Default recognition model. ``breeze`` is a preset sentinel resolved to the local
+    # CTranslate2 dir in ``asr_breeze_model`` by ``build_asr_from_env`` (falls back to
+    # Whisper ``medium`` when that dir is absent, so a fresh clone still boots). Any
+    # other value is passed straight to faster-whisper (a size, HF id, or CT2 path).
+    asr_model: str = "breeze"
     asr_device: str = "auto"
     asr_provider: str = "faster-whisper"
+    # Local CTranslate2 directory the "breeze" model preset resolves to (the model
+    # switcher in 模型與演算法). Offline-first — faster-whisper can only load a CT2
+    # model, so this points at a converted Breeze ASR dir on disk, not a HF id.
+    asr_breeze_model: str = "models/breeze-asr-25-ct2"
     asr_load_on_startup: bool = True
     asr_concurrency: int = 1
     asr_no_speech_prob_threshold: float = 0.6
     asr_hallucination_rms_threshold: float = 0.02
+    # Cross-segment context: how many trailing characters of the committed
+    # transcript to feed the next utterance's Whisper ``initial_prompt`` (alongside
+    # the 慣用詞庫) so proper nouns stay consistent across segments. ``0`` (default)
+    # keeps the current stateless behaviour — opt-in because seeding recent text can
+    # coax Whisper into echoing it on a short/quiet utterance. Bounded to cap prompt
+    # growth; only applies when a language is fixed (free-detect drops the prompt).
+    asr_context_chars: int = 0
+    # Loaded-file transcription via faster-whisper's BatchedInferencePipeline
+    # (3-4x throughput on long files by batching the whole recording's VAD chunks).
+    # ``0`` (default) keeps the per-utterance streaming file path; > 0 enables the
+    # POST /api/transcribe/file batched endpoint and is the batch_size. Live mic
+    # streaming is never affected. Bounded to keep GPU memory sane.
+    asr_file_batch_size: int = 0
+    # Upper bound (decoded bytes) on a base64 PCM upload to the whole-file endpoints
+    # (/api/transcribe/file, /api/enhance/separate), checked before decoding so an
+    # oversized body can't OOM the host. Default ~256 MB ≈ 2.2 h of 16 kHz mono;
+    # ``0`` disables the cap. This is a local single-user app, so the bound is loose.
+    max_audio_upload_bytes: int = 256_000_000
     stop_drain_timeout_seconds: float = 60.0
     remote_storage_dir: str = "remote_transcripts"
     search_enabled: bool = True
     search_max_results: int = 50
+    # Post-meeting summary. ``extractive`` is stdlib-only (no model/VRAM/network);
+    # ``ollama`` calls a LOCAL Ollama daemon (transcript stays on the box) and
+    # degrades to extractive on failure; ``off`` disables it. No cloud path exists.
+    summary_provider: str = "extractive"
+    summary_model: str = "qwen3:4b-instruct"
+    summary_ollama_url: str = "http://127.0.0.1:11434"
+    summary_timeout_seconds: float = 60.0
+    summary_max_chars: int = 8000
+    summary_max_sentences: int = 5
+    # Post-recognition translation. ``off`` (default) keeps the base install free of
+    # sentencepiece; ``nllb`` runs NLLB-200 on the ctranslate2 runtime faster-whisper
+    # already ships (no torch). NLLB-200 is CC-BY-NC-4.0 (non-commercial) → opt-in.
+    # The model loads from a LOCAL dir only (offline-first — never downloaded on demand).
+    translate_provider: str = "off"
+    translate_target: str = "zh"
+    translate_model: str = "models/nllb-200-distilled-600M-ct2"
+    translate_spm: str = ""
+    translate_device: str = "auto"
+    translate_compute_type: str = "auto"
+    translate_beam: int = 1
+    # Anonymous in-session speaker diarization. ``off`` (default) means no speaker
+    # labels; ``on`` needs a local ONNX speaker-embedding model + onnxruntime (the
+    # runtime faster-whisper already bundles), otherwise it degrades to no-op.
+    diarize_enabled: bool = False
+    diarize_model: str = "models/speaker_embedding.onnx"
+    diarize_max_speakers: int = 6
+    diarize_threshold: float = 0.75
+    diarize_min_duration: float = 0.4
+    diarize_device: str = "cpu"
+    diarize_n_mels: int = 80
     voice_provider: str = "mock"
     voice_storage_dir: str = "voices"
     voice_output_dir: str = "voice_outputs"
@@ -138,6 +204,7 @@ def get_settings() -> Settings:
         vad_detector=vad_detector,
         vad_speech_threshold=vad_speech_threshold,
         vad_neg_threshold=vad_neg_threshold,
+        vad_rms_release_ratio=min(1.0, max(0.0, _float_env("BREEZE_VAD_RMS_RELEASE_RATIO", 0.5))),
         vad_silero_model_path=os.getenv("BREEZE_VAD_SILERO_MODEL", ""),
         vad_frame_ms=max(1, _int_env("BREEZE_VAD_FRAME_MS", 100)),
         vad_pre_roll_ms=max(0, _int_env("BREEZE_VAD_PRE_ROLL_MS", 300)),
@@ -146,18 +213,49 @@ def get_settings() -> Settings:
         char_attack_ms=max(0, _int_env("BREEZE_CHAR_ATTACK_MS", 40)),
         char_release_ms=max(0, _int_env("BREEZE_CHAR_RELEASE_MS", 90)),
         char_voiceless_margin=max(1.0, _float_env("BREEZE_CHAR_VOICELESS_MARGIN", 1.6)),
+        f0_clean=_bool_env("BREEZE_F0_CLEAN", True),
         language=os.getenv("BREEZE_LANGUAGE", "zh"),
-        asr_model=os.getenv("BREEZE_ASR_MODEL", "medium"),
+        asr_model=os.getenv("BREEZE_ASR_MODEL", "breeze"),
         asr_device=os.getenv("BREEZE_ASR_DEVICE", "auto"),
         asr_provider=os.getenv("BREEZE_ASR_PROVIDER", "faster-whisper"),
+        asr_breeze_model=os.getenv("BREEZE_ASR_BREEZE_MODEL", "models/breeze-asr-25-ct2"),
         asr_load_on_startup=_bool_env("BREEZE_ASR_LOAD_ON_STARTUP", True),
         asr_concurrency=max(1, _int_env("BREEZE_ASR_CONCURRENCY", 1)),
         asr_no_speech_prob_threshold=_float_env("BREEZE_ASR_NO_SPEECH_PROB_THRESHOLD", 0.6),
         asr_hallucination_rms_threshold=_float_env("BREEZE_ASR_HALLUCINATION_RMS_THRESHOLD", 0.02),
+        asr_context_chars=min(2000, max(0, _int_env("BREEZE_ASR_CONTEXT_CHARS", 0))),
+        asr_file_batch_size=min(32, max(0, _int_env("BREEZE_ASR_FILE_BATCH_SIZE", 0))),
+        max_audio_upload_bytes=max(0, _int_env("BREEZE_MAX_AUDIO_UPLOAD_BYTES", 256_000_000)),
         stop_drain_timeout_seconds=max(0.1, _float_env("BREEZE_STOP_DRAIN_TIMEOUT_SECONDS", 60.0)),
         remote_storage_dir=os.getenv("BREEZE_REMOTE_STORAGE_DIR", "remote_transcripts"),
         search_enabled=_bool_env("BREEZE_SEARCH_ENABLED", True),
         search_max_results=max(1, _int_env("BREEZE_SEARCH_MAX_RESULTS", 50)),
+        summary_provider=_choice_env(
+            "BREEZE_SUMMARY_PROVIDER", "extractive", {"off", "extractive", "ollama"}
+        ),
+        summary_model=os.getenv("BREEZE_SUMMARY_MODEL", "qwen3:4b-instruct"),
+        summary_ollama_url=os.getenv("BREEZE_SUMMARY_OLLAMA_URL", "http://127.0.0.1:11434"),
+        summary_timeout_seconds=max(1.0, _float_env("BREEZE_SUMMARY_TIMEOUT_SECONDS", 60.0)),
+        summary_max_chars=max(200, _int_env("BREEZE_SUMMARY_MAX_CHARS", 8000)),
+        summary_max_sentences=max(1, _int_env("BREEZE_SUMMARY_MAX_SENTENCES", 5)),
+        translate_provider=_choice_env("BREEZE_TRANSLATE", "off", {"off", "nllb"}),
+        translate_target=os.getenv("BREEZE_TRANSLATE_TARGET", "zh"),
+        translate_model=os.getenv(
+            "BREEZE_TRANSLATE_MODEL", "models/nllb-200-distilled-600M-ct2"
+        ),
+        translate_spm=os.getenv("BREEZE_TRANSLATE_SPM", ""),
+        translate_device=_choice_env(
+            "BREEZE_TRANSLATE_DEVICE", "auto", {"auto", "cuda", "cpu"}
+        ),
+        translate_compute_type=os.getenv("BREEZE_TRANSLATE_COMPUTE_TYPE", "auto"),
+        translate_beam=max(1, _int_env("BREEZE_TRANSLATE_BEAM", 1)),
+        diarize_enabled=_bool_env("BREEZE_DIARIZE", False),
+        diarize_model=os.getenv("BREEZE_DIARIZE_MODEL", "models/speaker_embedding.onnx"),
+        diarize_max_speakers=max(1, _int_env("BREEZE_DIARIZE_MAX_SPEAKERS", 6)),
+        diarize_threshold=min(1.0, max(0.0, _float_env("BREEZE_DIARIZE_THRESHOLD", 0.75))),
+        diarize_min_duration=max(0.0, _float_env("BREEZE_DIARIZE_MIN_DURATION", 0.4)),
+        diarize_device=_choice_env("BREEZE_DIARIZE_DEVICE", "cpu", {"cpu", "cuda"}),
+        diarize_n_mels=max(8, _int_env("BREEZE_DIARIZE_N_MELS", 80)),
         voice_provider=_choice_env(
             "BREEZE_VOICE_PROVIDER",
             "mock",

@@ -54,6 +54,17 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(settings.audio_preprocess, "natural")
 
+    def test_asr_context_chars_defaults_off_and_clamps(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("BREEZE_ASR_CONTEXT_CHARS", None)
+            self.assertEqual(get_settings().asr_context_chars, 0)
+        with patch.dict(os.environ, {"BREEZE_ASR_CONTEXT_CHARS": "120"}):
+            self.assertEqual(get_settings().asr_context_chars, 120)
+        with patch.dict(os.environ, {"BREEZE_ASR_CONTEXT_CHARS": "-5"}):
+            self.assertEqual(get_settings().asr_context_chars, 0)
+        with patch.dict(os.environ, {"BREEZE_ASR_CONTEXT_CHARS": "99999"}):
+            self.assertEqual(get_settings().asr_context_chars, 2000)
+
 
 if __name__ == "__main__":
     unittest.main()

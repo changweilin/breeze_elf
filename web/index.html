@@ -264,6 +264,14 @@
         min-height: 42px;
       }
 
+      /* An enabled toggle (翻譯) gets the live accent so its on/off state is obvious.
+         Unscoped so it also applies once 翻譯 lives inside the settings menu. */
+      .iconbtn.on {
+        border-color: var(--live);
+        color: var(--live);
+        background: color-mix(in srgb, var(--live) 15%, transparent);
+      }
+
       button {
         min-width: 0;
         min-height: 48px;
@@ -385,6 +393,77 @@
         place-items: center;
         font-size: 1.08rem;
         line-height: 1;
+      }
+
+      /* 標題列右側:主題切換 + 設定齒輪並排。 */
+      .header-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex: 0 0 auto;
+      }
+
+      /* 齒輪鍵沿用主題鍵的尺寸,但自成一類:.theme-toggle 是 JS 綁定的鉤子
+         (applyTheme 會覆寫其 textContent),不能讓它動到齒輪的 SVG。 */
+      .settings-btn {
+        width: 42px;
+        min-width: 42px;
+        min-height: 42px;
+        padding: 0;
+        display: inline-grid;
+        place-items: center;
+      }
+
+      .settings-btn .ic {
+        width: 21px;
+        height: 21px;
+      }
+
+      /* 齒輪彈出選單:錨定在齒輪鍵下方、靠右對齊。 */
+      .settings-menu {
+        position: relative;
+        flex: 0 0 auto;
+      }
+
+      .settings-panel {
+        position: absolute;
+        top: calc(100% + 6px);
+        right: 0;
+        z-index: 30;
+        min-width: 13rem;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        padding: 6px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--panel);
+        box-shadow: 0 12px 32px var(--shadow);
+      }
+
+      .settings-panel[hidden] {
+        display: none;
+      }
+
+      /* 每列 = 原本的圖示鍵 + 文字說明;整列可點,點文字會轉觸發按鈕。 */
+      .settings-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 2px 10px 2px 2px;
+        border-radius: 8px;
+        cursor: pointer;
+      }
+
+      .settings-row:hover {
+        background: var(--button-hover);
+      }
+
+      .settings-row-label {
+        font-size: 0.9rem;
+        font-weight: 700;
+        color: var(--ink);
+        white-space: nowrap;
       }
 
       .transcript {
@@ -594,6 +673,34 @@
       .pitch-value {
         color: var(--warn);
         font-weight: 780;
+      }
+
+      /* 語者分離:匿名說話者色票(白字配彩底,顏色由 --speaker-color 逐段設定)。 */
+      .speaker-chip {
+        display: inline-flex;
+        align-items: center;
+        padding: 1px 8px;
+        border-radius: 999px;
+        background: var(--speaker-color, var(--accent));
+        color: #fff;
+        font-size: 0.72rem;
+        font-weight: 760;
+        white-space: nowrap;
+      }
+
+      /* 翻譯雙語堆疊行:掛在原文之下,較淡、可換行。 */
+      .entry-translation {
+        display: block;
+        margin-top: 4px;
+        color: var(--muted);
+        font-size: 0.94rem;
+        line-height: 1.45;
+        overflow-wrap: anywhere;
+      }
+
+      .entry-translation::before {
+        content: "↳ ";
+        opacity: 0.7;
       }
 
       .entry-chevron {
@@ -889,12 +996,23 @@
       /* 多檔案下載/儲存的勾選對話框 */
       dialog.pick-dialog {
         width: min(360px, 90vw);
+        /* Bound to the viewport so content never spills outside the rounded box.
+           Without this, the UA caps a modal at 100vh but overflow:visible lets the
+           form (含關閉鈕)溢出到框外、疊在 backdrop 上 — 手機橫向/鍵盤開啟時的「混疊」主因。 */
+        max-height: 88svh;
+        overflow: hidden;
         padding: 0;
         border: 1px solid var(--line);
         border-radius: 12px;
         background: var(--panel);
         color: var(--ink);
         box-shadow: 0 18px 48px var(--shadow);
+      }
+
+      /* [open] 限定:裸 display:flex 會蓋掉 UA 對關閉狀態的 display:none(同特異度、作者勝),導致關閉的對話框外洩。 */
+      dialog.pick-dialog[open] {
+        display: flex;
+        flex-direction: column;
       }
 
       dialog.pick-dialog::backdrop {
@@ -907,6 +1025,34 @@
         gap: 14px;
         padding: 18px;
         margin: 0;
+        min-height: 0;
+      }
+
+      /* 固定的標題/輸入/說明/動作列不壓縮;唯一的捲動區(清單/結果/摘要)吃掉剩餘空間並自行捲動。 */
+      .pick-form > * {
+        flex-shrink: 0;
+      }
+
+      .pick-list,
+      .lang-grid,
+      .gloss-list,
+      .search-results,
+      .summary-body {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+      }
+
+      /* Items inside the flex-column scroll lists must NOT shrink: a .search-result
+         is a <button>, and the global button{min-height} gives it an explicit floor,
+         so flex-shrink:1 would compress each row to ~46px and its taller content would
+         spill out over the neighbouring rows(即先前的「混疊在一起」). Pin them to
+         content height and let the list scroll instead. */
+      .pick-list > *,
+      .gloss-list > *,
+      .search-results > * {
+        flex-shrink: 0;
       }
 
       .pick-title {
@@ -993,7 +1139,61 @@
         color: var(--muted, #888);
         white-space: nowrap;
         overflow: hidden;
+      }
+
+      /* 內容沒超出時維持靜止並以 … 收尾;超出時由 JS 加上 .marquee 啟動跑馬燈。 */
+      .search-result-snippet .marquee-inner {
+        display: inline-block;
+        max-width: 100%;
+        overflow: hidden;
         text-overflow: ellipsis;
+        vertical-align: bottom;
+        will-change: transform;
+      }
+
+      .search-result-snippet.marquee .marquee-inner {
+        max-width: none;
+        overflow: visible;
+        /* 位移量(負值)與時間由 JS 依溢出長度設定,速度才會一致。 */
+        animation: snippet-marquee var(--marquee-dur, 6s) ease-in-out infinite alternate;
+      }
+
+      @keyframes snippet-marquee {
+        0%, 10% {
+          transform: translateX(0);
+        }
+        90%, 100% {
+          transform: translateX(var(--marquee-shift, 0));
+        }
+      }
+
+      /* 尊重系統的減少動態偏好:退回靜態 … 截斷。 */
+      @media (prefers-reduced-motion: reduce) {
+        .search-result-snippet.marquee .marquee-inner {
+          max-width: 100%;
+          overflow: hidden;
+          animation: none;
+        }
+      }
+
+      #summary-dialog {
+        width: min(520px, 92vw);
+      }
+
+      .summary-body {
+        min-height: 3.5rem;
+        max-height: 56vh;
+        overflow-y: auto;
+        padding: 12px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        white-space: pre-wrap;
+        line-height: 1.6;
+        color: var(--ink);
+      }
+
+      .summary-body.loading {
+        color: var(--muted, #888);
       }
 
       /* 情境 select sits inline in the controls row and stretches to fill the gap
@@ -1213,6 +1413,66 @@
         overflow-wrap: anywhere;
       }
 
+      /* 辨識模型切換:置於「模型與演算法」最上方,可熱切換 breeze / whisper。 */
+      .model-switch .model-switch-hint {
+        margin: 0 0 10px;
+        color: var(--muted);
+        font-size: 0.82rem;
+        line-height: 1.5;
+      }
+
+      .model-switch-options {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .model-switch-option {
+        flex: 1 1 auto;
+        min-width: 6rem;
+        min-height: 42px;
+        padding: 0 12px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        color: var(--ink);
+        font: inherit;
+        font-weight: 720;
+        font-size: 0.86rem;
+        cursor: pointer;
+      }
+
+      .model-switch-option[aria-pressed="true"] {
+        border-color: var(--live);
+        color: var(--live);
+        background: color-mix(in srgb, var(--live) 15%, transparent);
+      }
+
+      .model-switch-option:disabled {
+        cursor: not-allowed;
+        opacity: 0.55;
+      }
+
+      .model-switch-progress {
+        margin-top: 12px;
+        display: grid;
+        gap: 6px;
+      }
+
+      .model-switch-progress[hidden] {
+        display: none;
+      }
+
+      .model-switch-status {
+        margin: 10px 0 0;
+        font-size: 0.82rem;
+        color: var(--muted);
+      }
+
+      .model-switch-status.error {
+        color: var(--danger);
+      }
+
       .about-me-name {
         margin: 0 0 8px;
         font-size: 1rem;
@@ -1278,7 +1538,7 @@
       }
 
       .voice-page {
-        width: min(720px, 100%);
+        width: min(900px, 100%);
         max-width: 100%;
         height: 100%;
         margin: 0 auto;
@@ -1290,7 +1550,7 @@
         display: flex;
         flex-direction: column;
         gap: 14px;
-        padding: max(18px, env(safe-area-inset-top)) 16px 18px;
+        padding: max(18px, env(safe-area-inset-top)) 16px 14px;
       }
 
       /* The voice status echoes filenames and long messages — let it wrap instead
@@ -1439,6 +1699,10 @@
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 8px;
+      }
+      /* 上傳 / 執行 / 清理 三顆等寬左右並排。 */
+      .voice-source.three {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
       }
 
       /* 執行(念出來 / 唱出來)做成圖示鍵,與上傳鍵在同列右邊等寬並列。 */
@@ -1667,6 +1931,16 @@
         white-space: nowrap;
       }
 
+      #cv-result-wrap .voice-player,
+      #tts-result-wrap .voice-player,
+      #sing-result-wrap .voice-player,
+      #pitch-result-wrap .voice-player {
+        border: none;
+        border-radius: 0;
+        background: transparent;
+        padding: 8px 0;
+      }
+
       .player-menu {
         position: relative;
         flex: 0 0 auto;
@@ -1698,6 +1972,14 @@
 
       .player-menu-list[hidden] {
         display: none;
+      }
+
+      /* 錄音播放器的 ⋮ 選單位在畫面下緣(狀態列/頁籤之上),往下展開會超出邊界點不到
+         → 改往上展開;上方是逐字稿區,空間充足。 */
+      #audio-panel .player-menu-list,
+      #compare-panel .player-menu-list {
+        top: auto;
+        bottom: calc(100% + 4px);
       }
 
       .player-menu-list button {
@@ -1871,7 +2153,7 @@
 
       .voice-item-actions {
         display: inline-flex;
-        gap: 4px;
+        gap: 3px;
       }
 
       .icon-btn {
@@ -1883,6 +2165,15 @@
         place-items: center;
         font-size: 1rem;
         border-radius: 8px;
+      }
+
+      /* 聲音庫清單的按鍵縮小,把寬度讓給檔名。 */
+      .voice-item-actions .icon-btn {
+        width: 30px;
+        min-width: 30px;
+        min-height: 30px;
+        font-size: 0.86rem;
+        border-radius: 7px;
       }
 
       .icon-btn.star.on {
@@ -2127,13 +2418,14 @@
       @media (max-width: 520px) {
         /* Mobile is height-constrained: trim the fixed chrome (gaps, paddings, header,
            control/action rows) so the transcript — the data — keeps the room. */
-        .shell {
+        .shell,
+        .voice-page {
           gap: 8px;
           padding: max(12px, env(safe-area-inset-top)) 12px 8px;
         }
 
-        /* 3 items (載入 / 開始 / 清除) fill the base 3-col grid in a single row now that
-           情境 moved to the settings row. */
+        /* 收音鍵那列只剩 載入 / 開始 / 清除 + 情境 select(語言/翻譯/詞庫/搜尋已移入齒輪選單),
+           在手機端維持單排。 */
         .controls {
           gap: 8px;
         }
@@ -2194,7 +2486,8 @@
           padding-inline: 8px;
         }
 
-        .theme-toggle {
+        .theme-toggle,
+        .settings-btn {
           width: 38px;
           min-width: 38px;
         }
@@ -2223,6 +2516,9 @@
         <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/></symbol>
         <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
         <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></symbol>
+        <symbol id="i-summary" viewBox="0 0 24 24"><path d="M5 5h14M5 10h14M5 15h9M5 20h6"/></symbol>
+        <symbol id="i-translate" viewBox="0 0 24 24"><path d="M3 5h7"/><path d="M6.5 5v1.5c0 3-1.5 5.2-3.5 6.5"/><path d="M4 9.5c0 2 1.8 3.6 4.5 4.3"/><path d="M12.5 21l3.5-9 3.5 9"/><path d="M13.8 18h4.4"/></symbol>
+        <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 13a1.65 1.65 0 0 0 .33 1.82l.05.05a2 2 0 1 1-2.83 2.83l-.05-.05a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.05.05a2 2 0 1 1-2.83-2.83l.05-.05a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.05-.05a2 2 0 1 1 2.83-2.83l.05.05a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.05-.05a2 2 0 1 1 2.83 2.83l-.05.05a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></symbol>
       </defs>
     </svg>
     <div class="pages">
@@ -2230,9 +2526,33 @@
       <header>
         <div class="brand">
           <img class="brand-mark" src="./favicon.svg" width="42" height="42" alt="" />
-          <h1>Breeze Elf</h1>
+          <h1>聲音工作室</h1>
         </div>
-        <button id="theme" class="theme-toggle" type="button" aria-label="切換深色模式" aria-pressed="false" title="切換深色模式">☾</button>
+        <div class="header-actions">
+          <!-- 非核心工具(語言/翻譯/慣用詞庫/搜尋)收進齒輪選單,讓收音鍵那一列在手機端維持一排。 -->
+          <div class="settings-menu">
+            <button id="settings" class="settings-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="settings-panel" aria-label="更多設定與工具" title="更多設定與工具"><svg class="ic" aria-hidden="true"><use href="#i-gear"></use></svg></button>
+            <div id="settings-panel" class="settings-panel" role="menu" hidden>
+              <div class="settings-row" role="menuitem">
+                <button id="lang" class="iconbtn" type="button" aria-haspopup="dialog" aria-controls="lang-dialog" aria-label="設定辨識語言" title="設定辨識語言(最多 4 種,或自由偵測)"><svg class="ic" aria-hidden="true"><use href="#i-globe"></use></svg></button>
+                <span class="settings-row-label">辨識語言</span>
+              </div>
+              <div class="settings-row" role="menuitem">
+                <button id="translate" class="iconbtn" type="button" aria-pressed="false" aria-label="翻譯成繁體中文" title="翻譯:辨識後把每段翻成繁體中文並雙語顯示(需伺服器啟用 NLLB 模型)"><svg class="ic" aria-hidden="true"><use href="#i-translate"></use></svg></button>
+                <span class="settings-row-label">翻譯(繁中)</span>
+              </div>
+              <div class="settings-row" role="menuitem">
+                <button id="glossary" class="iconbtn" type="button" aria-haspopup="dialog" aria-controls="glossary-dialog" aria-label="慣用詞庫" title="慣用詞庫:你在逐字稿改的字會被記住,調整之後的辨識"><svg class="ic" aria-hidden="true"><use href="#i-book"></use></svg></button>
+                <span class="settings-row-label">慣用詞庫</span>
+              </div>
+              <div class="settings-row" role="menuitem">
+                <button id="search" class="iconbtn" type="button" aria-haspopup="dialog" aria-controls="search-dialog" aria-label="搜尋逐字稿" title="搜尋已儲存的逐字稿"><svg class="ic" aria-hidden="true"><use href="#i-search"></use></svg></button>
+                <span class="settings-row-label">搜尋逐字稿</span>
+              </div>
+            </div>
+          </div>
+          <button id="theme" class="theme-toggle" type="button" aria-label="切換深色模式" aria-pressed="false" title="切換深色模式">☾</button>
+        </div>
       </header>
 
       <section class="controls" aria-label="controls">
@@ -2247,9 +2567,6 @@
             <option value="music">🎵 音樂(分離人聲)</option>
           </select>
         </label>
-        <button id="lang" class="iconbtn" type="button" aria-haspopup="dialog" aria-controls="lang-dialog" aria-label="設定辨識語言" title="設定辨識語言(最多 4 種,或自由偵測)"><svg class="ic" aria-hidden="true"><use href="#i-globe"></use></svg></button>
-        <button id="glossary" class="iconbtn" type="button" aria-haspopup="dialog" aria-controls="glossary-dialog" aria-label="慣用詞庫" title="慣用詞庫:你在逐字稿改的字會被記住,調整之後的辨識"><svg class="ic" aria-hidden="true"><use href="#i-book"></use></svg></button>
-        <button id="search" class="iconbtn" type="button" aria-haspopup="dialog" aria-controls="search-dialog" aria-label="搜尋逐字稿" title="搜尋已儲存的逐字稿"><svg class="ic" aria-hidden="true"><use href="#i-search"></use></svg></button>
       </section>
 
       <section class="transcript" aria-label="transcript">
@@ -2261,6 +2578,7 @@
           </div>
           <div class="bar-actions">
             <button id="analyze" class="mini iconbtn" type="button" disabled aria-label="後處理" title="後處理:用更精準的演算法重新計算每個字的音階與簡譜,並產生基頻分析(後續計算,有進度條)"><svg class="ic" aria-hidden="true"><use href="#i-wand"></use></svg></button>
+            <button id="summarize" class="mini iconbtn" type="button" disabled aria-label="摘要" title="摘要逐字稿重點"><svg class="ic" aria-hidden="true"><use href="#i-summary"></use></svg></button>
             <button id="copy" class="mini iconbtn" type="button" disabled aria-label="複製" title="複製逐字稿"><svg class="ic" aria-hidden="true"><use href="#i-copy"></use></svg></button>
             <button id="download" class="mini iconbtn" type="button" disabled aria-label="下載" title="下載逐字稿"><svg class="ic" aria-hidden="true"><use href="#i-download"></use></svg></button>
             <button id="save" class="mini iconbtn" type="button" disabled aria-label="雲端儲存" title="雲端儲存逐字稿"><svg class="ic" aria-hidden="true"><use href="#i-cloud"></use></svg></button>
@@ -2287,6 +2605,30 @@
           <div class="player-menu-list" role="menu" hidden>
             <button id="audio-download" type="button" role="menuitem" disabled>下載音檔</button>
             <button id="audio-save" type="button" role="menuitem" disabled>雲端儲存音檔</button>
+            <button id="audio-denoise" type="button" role="menuitem" disabled>去噪比較 (DeepFilter)</button>
+            <button id="audio-separate" type="button" role="menuitem" disabled>分離人聲比較 (Demucs)</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 音檔類模型(Demucs 人聲分離 / DeepFilterNet3 去噪)載入與執行進度。單次 POST
+           無伺服器端進度,故用 indeterminate + 標明正在載入哪個模型。 -->
+      <div id="audio-model-progress" class="voice-progress" hidden aria-live="polite">
+        <div class="vp-head">
+          <span id="audio-model-progress-label">載入模型中</span>
+        </div>
+        <div class="progress-track">
+          <div class="progress-fill indeterminate"></div>
+        </div>
+      </div>
+
+      <section id="compare-panel" class="recording" aria-label="降噪比較" hidden>
+        <span class="voice-player-title" id="compare-title">去噪</span>
+        <audio id="compare-audio" controls controlsList="nodownload noplaybackrate" preload="metadata"></audio>
+        <div class="player-menu">
+          <button class="icon-btn player-menu-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-label="降噪音檔功能選單" title="功能選單">⋮</button>
+          <div class="player-menu-list" role="menu" hidden>
+            <button id="compare-download" type="button" role="menuitem">下載此音檔</button>
           </div>
         </div>
       </section>
@@ -2305,7 +2647,7 @@
       <header>
         <div class="brand">
           <img class="brand-mark" src="./favicon.svg" width="42" height="42" alt="" />
-          <h1>變聲工作室</h1>
+          <h1>聲音工作室</h1>
         </div>
         <button class="theme-toggle" type="button" aria-label="切換深色模式" aria-pressed="false" title="切換深色模式">☾</button>
       </header>
@@ -2325,7 +2667,7 @@
           <h2>聲音庫</h2>
           <span id="voice-engine-tag" class="voice-tag">—</span>
         </div>
-        <p class="voice-hint">
+        <p class="voice-hint" hidden>
           目前目標聲音:<strong id="voice-target-name">尚未選擇</strong>
         </p>
         <div class="voice-source">
@@ -2333,7 +2675,6 @@
           <button id="vc-upload" type="button" class="btniconlabel"><svg class="ic" aria-hidden="true"><use href="#i-upload"></use></svg><span class="btn-label">上傳音檔</span></button>
           <input id="vc-file" class="visually-hidden" type="file" accept="audio/*" />
         </div>
-        <p class="voice-hint voice-hint-sub">錄製或上傳後會自動建立聲紋,並設為目標聲音;在清單中點名稱可改名、☆ 設為最愛。</p>
         <p id="voice-empty" class="voice-hint" hidden>還沒有任何聲音。先錄一段或上傳一個音檔,系統會自動建立聲紋。</p>
         <ul id="voice-list" class="voice-list"></ul>
       </section>
@@ -2351,14 +2692,15 @@
           <button class="voice-desc-toggle" type="button" aria-expanded="false" aria-label="顯示說明" title="顯示說明"><svg class="ic" aria-hidden="true"><use href="#i-info"></use></svg></button>
         </div>
         <p class="voice-hint voice-desc" hidden>錄一段或上傳你的聲音,系統會自動用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」重新詮釋。</p>
-        <div class="voice-source">
-          <button id="cv-record" type="button" class="primary btniconlabel" data-idle-label="錄音並轉換"><svg class="ic" aria-hidden="true"><use href="#i-mic"></use></svg><span class="btn-label">錄音並轉換</span></button>
-          <button id="cv-upload" type="button" class="btniconlabel"><svg class="ic" aria-hidden="true"><use href="#i-upload"></use></svg><span class="btn-label">上傳並轉換</span></button>
+        <div class="voice-source three">
+          <button id="cv-upload" type="button" class="btniconlabel" title="上傳音檔並轉換" aria-label="上傳音檔並轉換 (.wav)"><svg class="ic" aria-hidden="true"><use href="#i-load"></use></svg><span class="btn-label">.wav</span></button>
+          <button id="cv-record" type="button" class="primary icon-run" data-idle-label="錄音並轉換" title="錄音並轉換" aria-label="錄音並轉換"><svg class="ic" aria-hidden="true"><use href="#i-mic"></use></svg></button>
+          <button id="cv-clear" type="button" class="icon-run" title="清理" aria-label="清理"><svg class="ic" aria-hidden="true"><use href="#i-trash"></use></svg></button>
           <input id="cv-file" class="visually-hidden" type="file" accept="audio/*" />
         </div>
         <div id="cv-result-wrap" class="voice-result" hidden>
           <div class="voice-player">
-            <span class="voice-player-title">原始音檔</span>
+            <span class="voice-player-title">原始</span>
             <audio id="cv-source" class="voice-audio" controls controlsList="nodownload noplaybackrate" preload="metadata"></audio>
             <div class="player-menu">
               <button class="icon-btn player-menu-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-label="原始音檔功能選單" title="功能選單">⋮</button>
@@ -2369,7 +2711,7 @@
             </div>
           </div>
           <div class="voice-player">
-            <span class="voice-player-title">轉換音檔</span>
+            <span class="voice-player-title">轉換</span>
             <audio id="cv-result" class="voice-audio" controls controlsList="nodownload noplaybackrate" preload="metadata"></audio>
             <div class="player-menu">
               <button class="icon-btn player-menu-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-label="轉換音檔功能選單" title="功能選單">⋮</button>
@@ -2390,9 +2732,10 @@
           <button class="voice-desc-toggle" type="button" aria-expanded="false" aria-label="顯示說明" title="顯示說明"><svg class="ic" aria-hidden="true"><use href="#i-info"></use></svg></button>
         </div>
         <p class="voice-hint voice-desc" hidden>輸入或上傳文字,用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」念出來。</p>
-        <div class="voice-source">
-          <button id="tts-upload" type="button" class="btniconlabel"><svg class="ic" aria-hidden="true"><use href="#i-upload"></use></svg><span class="btn-label">上傳文字檔</span></button>
+        <div class="voice-source three">
+          <button id="tts-upload" type="button" class="btniconlabel" title="上傳文字檔" aria-label="上傳文字檔 (.txt)"><svg class="ic" aria-hidden="true"><use href="#i-load"></use></svg><span class="btn-label">.txt</span></button>
           <button id="tts-run" type="button" class="primary icon-run" title="用目標聲音念出來" aria-label="用目標聲音念出來" disabled><svg class="ic" aria-hidden="true"><use href="#i-play"></use></svg></button>
+          <button id="tts-clear" type="button" class="icon-run" title="清理" aria-label="清理"><svg class="ic" aria-hidden="true"><use href="#i-trash"></use></svg></button>
         </div>
         <input id="tts-file" class="visually-hidden" type="file" accept=".txt,text/plain" />
         <div class="voice-params">
@@ -2406,7 +2749,7 @@
         <textarea id="tts-text" class="voice-textarea" maxlength="2000" rows="3" placeholder="輸入想說的話,或上傳文字檔…"></textarea>
         <div id="tts-result-wrap" class="voice-result" hidden>
           <div class="voice-player">
-            <span class="voice-player-title">結果</span>
+            <span class="voice-player-title">文字</span>
             <audio id="tts-result" class="voice-audio" controls controlsList="nodownload noplaybackrate" preload="metadata"></audio>
             <div class="player-menu">
               <button class="icon-btn player-menu-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-label="結果音檔功能選單" title="功能選單">⋮</button>
@@ -2427,9 +2770,10 @@
         <p class="voice-hint voice-desc" hidden>
           上傳逐字稿(含音高的 .json),或直接編輯下面的簡譜:<strong>一句一排</strong>,上排是<strong>簡譜</strong>(空格分隔,如 <code>1 1 5</code>;滑音用 <code>3↗5</code>;高八度加 <code>'</code>、低八度加 <code>,</code>),下排是<strong>文字</strong>(逐字),兩者可各自編輯,用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」唱出來。想依實測音高、抑揚頓挫演唱,請改用「基頻唱歌」。
         </p>
-        <div class="voice-source">
-          <button id="sing-upload" type="button" class="btniconlabel"><svg class="ic" aria-hidden="true"><use href="#i-upload"></use></svg><span class="btn-label">上傳逐字稿 JSON</span></button>
+        <div class="voice-source three">
+          <button id="sing-upload" type="button" class="btniconlabel" title="上傳逐字稿 JSON" aria-label="上傳逐字稿 (.json)"><svg class="ic" aria-hidden="true"><use href="#i-load"></use></svg><span class="btn-label">.json</span></button>
           <button id="sing-run" type="button" class="primary icon-run" title="用目標聲音唱出來" aria-label="用目標聲音唱出來" disabled><svg class="ic" aria-hidden="true"><use href="#i-play"></use></svg></button>
+          <button id="sing-clear" type="button" class="icon-run" title="清理" aria-label="清理"><svg class="ic" aria-hidden="true"><use href="#i-trash"></use></svg></button>
         </div>
         <input id="sing-file" class="visually-hidden" type="file" accept="application/json,.json" />
         <div class="voice-params">
@@ -2444,7 +2788,7 @@
         <button id="sing-add" type="button" class="mini btniconlabel"><svg class="ic" aria-hidden="true"><use href="#i-plus"></use></svg><span class="btn-label">新增一句</span></button>
         <div id="sing-result-wrap" class="voice-result" hidden>
           <div class="voice-player">
-            <span class="voice-player-title">結果</span>
+            <span class="voice-player-title">簡譜</span>
             <audio id="sing-result" class="voice-audio" controls controlsList="nodownload noplaybackrate" preload="metadata"></audio>
             <div class="player-menu">
               <button class="icon-btn player-menu-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-label="結果音檔功能選單" title="功能選單">⋮</button>
@@ -2465,9 +2809,10 @@
         <p class="voice-hint voice-desc" hidden>
           載入「基頻分析(.csv)」後,下方會按段落完整呈現<strong>基頻</strong>(青色音高曲線)、<strong>強度</strong>(橘色填色)與<strong>文字</strong>(上方標記)的對應關係,再用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」依實測音高、抑揚頓挫與氣音重新唱出來。CSV 由逐字稿頁「後處理」後匯出。
         </p>
-        <div class="voice-source">
-          <button id="pitch-analysis-upload" type="button" class="btniconlabel"><svg class="ic" aria-hidden="true"><use href="#i-load"></use></svg><span class="btn-label">載入基頻分析 (.csv)</span></button>
+        <div class="voice-source three">
+          <button id="pitch-analysis-upload" type="button" class="btniconlabel" title="載入基頻分析 CSV" aria-label="載入基頻分析 (.csv)"><svg class="ic" aria-hidden="true"><use href="#i-load"></use></svg><span class="btn-label">.csv</span></button>
           <button id="pitch-run" type="button" class="primary icon-run" title="用目標聲音唱出來" aria-label="用目標聲音唱出來" disabled><svg class="ic" aria-hidden="true"><use href="#i-play"></use></svg></button>
+          <button id="pitch-clear" type="button" class="icon-run" title="清理" aria-label="清理"><svg class="ic" aria-hidden="true"><use href="#i-trash"></use></svg></button>
         </div>
         <input id="pitch-analysis-file" class="visually-hidden" type="file" accept="text/csv,.csv" />
         <div class="voice-params solo">
@@ -2488,7 +2833,7 @@
         </div>
         <div id="pitch-result-wrap" class="voice-result" hidden>
           <div class="voice-player">
-            <span class="voice-player-title">結果</span>
+            <span class="voice-player-title">基頻</span>
             <audio id="pitch-result" class="voice-audio" controls controlsList="nodownload noplaybackrate" preload="metadata"></audio>
             <div class="player-menu">
               <button class="icon-btn player-menu-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-label="結果音檔功能選單" title="功能選單">⋮</button>
@@ -2537,6 +2882,19 @@
         <button class="about-close" type="submit" value="close" aria-label="關閉">✕</button>
       </form>
       <div class="about-body">
+        <div class="about-section model-switch">
+          <h3>辨識模型</h3>
+          <p class="model-switch-hint">切換即時語音辨識使用的模型。切換會在本機載入新模型(需數秒),辨識進行中無法切換。</p>
+          <div class="model-switch-options" id="asr-model-options" role="group" aria-label="辨識模型"></div>
+          <div class="model-switch-progress" id="asr-switch-progress" hidden>
+            <div class="vp-head">
+              <span id="asr-switch-label">載入中</span>
+              <span id="asr-switch-pct">0%</span>
+            </div>
+            <div class="progress-track"><div class="progress-fill" id="asr-switch-bar"></div></div>
+          </div>
+          <p class="model-switch-status" id="asr-switch-status" aria-live="polite"></p>
+        </div>
         <div class="about-section">
           <h3>語音辨識</h3>
           <p>
@@ -2649,7 +3007,19 @@
       </form>
     </dialog>
 
-    <script src="./app.js?v=31" type="module"></script>
-    <script src="./voice.js?v=26" type="module"></script>
+    <dialog id="summary-dialog" class="pick-dialog" aria-labelledby="summary-title">
+      <form method="dialog" class="pick-form">
+        <h2 id="summary-title" class="pick-title">逐字稿摘要</h2>
+        <p class="lang-hint" id="summary-hint">在本機擷取重點,不會上傳到雲端。</p>
+        <div class="summary-body" id="summary-body" aria-live="polite"></div>
+        <div class="pick-actions">
+          <button type="button" class="mini summary-copy" disabled>複製摘要</button>
+          <button type="button" class="primary summary-close">關閉</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="./app.js?v=40" type="module"></script>
+    <script src="./voice.js?v=29" type="module"></script>
   </body>
 </html>

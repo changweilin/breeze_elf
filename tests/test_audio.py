@@ -7,7 +7,9 @@ from breeze_elf.audio import (
     AudioWindowBuffer,
     analyze_segment,
     calculate_rms,
+    clean_f0_track,
     estimate_noise_floor,
+    _extend_attack_release,
     extend_voiced_span,
     hz_to_jianpu,
     jianpu_glide,
@@ -181,6 +183,158 @@ class AudioTests(unittest.TestCase):
         spectro = compute_spectrogram(np.zeros(8_000, dtype=np.float32), 16_000)
         self.assertIsNotNone(spectro)
         self.assertTrue(all(hz is None for hz in spectro["f0"]))
+
+    @staticmethod
+    def _uniform_times(f0, step=0.02):
+        return [round(i * step, 3) for i in range(len(f0))]
+
+    def test_clean_f0_drops_floating_erratic_blob(self):
+        # A voiced run that zig-zags by ~an octave with silence on both sides — a
+        # classic YIN artifact on a breath/noise burst — is removed entirely.
+        f0 = [None] * 3 + [200.0, 400.0, 205.0, 380.0, 210.0] + [None] * 3
+        cleaned = clean_f0_track(f0, self._uniform_times(f0))
+        self.assertTrue(all(hz is None for hz in cleaned[3:8]))
+        # The surrounding silence is untouched (still None), nothing else changed.
+        self.assertEqual(cleaned, [None] * len(f0))
+
+    def test_clean_f0_keeps_glide_between_two_notes(self):
+        # 平穩音高 → 滑音 → 平穩音高: the unstable middle is anchored both sides, kept.
+        f0 = [220.0] * 5 + [233.0, 247.0, 262.0, 277.0] + [294.0] * 5
+        cleaned = clean_f0_track(f0, self._uniform_times(f0))
+        self.assertEqual(cleaned, f0)
+
+    def test_clean_f0_keeps_isolated_monotonic_glide(self):
+        # A one-directional sweep with silence on both sides is still a 滑音, not
+        # noise — the smoothness guard keeps it even without a held neighbour.
+        f0 = [None] * 2 + [200.0, 220.0, 240.0, 262.0, 285.0, 311.0] + [None] * 2
+        cleaned = clean_f0_track(f0, self._uniform_times(f0))
+        self.assertEqual(cleaned, f0)
+
+    def test_clean_f0_keeps_isolated_vibrato(self):
+        # 抖音: ±1 semitone wobble (spread ~2 st) sits under the drastic gate, so an
+        # isolated vibrato note survives even with silence on both sides.
+        center = 262.0
+        wobble = [center * (2.0 ** (depth / 12.0)) for depth in (0, 1, 0, -1, 0, 1, 0, -1)]
+        f0 = [None] * 2 + wobble + [None] * 2
+        cleaned = clean_f0_track(f0, self._uniform_times(f0))
+        self.assertEqual(cleaned, f0)
+
+    def test_clean_f0_keeps_quiet_steady_note(self):
+        # A steady isolated note that merely misses the tight stability window must
+        # never be deleted: its narrow spread fails the drastic gate.
+        f0 = [None] * 2 + [262.0, 263.0, 261.5, 262.5, 262.0, 263.0] + [None] * 2
+        cleaned = clean_f0_track(f0, self._uniform_times(f0))
+        self.assertEqual(cleaned, f0)
+
+    def test_clean_f0_bridges_interior_octave_spike(self):
+        # A one-bin octave jump up-then-back-down in the middle of a held note is a
+        # YIN artifact: remove it and connect 前後 (both anchors are 262 Hz).
+        f0 = [262.0] * 5 + [524.0] + [262.0] * 5
+        cleaned = clean_f0_track(f0, self._uniform_times(f0))
+        self.assertEqual(cleaned, [262.0] * 11)
+
+    def test_clean_f0_bridges_interior_valley(self):
+        # 反方向: a drastic drop-then-return dip is bridged just the same.
+        f0 = [392.0] * 5 + [196.0] + [392.0] * 5
+        cleaned = clean_f0_track(f0, self._uniform_times(f0))
+        self.assertEqual(cleaned, [392.0] * 11)
+
+    def test_clean_f0_bridges_multibin_spike(self):
+        # A non-harmonic spike (a fifth up, not an octave) so the fill's bridge — not
+        # the octave snapper — is what removes it.
+        f0 = [262.0] * 4 + [393.0, 396.0] + [262.0] * 4
+        cleaned = clean_f0_track(f0, self._uniform_times(f0))
+        self.assertEqual(cleaned, [262.0] * 10)
+
+    def test_clean_f0_holds_stable_pitch_over_one_sided_artifact(self):
+        # An erratic (non-harmonic) blob adjacent to a note on one side (silence on
+        # the other) is not cut to None — it is filled by holding the note's pitch.
+        f0 = [None] * 2 + [200.0, 500.0, 210.0, 480.0] + [330.0] * 4
+        cleaned = clean_f0_track(f0, self._uniform_times(f0))
+        self.assertEqual(cleaned, [None] * 2 + [330.0] * 8)
+
+    def test_clean_f0_holds_leading_octave_error(self):
+        # A leading octave-error bin (silence before, note after) is replaced with
+        # the following note's pitch rather than deleted.
+        f0 = [None] * 2 + [524.0] + [262.0] * 6
+        cleaned = clean_f0_track(f0, self._uniform_times(f0))
+        self.assertEqual(cleaned, [None] * 2 + [262.0] * 7)
+
+    def test_clean_f0_keeps_held_note_leap(self):
+        # A real melodic leap up to a *held* note (a plateau longer than the spike
+        # cap) is not a return-spike and must survive untouched.
+        f0 = [262.0] * 4 + [392.0] * 8 + [262.0] * 4
+        cleaned = clean_f0_track(f0, self._uniform_times(f0))
+        self.assertEqual(cleaned, f0)
+
+    def test_clean_f0_bridge_leaves_glide_untouched(self):
+        # A one-directional 滑音 never clears both anchors, so bridging skips it.
+        f0 = [220.0] * 4 + [233.0, 247.0, 262.0, 277.0, 294.0] + [311.0] * 4
+        cleaned = clean_f0_track(f0, self._uniform_times(f0))
+        self.assertEqual(cleaned, f0)
+
+    def test_clean_f0_snaps_harmonic_plateau_to_surrounding_pitch(self):
+        # A held note mis-tracked an octave (×2) up for several bins registers as a
+        # "stable" plateau the fill pass can't see; the octave snapper folds it back
+        # onto the surrounding pitch. Realistic ~75 ms bins.
+        times = [round(i * 0.075, 3) for i in range(20)]
+        f0 = [110.0] * 8 + [220.0] * 4 + [110.0] * 8
+        cleaned = clean_f0_track(f0, times)
+        self.assertEqual(cleaned, [110.0] * 20)
+
+    def test_clean_f0_snaps_third_harmonic_plateau(self):
+        times = [round(i * 0.075, 3) for i in range(19)]
+        f0 = [130.0] * 8 + [390.0] * 3 + [130.0] * 8  # ×3 harmonic error
+        cleaned = clean_f0_track(f0, times)
+        self.assertEqual(cleaned, [130.0] * 19)
+
+    def test_clean_f0_keeps_real_interval_leap(self):
+        # A genuine melodic leap (a perfect fifth up, held) is NOT an octave/harmonic
+        # ratio of the surrounding note, so the snapper must leave it untouched.
+        times = [round(i * 0.075, 3) for i in range(20)]
+        hi = round(220.0 * 2 ** (7 / 12.0), 1)  # perfect fifth
+        f0 = [220.0] * 8 + [hi] * 4 + [220.0] * 8
+        cleaned = clean_f0_track(f0, times)
+        self.assertEqual(cleaned, f0)
+
+    def test_clean_f0_noop_on_degenerate_input(self):
+        self.assertEqual(clean_f0_track([]), [])
+        self.assertEqual(clean_f0_track([None, None]), [None, None])
+        self.assertEqual(clean_f0_track([None] * 6), [None] * 6)
+
+    def test_extend_attack_release_fills_edges_and_stops_at_noise(self):
+        # Note at bins 3-5. The bins right at the edges (2, 6) carry real note energy
+        # (attack/release); the outer bins sit at the noise floor and must be left.
+        f0 = [None, None, None, 220.0, 220.0, 220.0, None, None, None]
+        intensity = [0.05, 0.05, 0.15, 0.20, 0.20, 0.20, 0.15, 0.05, 0.05]
+        out = _extend_attack_release(f0, intensity)
+        self.assertEqual(out, [None, None, 220.0, 220.0, 220.0, 220.0, 220.0, None, None])
+
+    def test_extend_attack_release_caps_reach(self):
+        # A long above-gate ramp before the onset is only followed for max_bins.
+        f0 = [None] * 8 + [200.0] * 3
+        intensity = [0.02, 0.02] + [0.30] * 6 + [0.40] * 3
+        out = _extend_attack_release(f0, intensity, max_bins=3)
+        self.assertEqual(out[5:8], [200.0, 200.0, 200.0])  # 3 bins of attack held
+        self.assertTrue(all(v is None for v in out[:5]))  # nothing beyond the cap
+
+    def test_extend_attack_release_ignores_pure_noise_neighbours(self):
+        # Every non-note bin is at the floor → nothing is added (勿補太多抓到 noise).
+        f0 = [None, None, 262.0, 262.0, 262.0, None, None]
+        intensity = [0.04, 0.04, 0.22, 0.22, 0.22, 0.04, 0.04]
+        self.assertEqual(_extend_attack_release(f0, intensity), f0)
+
+    def test_compute_spectrogram_clean_f0_toggle_is_passthrough(self):
+        from breeze_elf.audio import compute_spectrogram
+
+        sample_rate = 16_000
+        axis = np.arange(round(sample_rate * 0.8), dtype=np.float64) / sample_rate
+        tone = (0.4 * np.sin(2 * np.pi * 220 * axis)).astype(np.float32)
+        # A clean sustained tone has no floating erratic blob, so cleaning is a
+        # no-op: both paths yield the same f0 track.
+        raw = compute_spectrogram(tone, sample_rate, clean_f0=False)
+        cleaned = compute_spectrogram(tone, sample_rate, clean_f0=True)
+        self.assertEqual(raw["f0"], cleaned["f0"])
 
     def test_summarize_pitch_is_robust_to_harmonics(self):
         # A harmonic-rich tone (strong 2nd/3rd harmonics) is exactly what makes

@@ -28,6 +28,19 @@ enhance = [
     "deepfilternet>=0.5.6",
     "demucs>=4.0.1",
 ]
+# Post-recognition translation (NLLB-200, CC-BY-NC-4.0 — non-commercial, opt-in).
+# ctranslate2 + huggingface-hub already ship with faster-whisper, so this adds only
+# the lightweight sentencepiece tokenizer. The CT2-converted NLLB model must be
+# fetched into a local dir separately (offline-first — never downloaded on demand).
+translate = [
+    "sentencepiece>=0.2.0",
+]
+# Anonymous in-session speaker diarization. onnxruntime already ships with
+# faster-whisper (for Silero VAD); it is pinned here to make the dependency explicit.
+# The ONNX speaker-embedding model itself is user-supplied (see README).
+diarize = [
+    "onnxruntime>=1.17.0",
+]
 
 [project.scripts]
 breeze-elf = "breeze_elf.main:run"

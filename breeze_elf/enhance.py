@@ -130,6 +130,15 @@ class DeepFilterEnhancer:
     def ready(self) -> bool:
         return self._model is not None
 
+    @property
+    def available(self) -> bool:
+        """True when torch + DeepFilterNet are importable, without loading weights.
+
+        Lets the whole-file denoise endpoint answer 503 up front instead of
+        silently returning the input unchanged (the passthrough fallback).
+        """
+        return _torch_available() and importlib.util.find_spec("df") is not None
+
     def load(self) -> None:
         if self._model is not None or self._failed:
             return
@@ -281,3 +290,13 @@ def build_enhancer(mode: str, settings: Settings | None = None):
 def build_separator(settings: Settings | None = None) -> DemucsSeparator:
     settings = settings or get_settings()
     return DemucsSeparator(settings.enhance_device)
+
+
+def build_denoiser(settings: Settings | None = None) -> DeepFilterEnhancer:
+    """A DeepFilterNet enhancer for the whole-recording A/B compare endpoint.
+
+    Independent of ``enhance_live``/``enhance_file`` so the compare still produces
+    a denoised clip even when the ASR pipeline runs enhancement ``off``.
+    """
+    settings = settings or get_settings()
+    return DeepFilterEnhancer(settings.enhance_device)

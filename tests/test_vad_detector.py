@@ -96,10 +96,71 @@ class SpeechDetectorSegmentationTests(unittest.TestCase):
         buffer = AudioUtteranceBuffer(sample_rate=10, frame_ms=100, rms_threshold=0.01)
         self.assertEqual(buffer.detector_name, "rms")
 
+    def test_rms_hysteresis_keeps_decaying_tail_in_utterance(self):
+        # 1 sample/frame at 10 Hz, so a frame's RMS is |sample|. A loud onset, a
+        # decaying 句尾 in [release, onset), then silence. With hysteresis the tail
+        # stays in the utterance; the bare gate (release == onset) drops it.
+        loud = round(0.03 * 32768)  # above onset 0.02
+        decay = round(0.015 * 32768)  # below onset, above release 0.01
+        pcm = np.array([loud, loud, decay, decay, decay, 0, 0], dtype="<i2").tobytes()
+
+        def emit(release_threshold):
+            buffer = AudioUtteranceBuffer(
+                sample_rate=10,
+                frame_ms=100,
+                pre_roll_ms=0,
+                end_silence_ms=200,  # 2 silent frames end the segment
+                rms_threshold=0.02,
+                speech_detector=RmsSpeechDetector(0.02, release_threshold=release_threshold),
+            )
+            windows = buffer.append_pcm16(pcm) + buffer.flush()
+            self.assertEqual(len(windows), 1)
+            return windows[0].samples.size
+
+        # Bare gate cuts at the first sub-onset frame; hysteresis holds the tail.
+        self.assertEqual(emit(release_threshold=0.02), 4)  # onset,onset,+2 silence
+        self.assertEqual(emit(release_threshold=0.01), 7)  # tail retained, +2 silence
+
     def test_rms_detector_matches_threshold(self):
         detector = RmsSpeechDetector(0.02)
         self.assertTrue(detector.is_speech(np.full(160, 0.5, dtype=np.float32)))
         self.assertFalse(detector.is_speech(np.zeros(160, dtype=np.float32)))
+
+    def test_rms_release_holds_speech_through_decay(self):
+        # onset 0.02, release 0.01: a 句尾 syllable decaying into [0.01, 0.02) stays
+        # speech until it drops under the release gate — the fix for trailing 漏字.
+        detector = RmsSpeechDetector(0.02, release_threshold=0.01)
+        loud = np.full(160, 0.03, dtype=np.float32)
+        decaying = np.full(160, 0.015, dtype=np.float32)  # below onset, above release
+        quiet = np.full(160, 0.005, dtype=np.float32)     # below release
+
+        self.assertTrue(detector.is_speech(loud))      # onset
+        self.assertTrue(detector.is_speech(decaying))   # held (hysteresis)
+        self.assertTrue(detector.is_speech(decaying))   # still held
+        self.assertFalse(detector.is_speech(quiet))     # released below the low gate
+
+    def test_rms_onset_still_requires_full_threshold(self):
+        # A frame between release and onset must NOT start a segment from silence, so
+        # quiet steady noise can't false-trigger — only the tail of speech is extended.
+        detector = RmsSpeechDetector(0.02, release_threshold=0.01)
+        between = np.full(160, 0.015, dtype=np.float32)
+        self.assertFalse(detector.is_speech(between))
+        self.assertFalse(detector.is_speech(between))
+
+    def test_rms_release_threshold_defaults_below_onset(self):
+        detector = RmsSpeechDetector(0.02)
+        self.assertLess(detector.release_threshold, detector.rms_threshold)
+
+    def test_rms_release_threshold_clamped_into_gate(self):
+        # release above onset would invert the hysteresis; it is clamped to the onset.
+        self.assertEqual(RmsSpeechDetector(0.02, release_threshold=0.5).release_threshold, 0.02)
+        self.assertEqual(RmsSpeechDetector(0.02, release_threshold=-1.0).release_threshold, 0.0)
+
+    def test_rms_release_ratio_one_restores_bare_threshold(self):
+        # release == onset: no hysteresis band, so it flips exactly like the old gate.
+        detector = RmsSpeechDetector(0.02, release_threshold=0.02)
+        self.assertTrue(detector.is_speech(np.full(160, 0.03, dtype=np.float32)))
+        self.assertFalse(detector.is_speech(np.full(160, 0.015, dtype=np.float32)))
 
 
 class SileroStreamingGlueTests(unittest.TestCase):
@@ -245,6 +306,16 @@ class VadConfigResolutionTests(unittest.TestCase):
             settings = get_settings()
         self.assertEqual(settings.vad_speech_threshold, 1.0)  # clamped into [0, 1]
         self.assertLessEqual(settings.vad_neg_threshold, settings.vad_speech_threshold)
+
+    def test_rms_release_ratio_clamped_into_unit_range(self):
+        with mock.patch.dict(os.environ, {"BREEZE_VAD_RMS_RELEASE_RATIO": "2.5"}, clear=True):
+            self.assertEqual(get_settings().vad_rms_release_ratio, 1.0)
+        with mock.patch.dict(os.environ, {"BREEZE_VAD_RMS_RELEASE_RATIO": "-1"}, clear=True):
+            self.assertEqual(get_settings().vad_rms_release_ratio, 0.0)
+
+    def test_rms_release_ratio_defaults_to_half(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(get_settings().vad_rms_release_ratio, 0.5)
 
     def test_negative_threshold_clamps_to_zero(self):
         with mock.patch.dict(

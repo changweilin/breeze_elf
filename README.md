@@ -22,6 +22,21 @@ Open the HTTPS Tailscale Serve URL on your phone, allow microphone access, then 
 
 If the Tailscale command reports access denied on Windows, run the command from an Administrator PowerShell.
 
+## Diagnostics (`breeze doctor`)
+
+Before chasing a slow / CPU-only run, check the environment in one shot:
+
+```powershell
+uv run python -m breeze_elf doctor
+```
+
+It prints a PASS/WARN/FAIL line for the ASR runtime, GPU visibility (ctranslate2 for
+Whisper, torch for the optional enhance/voice stages), the Windows cuDNN DLL, the opt-in
+extras, and whether each configured local model is present — each with the exact fix. It
+never loads a model, so it is safe to run on a broken setup. Add `--load` to also load
+Whisper and confirm the resolved device / compute type. Exit code is non-zero if any
+check fails.
+
 ## Remote Transcript Saving
 
 The web app can save the current transcript back to the Breeze Elf host. Tap `遠端儲存`
@@ -72,6 +87,25 @@ non-Chinese audio is no longer transcribed as Chinese gibberish. Note that a spe
 still hallucinates lyrics on purely instrumental tracks — for melodies the pitch / 簡譜
 output is the meaningful result.
 
+### Switching the ASR model
+
+The 模型與演算法 dialog (tap the backend line in the footer) has a model switcher at the
+top. It hot-swaps the running engine between **Breeze ASR** (`breeze`), **Whisper medium**,
+and **Whisper large-v3** without restarting the server — the new model loads in the
+background (a progress bar tracks it) and the old one is released once the swap completes.
+Switching is blocked while a recording is streaming, and the currently loaded model is
+always shown as the active option. The Whisper sizes are downloaded/cached by
+faster-whisper on first use; `breeze` is a local CTranslate2 directory (see
+`BREEZE_ASR_BREEZE_MODEL`) and reports a clear error if the directory is missing rather
+than reaching out to Hugging Face. Endpoints: `GET /api/asr/models`, `POST /api/asr/model`,
+`GET /api/asr/model/status`.
+
+For long recordings, set `BREEZE_ASR_FILE_BATCH_SIZE` (e.g. `16`) to transcribe the whole
+file in one batched `BatchedInferencePipeline` pass (3–4× faster) via
+`POST /api/transcribe/file`, instead of streaming it utterance-by-utterance. The batched
+pass returns all blocks at once (no live partials); run `校準音準` afterwards for the
+per-character 基頻/簡譜, which the offline pass measures against a single global 主音.
+
 ## Speech Enhancement & Source Separation (optional)
 
 Two neural models can sit in front of Whisper on a GPU (tuned for a 12 GB RTX 3060).
@@ -113,6 +147,49 @@ BREEZE_ENHANCE_LIVE=deepfilter uv run python -m breeze_elf
 
 `GET /health` reports the active stage via `enhanceLive` / `enhanceFile` / `enhanceDevice`
 / `separatorAvailable`, and each stream's `ready` event carries the active `enhance` name.
+
+## 翻譯 (Translation, optional)
+
+Translate any recognised language into Traditional Chinese (or another target), one
+segment at a time, shown as a bilingual stacked line under the original. It runs on the
+**ctranslate2** runtime faster-whisper already ships — **no torch, no new CUDA/DLL** — and
+only adds the lightweight `sentencepiece` tokenizer (`[translate]` extra). Any missing
+model / dependency degrades to a no-op, so recognition is never affected.
+
+> **License:** NLLB-200 is **CC-BY-NC-4.0 (non-commercial)**, so this is strictly opt-in
+> and never enabled by default. Do not ship it enabled in a commercial product.
+
+1. Convert an NLLB-200 model to CT2 into a **local** directory (offline-first — the model
+   is never downloaded on demand), keeping its sentencepiece file alongside:
+
+   ```bash
+   ct2-transformers-converter --model facebook/nllb-200-distilled-600M \
+     --output_dir models/nllb-200-distilled-600M-ct2 --quantization int8
+   # copy sentencepiece.bpe.model into that dir (or point BREEZE_TRANSLATE_SPM at it)
+   ```
+
+2. Enable it: `BREEZE_TRANSLATE=nllb` (target defaults to 繁中 via `BREEZE_TRANSLATE_TARGET=zh`).
+3. In the transcribe page, toggle the **翻譯** button before 開始; each committed segment then
+   carries a translated line (only on `final`, never the low-latency partial). The choice
+   persists in `localStorage`.
+
+`GET /health` reports `translateProvider` / `translateAvailable` / `translateTarget`. The
+~0.6 GB (int8) model plus Whisper `medium` fit together on a 12 GB card.
+
+## 語者分離 (Speaker Diarization, optional)
+
+Tag each utterance with an anonymous, **session-local** speaker label (`說話者 1／2…`) shown
+as a coloured chip on the segment. It is **fully local and torch-free**: a pure-numpy
+log-mel front-end feeds an ONNX speaker-embedding model over `onnxruntime` (the runtime
+faster-whisper already bundles for Silero VAD), and a pure-numpy online clusterer assigns
+labels. Supply a permissively-licensed ONNX speaker-embedding model at
+`models/speaker_embedding.onnx` (or set `BREEZE_DIARIZE_MODEL`); without it the feature is a
+no-op.
+
+Enable with `BREEZE_DIARIZE=on`. **Privacy:** embeddings are computed from the *raw*
+utterance audio (not the denoised ASR audio), are never stored, and the clusterer resets
+every connection — there is no cross-session voiceprint linkage. `GET /health` reports
+`diarizeEnabled` / `diarizeAvailable`.
 
 ## 變聲工作室 (Voice Studio)
 
@@ -192,13 +269,16 @@ Environment variables:
 | `BREEZE_VAD_DETECTOR` | `rms` | Speech-onset gate for the `vad` segmenter: `rms` (energy threshold) or `silero` (neural voice detector via the ONNX model bundled with faster-whisper — no new dependency; silently falls back to `rms` if the model/onnxruntime is missing). |
 | `BREEZE_VAD_SPEECH_THRESHOLD` | `0.5` | Silero speech probability at/above which a frame is speech. |
 | `BREEZE_VAD_NEG_THRESHOLD` | `0.35` | Silero silence probability; between this and the speech threshold the previous decision is held (hysteresis). |
+| `BREEZE_VAD_RMS_RELEASE_RATIO` | `0.5` | RMS gate attack/release hysteresis: an utterance ends only once RMS drops below `BREEZE_RMS_THRESHOLD × this` (onset still uses the full threshold), so a naturally decaying 句尾 syllable isn't clipped. `1.0` restores the old single-threshold gate. |
 | `BREEZE_VAD_SILERO_MODEL` | *(bundled)* | Override path to a `silero_vad*.onnx`; defaults to the one shipped inside faster-whisper. |
 | `BREEZE_VAD_FRAME_MS` | `100` | VAD frame size (RMS gate; Silero re-chunks internally to 32 ms). |
 | `BREEZE_VAD_PRE_ROLL_MS` | `300` | Audio kept before detected speech. |
 | `BREEZE_VAD_END_SILENCE_MS` | `700` | Silence required to finish an utterance. |
 | `BREEZE_VAD_MAX_SEGMENT_SECONDS` | `18.0` | Max utterance length before a forced split. The split lands at the quietest recent frame (a syllable gap) so a long sung phrase is never cut mid-note. |
 | `BREEZE_CHAR_VOICELESS_MARGIN` | `1.6` | Post-processing only: grow each 字's window outward through audio above `noise_floor × margin` (an unvoiced consonant/breath) the live VAD clipped. |
-| `BREEZE_ASR_MODEL` | `medium` | Whisper model name. |
+| `BREEZE_F0_CLEAN` | `true` | 基頻分析 post-processing. **(1) Octave/harmonic snap:** a bin mis-tracked a whole octave (or ×3/×4) off — the wrong-octave "stable" plateau that shows up as 劇烈變化 between two consistent notes — is folded back onto its local pitch; only integer harmonic ratios are tried within a tight tolerance, so a real fourth/fifth/sixth leap is never moved. **(2) Unstable-run fill:** a 音高劇烈變化 run that spikes past the flanking notes (up-then-down / down-then-up 反方向) or zig-zags widely is **filled from the surrounding 平穩音高** — interpolated between both neighbouring notes, held from the one adjacent note, or (only when silence sits on both sides) cleared — while a one-way 滑音 and vibrato are kept. **(3) Attack/release fill:** each note is grown into its 頭尾 — the quiet onset/tail the pitch detector drops — by holding the edge pitch through adjacent bins whose intensity stays above a noise-relative gate (bounded, so a breath/hiss at the room floor is never picked up). `0` keeps the raw per-bin f0 track. |
+| `BREEZE_ASR_MODEL` | `breeze` | Recognition model loaded at startup. `breeze` is a preset that loads the local Breeze CT2 dir (`BREEZE_ASR_BREEZE_MODEL`), falling back to Whisper `medium` if that dir is absent; any other value (a Whisper size, HF id, or CT2 path) is passed straight to faster-whisper. Also switchable at runtime from 模型與演算法 (see below). |
+| `BREEZE_ASR_BREEZE_MODEL` | `models/breeze-asr-25-ct2` | Local **CTranslate2** directory the `breeze` preset in the model switcher resolves to. Offline-first — faster-whisper only loads a CT2 model, so this is a converted Breeze ASR dir on disk, not a HF id. A relative path is resolved against the project root. |
 | `BREEZE_ASR_DEVICE` | `auto` | `auto`, `cuda`, or `cpu`. |
 | `BREEZE_ASR_COMPUTE_TYPE` | `int8` | Compute type for custom ASR device values. |
 | `BREEZE_ASR_CONCURRENCY` | `1` | Maximum concurrent ASR transcriptions. |
@@ -206,11 +286,34 @@ Environment variables:
 | `BREEZE_ASR_LOAD_ON_STARTUP` | `1` | Load Whisper during server startup. |
 | `BREEZE_ASR_NO_SPEECH_PROB_THRESHOLD` | `0.6` | Drop low-energy ASR results above this Whisper no-speech probability. |
 | `BREEZE_ASR_HALLUCINATION_RMS_THRESHOLD` | `0.02` | RMS ceiling used when filtering likely silence hallucinations. |
+| `BREEZE_ASR_CONTEXT_CHARS` | `0` | Cross-segment context: trailing characters of the committed transcript fed into the next utterance's `initial_prompt` (with the 慣用詞庫) for proper-noun consistency. `0` disables it. Opt-in and bounded (max 2000) — seeding recent text can make Whisper echo it on a short/quiet utterance, and it only applies when a language is fixed (free-detect drops the prompt). |
+| `BREEZE_ASR_FILE_BATCH_SIZE` | `0` | Whole-file batched transcription via faster-whisper's `BatchedInferencePipeline` (3–4× throughput on long recordings). `0` keeps the per-utterance streaming file path; a value `1`–`32` enables the `POST /api/transcribe/file` endpoint and is the batch size. Live-mic streaming is never affected. |
+| `BREEZE_MAX_AUDIO_UPLOAD_BYTES` | `256000000` | Upper bound (decoded bytes) on a base64 PCM upload to the whole-file endpoints (`/api/transcribe/file`, `/api/enhance/separate`), checked before decoding so an oversized body returns `413` instead of exhausting host memory. ~256 MB ≈ 2.2 h of 16 kHz mono; `0` disables the cap. |
 | `BREEZE_STOP_DRAIN_TIMEOUT_SECONDS` | `60.0` | Time allowed to transcribe the final flushed utterance after stop. |
 | `BREEZE_RMS_THRESHOLD` | `0.008` | Silence gate threshold. |
 | `BREEZE_REMOTE_STORAGE_DIR` | `remote_transcripts` | Host-side directory for remotely saved transcript `.txt` files. |
 | `BREEZE_SEARCH_ENABLED` | `true` | Cross-transcript full-text search (SQLite FTS5 trigram, no extra dependency). Auto-disables if the runtime SQLite lacks FTS5/trigram. |
 | `BREEZE_SEARCH_MAX_RESULTS` | `50` | Maximum search results returned per query. |
+| `BREEZE_SUMMARY_PROVIDER` | `extractive` | Post-meeting summary: `extractive` (stdlib, no model/VRAM/network), `ollama` (local Ollama daemon, degrades to extractive on failure), or `off`. No cloud path — transcripts never leave the machine. |
+| `BREEZE_SUMMARY_MODEL` | `qwen3:4b-instruct` | Ollama model tag used when `BREEZE_SUMMARY_PROVIDER=ollama`. |
+| `BREEZE_SUMMARY_OLLAMA_URL` | `http://127.0.0.1:11434` | Local Ollama endpoint. Keep it loopback to preserve the privacy-first, on-device guarantee. |
+| `BREEZE_SUMMARY_TIMEOUT_SECONDS` | `60.0` | Request timeout for the local Ollama call; raise it for a slow local model. |
+| `BREEZE_SUMMARY_MAX_CHARS` | `8000` | Transcript is truncated to this many characters before summarizing. |
+| `BREEZE_SUMMARY_MAX_SENTENCES` | `5` | Default number of points/sentences in a summary. |
+| `BREEZE_TRANSLATE` | `off` | Post-recognition translation: `off` or `nllb` (NLLB-200 on the ctranslate2 runtime, no torch; needs the `[translate]` extra + a local CT2 model). CC-BY-NC-4.0 — opt-in, non-commercial. |
+| `BREEZE_TRANSLATE_TARGET` | `zh` | Target language for translation (a language/flores code; `zh` → 繁中). |
+| `BREEZE_TRANSLATE_MODEL` | `models/nllb-200-distilled-600M-ct2` | Local CT2 NLLB model directory. Never downloaded on demand (offline-first). |
+| `BREEZE_TRANSLATE_SPM` | *(auto)* | Override path to the sentencepiece model; defaults to the `*.model` file inside the model dir. |
+| `BREEZE_TRANSLATE_DEVICE` | `auto` | Translation device: `auto`, `cuda`, or `cpu`. |
+| `BREEZE_TRANSLATE_COMPUTE_TYPE` | `auto` | ctranslate2 compute type (`auto` → `default`; e.g. `int8`, `float16`). |
+| `BREEZE_TRANSLATE_BEAM` | `1` | Translation beam size. |
+| `BREEZE_DIARIZE` | `off` | Anonymous in-session speaker diarization: `off` or `on` (needs a local ONNX speaker-embedding model + onnxruntime; torch-free). Degrades to a no-op when unavailable. |
+| `BREEZE_DIARIZE_MODEL` | `models/speaker_embedding.onnx` | Local ONNX speaker-embedding model file. |
+| `BREEZE_DIARIZE_MAX_SPEAKERS` | `6` | Maximum distinct speakers per session before new voices fold into the nearest. |
+| `BREEZE_DIARIZE_THRESHOLD` | `0.75` | Cosine similarity below which an utterance starts a new speaker. |
+| `BREEZE_DIARIZE_MIN_DURATION` | `0.4` | Utterances shorter than this (seconds) are not labelled (too noisy to cluster). |
+| `BREEZE_DIARIZE_DEVICE` | `cpu` | Embedder device: `cpu` or `cuda`. |
+| `BREEZE_DIARIZE_N_MELS` | `80` | Log-mel bands fed to the ONNX speaker model; match your model's expected feature dimension. |
 | `BREEZE_VOICE_PROVIDER` | `mock` | Voice studio engine: `mock` (DSP, no downloads) or `openvoice` (OpenVoice v2 + MeloTTS). |
 | `BREEZE_VOICE_STORAGE_DIR` | `voices` | Host-side directory for saved voice profiles (embedding + reference `.wav` + metadata). |
 | `BREEZE_VOICE_SAMPLE_RATE` | `16000` | Sample rate used for voice capture and mock synthesis. |

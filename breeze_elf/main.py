@@ -5,6 +5,7 @@ import base64
 import binascii
 import logging
 import math
+import re
 import threading
 import time
 from collections.abc import Awaitable, Callable
@@ -20,7 +21,14 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.websockets import WebSocketState
 
-from .asr import ASRResult, WordTiming, build_asr_from_env
+from .asr import (
+    ASRResult,
+    FasterWhisperASR,
+    WordTiming,
+    build_asr_from_env,
+    resolve_breeze_model_dir,
+)
+from .asr_models import active_model_id, find_asr_model, list_asr_models
 from .asr_queue import ASRQueue
 from .audio import (
     AudioUtteranceBuffer,
@@ -42,18 +50,23 @@ from .audio import (
     summarize_pitch,
 )
 from .config import get_settings
-from .enhance import build_enhancer, build_separator, preload_torch_cudnn
+from .diarize import OnlineSpeakerClusterer, build_clusterer, build_diarizer
+from .enhance import build_denoiser, build_enhancer, build_separator, preload_torch_cudnn
 from .protocol import (
     GlossaryEntry,
     PingMessage,
     ProtocolError,
     StartMessage,
     StopMessage,
+    _parse_glossary,
+    _parse_languages,
     parse_client_text,
     server_event,
 )
 from .search_index import build_search_index
 from .storage import load_transcript, safe_transcript_id, save_transcript
+from .summarize import build_summarizer
+from .translate import build_translator
 from .voice import build_voice_from_env
 from .voice_storage import (
     decode_wav,
@@ -84,13 +97,25 @@ ROOT_STATIC_MEDIA_TYPES = {
     "icon-512.png": "image/png",
 }
 
-COMMON_SILENCE_HALLUCINATION_FRAGMENTS = (
-    "請不吝點贊訂閱轉發打賞支持明鏡與點點欄目",
-    "請不吝點讚訂閱轉發打賞支持明鏡與點點欄目",
-    "字幕由 Amara.org 社群提供",
-    "由 Amara.org 社群提供的字幕",
-    "歡迎訂閱按讚分享",
+# Pure subtitle-credit / sponsor boilerplate Whisper emits on *non-speech* (music,
+# singing, silence). No real speaker utters these, so they are dropped regardless of
+# loudness — this is what catches loud 歌詞, which the energy gate (built for quiet
+# silence) structurally cannot: singing is loud and the model is confident, so
+# ``low_energy``/``likely_no_speech`` never fire. Matched as regex against the
+# punctuation-stripped, casefolded form (see ``_normalize_hallucination_text``) so
+# org-name / wording variants ("字幕提供由 XXX 社群提供的字") still hit.
+HALLUCINATION_CREDIT_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"字幕.{0,20}社群提供",
+        r"社群提供.{0,8}字幕",
+        r"請不吝.{0,24}打賞",
+        r"明鏡與點點",
+    )
 )
+# Softer channel-outro phrases a real speaker *might* actually say; only dropped when
+# the audio is also quiet / no-speech so genuine speech is never lost.
+COMMON_SILENCE_HALLUCINATION_FRAGMENTS = ("歡迎訂閱按讚分享",)
 HALLUCINATION_TEXT_TRANSLATION = str.maketrans({"讚": "贊", "赞": "贊"})
 _JIANPU_GLIDE_UP = "↗"
 _JIANPU_GLIDE_DOWN = "↘"
@@ -131,6 +156,10 @@ class TranscriptBlock(BaseModel):
     segmentKind: str | None = None
     pitch: dict[str, Any] | None = None
     characters: list[TranscriptCharacter] = Field(default_factory=list)
+    # Optional post-recognition annotations: the translated line (#4) and the
+    # anonymous per-session speaker index (#3, 0-based; UI shows index + 1).
+    translation: str | None = None
+    speaker: int | None = None
 
 
 class TranscriptSaveRequest(BaseModel):
@@ -165,6 +194,12 @@ class SeparateRequest(BaseModel):
     pcmBase64: str = Field(min_length=1)
     sampleRate: int = Field(default=16_000, ge=8_000, le=48_000)
     scenario: str = Field(default="music", max_length=16)
+
+
+class DenoiseRequest(BaseModel):
+    # Same raw 16-bit LE mono PCM upload as SeparateRequest; no scenario needed.
+    pcmBase64: str = Field(min_length=1)
+    sampleRate: int = Field(default=16_000, ge=8_000, le=48_000)
 
 
 class VoiceTtsRequest(BaseModel):
@@ -330,6 +365,65 @@ class AnalyzeState:
             return data
 
 
+@dataclass
+class ASRSwitchState:
+    """Thread-safe progress for a live ASR model hot-swap (模型與演算法 switcher).
+
+    Re-runnable like :class:`AnalyzeState`: the new model loads in an executor
+    thread while the frontend polls a status endpoint to drive a progress bar.
+    """
+
+    status: str = "idle"  # idle | loading | ready | error
+    progress: float = 0.0
+    stage: str = ""
+    error: str | None = None
+    target_id: str = ""
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def begin(self, target_id: str) -> bool:
+        with self.lock:
+            if self.status == "loading":
+                return False
+            self.status = "loading"
+            self.progress = 0.0
+            self.stage = "準備中"
+            self.error = None
+            self.target_id = target_id
+            return True
+
+    def report(self, fraction: float, stage: str) -> None:
+        with self.lock:
+            self.progress = max(0.0, min(1.0, float(fraction)))
+            self.stage = stage
+
+    def finish(self) -> None:
+        with self.lock:
+            self.status = "ready"
+            self.progress = 1.0
+            self.stage = "完成"
+            self.error = None
+
+    def fail(self, message: str) -> None:
+        with self.lock:
+            self.status = "error"
+            self.error = message
+
+    @property
+    def is_loading(self) -> bool:
+        with self.lock:
+            return self.status == "loading"
+
+    def snapshot(self) -> dict[str, Any]:
+        with self.lock:
+            return {
+                "status": self.status,
+                "progress": round(self.progress, 3),
+                "stage": self.stage,
+                "error": self.error,
+                "targetId": self.target_id,
+            }
+
+
 settings = get_settings()
 asr_engine = build_asr_from_env(settings)
 # Resolve the effective VAD detector once at startup so /health reports what will
@@ -338,6 +432,7 @@ asr_engine = build_asr_from_env(settings)
 effective_vad_detector = make_speech_detector(
     settings.vad_detector,
     rms_threshold=settings.rms_threshold,
+    rms_release_threshold=settings.rms_threshold * settings.vad_rms_release_ratio,
     speech_threshold=settings.vad_speech_threshold,
     neg_threshold=settings.vad_neg_threshold,
     model_path=settings.vad_silero_model_path or None,
@@ -348,9 +443,31 @@ effective_vad_detector = make_speech_detector(
 live_enhancer = build_enhancer("live", settings)
 file_enhancer = build_enhancer("file", settings)
 separator = build_separator(settings)
+# Whole-recording denoise for the 原始/降噪 A/B compare — always DeepFilterNet,
+# regardless of the ASR enhance settings.
+denoiser = build_denoiser(settings)
+summarizer = build_summarizer(
+    settings.summary_provider,
+    model=settings.summary_model,
+    ollama_url=settings.summary_ollama_url,
+    timeout=settings.summary_timeout_seconds,
+)
+# Post-recognition NLLB translator (NullTranslator when off / no model). Shared
+# module-scope; its own lock serialises inference across streams.
+translator = build_translator(settings, base_dir=ROOT_DIR)
+translate_target = settings.translate_target
+# Shared speaker-embedding model (NullDiarizer when off / no model). The embedder
+# is shared (one model, own lock); each connection gets its own clusterer so
+# speaker labels are anonymous and reset per session.
+diarizer = build_diarizer(settings, base_dir=ROOT_DIR)
 voice_engine = build_voice_from_env(settings)
 voice_load_state = VoiceLoadState()
 analyze_state = AnalyzeState()
+asr_switch_state = ASRSwitchState()
+# Live streams currently attached to the ASR queue. A model hot-swap is rejected
+# while > 0 so we never stop a queue out from under an in-flight recording. Mutated
+# only from event-loop coroutines (StartMessage / _stop_state), so a plain int is safe.
+_active_stream_count = 0
 
 
 @asynccontextmanager
@@ -363,6 +480,7 @@ async def lifespan(app: FastAPI):
     app.state.voice_load_task = None
     app.state.analyze = analyze_state
     app.state.analyze_task = None
+    app.state.asr_switch_task = None
     app.state.asr_queue = ASRQueue(asr_engine, settings.asr_concurrency)
     await app.state.asr_queue.start()
     loop = asyncio.get_running_loop()
@@ -458,16 +576,27 @@ async def health() -> JSONResponse:
             "asrBackend": asr_engine.backend,
             "asrDevice": asr_engine.device,
             "asrModel": getattr(asr_engine, "model_name", "unknown"),
+            "asrModelId": active_model_id(settings, getattr(asr_engine, "model_name", "")),
             "asrComputeType": getattr(asr_engine, "compute_type", "unknown"),
             "asrConcurrency": settings.asr_concurrency,
             "asrQueueDepth": app.state.asr_queue.queue_depth,
             "asrError": app.state.asr_error,
+            "asrFileBatch": settings.asr_file_batch_size,
+            "fileBatchAvailable": settings.asr_file_batch_size > 0
+            and hasattr(asr_engine, "transcribe_file"),
             "enhanceLive": live_enhancer.name,
             "enhanceFile": file_enhancer.name,
             "enhanceDevice": settings.enhance_device,
             "separatorAvailable": separator.available,
+            "denoiseAvailable": denoiser.available,
             "searchEnabled": search_index.available,
             "searchIndexed": search_indexed,
+            "summaryProvider": summarizer.name,
+            "translateProvider": settings.translate_provider,
+            "translateAvailable": translator.available,
+            "translateTarget": settings.translate_target,
+            "diarizeEnabled": settings.diarize_enabled,
+            "diarizeAvailable": diarizer.available,
             "voiceProvider": settings.voice_provider,
             "voiceBackend": voice_engine.backend,
             "voiceModel": getattr(voice_engine, "model_name", "unknown"),
@@ -594,6 +723,30 @@ async def read_remote_transcript(doc_id: str) -> JSONResponse:
     )
 
 
+class SummaryRequest(BaseModel):
+    text: str
+    maxSentences: int | None = None
+
+
+@app.post("/api/summary")
+async def summarize_transcript(payload: SummaryRequest) -> JSONResponse:
+    if not summarizer.available:
+        raise HTTPException(status_code=503, detail="summary is disabled")
+    text = (payload.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text must not be empty")
+
+    # Cap input so a very long transcript can't stall the LLM / blow the context.
+    text = text[: settings.summary_max_chars]
+    max_sentences = payload.maxSentences or settings.summary_max_sentences
+    max_sentences = max(1, min(int(max_sentences), 20))
+
+    summary = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: summarizer.summarize(text, max_sentences=max_sentences)
+    )
+    return JSONResponse({"ok": True, "provider": summarizer.name, "summary": summary})
+
+
 def _structured_payload(payload: TranscriptSaveRequest) -> dict[str, Any] | None:
     if payload.blocks is None and not payload.audioBase64:
         return None
@@ -612,6 +765,26 @@ def _decode_audio(audio_base64: str | None) -> bytes | None:
         return base64.b64decode(audio_base64, validate=True)
     except (binascii.Error, ValueError) as exc:
         raise HTTPException(status_code=400, detail="invalid audio encoding") from exc
+
+
+def _decode_pcm_payload(pcm_base64: str) -> np.ndarray:
+    """Decode a base64 16-bit PCM upload to float32, bounded so a huge body can't
+    OOM the host. The size is checked *before* decoding (413), then the bytes are
+    decoded (400 on garbage) and rejected if empty (400). Shared by the whole-file
+    endpoints (/api/transcribe/file, /api/enhance/separate)."""
+    max_bytes = settings.max_audio_upload_bytes
+    if max_bytes and (len(pcm_base64) * 3) // 4 > max_bytes:
+        raise HTTPException(
+            status_code=413, detail=f"audio payload exceeds {max_bytes} bytes"
+        )
+    try:
+        raw = base64.b64decode(pcm_base64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="invalid PCM payload") from exc
+    samples = pcm16le_to_float32(raw)
+    if samples.size == 0:
+        raise HTTPException(status_code=400, detail="audio payload is empty")
+    return samples
 
 
 def _remote_storage_dir() -> Path:
@@ -682,6 +855,104 @@ async def voice_status() -> JSONResponse:
     return JSONResponse({"ok": True, **snapshot, **meta})
 
 
+class ASRModelSwitchRequest(BaseModel):
+    id: str = Field(min_length=1, max_length=64)
+
+
+def _asr_models_payload() -> dict[str, Any]:
+    """The switcher's view of the world: the presets, which one is loaded, and
+    enough backend detail to rebuild the footer label after a swap."""
+    current_model = getattr(asr_engine, "model_name", "")
+    return {
+        "models": [opt.to_public() for opt in list_asr_models(settings, current_model)],
+        "activeId": active_model_id(settings, current_model),
+        "activeModel": current_model,
+        "backend": asr_engine.backend,
+        "device": asr_engine.device,
+        "computeType": getattr(asr_engine, "compute_type", ""),
+        "segmenter": settings.segmenter,
+        "provider": settings.asr_provider,
+        "streaming": _active_stream_count > 0,
+        "switch": asr_switch_state.snapshot(),
+    }
+
+
+@app.get("/api/asr/models")
+async def list_asr_model_options() -> JSONResponse:
+    return JSONResponse({"ok": True, **_asr_models_payload()})
+
+
+@app.get("/api/asr/model/status")
+async def asr_model_switch_status() -> JSONResponse:
+    return JSONResponse({"ok": True, **_asr_models_payload()})
+
+
+async def _run_asr_switch(option) -> None:
+    """Load ``option`` into a fresh engine, then atomically swap it (and a new
+    queue) in. The new model is loaded *before* the old queue is stopped, so a
+    load failure leaves the running model untouched — at the cost of both models
+    briefly co-residing in VRAM (fine for medium/large-v3 on a 12 GB card)."""
+    global asr_engine
+    loop = asyncio.get_running_loop()
+    try:
+        load_ref = option.model
+        if option.kind == "breeze":
+            # Offline-first: breeze is a LOCAL CTranslate2 directory. Resolve it
+            # (CWD-independent) and fail with a clear message instead of letting
+            # faster-whisper fall through to a confusing HuggingFace 404 — and an
+            # unwanted network call — when the directory is absent.
+            breeze_dir = resolve_breeze_model_dir(settings)
+            if not breeze_dir.exists():
+                raise RuntimeError(
+                    f"找不到 Breeze 模型目錄:{breeze_dir}(請放入 CTranslate2 模型,"
+                    "或用 BREEZE_ASR_BREEZE_MODEL 指定路徑)"
+                )
+            load_ref = str(breeze_dir)
+        asr_switch_state.report(0.1, "建立引擎")
+        # Identity/display uses the preset value (e.g. the relative breeze dir) so the
+        # switcher matches it back to its option; ``load_ref`` is the absolute path the
+        # local model is actually loaded from (CWD-independent).
+        new_engine = FasterWhisperASR(option.model, settings.asr_device, load_ref=load_ref)
+        asr_switch_state.report(0.25, f"載入 {option.label}")
+        await loop.run_in_executor(None, new_engine.load)
+
+        asr_switch_state.report(0.85, "切換佇列")
+        new_queue = ASRQueue(new_engine, settings.asr_concurrency)
+        await new_queue.start()
+        old_queue = app.state.asr_queue
+        app.state.asr_queue = new_queue
+        app.state.asr = new_engine
+        app.state.asr_error = None
+        asr_engine = new_engine
+        # Drain and release the previous engine's queue; dropping the last reference
+        # lets CTranslate2 free the old model's VRAM on garbage collection.
+        await old_queue.stop()
+    except Exception as exc:  # noqa: BLE001 - surface any load/swap failure to the poller
+        LOGGER.exception("ASR model switch failed")
+        asr_switch_state.fail(str(exc))
+    else:
+        asr_switch_state.finish()
+
+
+@app.post("/api/asr/model")
+async def switch_asr_model(payload: ASRModelSwitchRequest) -> JSONResponse:
+    current_model = getattr(asr_engine, "model_name", "")
+    option = find_asr_model(settings, current_model, payload.id)
+    if option is None:
+        raise HTTPException(status_code=404, detail=f"未知的模型:{payload.id}")
+    # Already the running model (and nothing loading) → nothing to do.
+    if option.model == current_model and not asr_switch_state.is_loading:
+        return JSONResponse({"ok": True, "noop": True, **_asr_models_payload()})
+    if _active_stream_count > 0:
+        raise HTTPException(status_code=409, detail="辨識進行中,請先停止再切換模型")
+    if not asr_switch_state.begin(option.id):
+        # A switch is already in flight; report its progress instead of racing.
+        return JSONResponse({"ok": True, **_asr_models_payload()})
+
+    app.state.asr_switch_task = asyncio.create_task(_run_asr_switch(option))
+    return JSONResponse({"ok": True, **_asr_models_payload()})
+
+
 def _run_transcript_analysis(
     samples: np.ndarray, sample_rate: int, blocks: list[dict[str, Any]]
 ) -> None:
@@ -715,6 +986,123 @@ async def analyze_transcript(payload: TranscriptAnalyzeRequest) -> JSONResponse:
 @app.get("/api/transcript/analyze/status")
 async def analyze_transcript_status() -> JSONResponse:
     return JSONResponse({"ok": True, **analyze_state.snapshot(include_result=True)})
+
+
+class FileTranscribeRequest(BaseModel):
+    # Raw 16-bit little-endian mono PCM (base64) — the same format the audio
+    # WebSocket streams, so the client reuses its decoder; the whole recording is
+    # sent once for a single batched pass. 16 kHz only (like the streaming path).
+    pcmBase64: str = Field(min_length=1)
+    sampleRate: int = 16_000
+    languages: list[str] | None = None
+    glossary: list[dict[str, str]] | None = None
+    translate: bool = False
+    translateTarget: str | None = None
+
+
+# The batched file endpoint runs OUTSIDE the live ASRQueue on purpose: a long file
+# must not head-of-line-block live-mic utterances stuck behind it in a single-worker
+# queue. This lock instead serialises concurrent *file* requests so two batched
+# pipelines can't run at once and double the shared model's VRAM.
+_file_batch_lock = asyncio.Lock()
+
+
+@app.post("/api/transcribe/file")
+async def transcribe_file_endpoint(payload: FileTranscribeRequest) -> JSONResponse:
+    """Whole-file batched transcription (opt-in ``BREEZE_ASR_FILE_BATCH_SIZE`` > 0).
+
+    Unlike the streaming file path, this returns every block at once from a single
+    ``BatchedInferencePipeline`` pass (3-4x on long files). Per-character 基頻/簡譜 is
+    left to the offline ``/api/transcript/analyze`` pass, which re-measures pitch
+    against a single global 主音 and is more accurate than the live per-window pass.
+    """
+    batch_size = settings.asr_file_batch_size
+    if batch_size <= 0 or not hasattr(asr_engine, "transcribe_file"):
+        raise HTTPException(
+            status_code=503,
+            detail="batched file transcription is disabled (set BREEZE_ASR_FILE_BATCH_SIZE>0)",
+        )
+    # 16 kHz only: the model is fixed-rate and the samples are fed in verbatim, so a
+    # different rate would silently produce a garbled (wrong-speed) transcript.
+    if payload.sampleRate != settings.sample_rate:
+        raise HTTPException(
+            status_code=400, detail=f"sampleRate must be {settings.sample_rate}"
+        )
+    samples = _decode_pcm_payload(payload.pcmBase64)
+
+    languages = _parse_languages(payload.languages, "auto")
+    glossary = _parse_glossary(payload.glossary)
+    replacements = sorted(
+        ((entry.source, entry.target) for entry in glossary),
+        key=lambda pair: len(pair[0]),
+        reverse=True,
+    )
+    prompt_terms = tuple(dict.fromkeys(entry.target for entry in glossary))
+    want_translate = payload.translate and translator.available
+    target = (payload.translateTarget or "").strip().lower() or translate_target
+
+    loop = asyncio.get_running_loop()
+    try:
+        async with _file_batch_lock:
+            transcription = await loop.run_in_executor(
+                None,
+                lambda: asr_engine.transcribe_file(
+                    samples,
+                    payload.sampleRate,
+                    languages[0],
+                    languages=languages,
+                    prompt_terms=prompt_terms,
+                    batch_size=batch_size,
+                ),
+            )
+    except Exception as exc:
+        LOGGER.exception("Batched file transcription failed")
+        raise HTTPException(status_code=500, detail=f"file transcription failed: {exc}") from exc
+
+    blocks: list[dict[str, Any]] = []
+    transcript_parts: list[str] = []
+    for segment in transcription.segments:
+        display_text = _apply_glossary(segment.text, replacements)
+        if not display_text.strip():
+            continue
+        # A loaded song file hallucinates the same subtitle-credit lines per segment;
+        # the streaming gate never runs here, so filter them out by text alone.
+        if _is_credit_hallucination(display_text):
+            continue
+        translation = ""
+        if want_translate:
+            translation = await loop.run_in_executor(
+                None, translator.translate, display_text, transcription.language, target
+            )
+        characters = [
+            {"char": char, "startSeconds": round(start, 3), "endSeconds": round(end, 3)}
+            for char, start, end in _split_words_to_chars(segment.words)
+        ]
+        blocks.append(
+            {
+                "text": display_text,
+                "startSeconds": round(segment.start, 2),
+                "endSeconds": round(segment.end, 2),
+                "segmentKind": "utterance",
+                "characters": characters,
+                "translation": translation or None,
+            }
+        )
+        transcript_parts.append(display_text)
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "language": transcription.language,
+            "blocks": blocks,
+            "transcript": " ".join(transcript_parts).strip(),
+            "backend": transcription.backend,
+            "device": transcription.device,
+            "batchSize": batch_size,
+            "translate": want_translate,
+            "translateTarget": target if want_translate else "",
+        }
+    )
 
 
 @app.get("/api/voices")
@@ -822,13 +1210,7 @@ async def separate_audio(payload: SeparateRequest) -> JSONResponse:
             detail="source separation not installed; install torch (CUDA) + demucs "
             "(see README 'Speech Enhancement & Source Separation')",
         )
-    try:
-        raw = base64.b64decode(payload.pcmBase64, validate=True)
-    except (binascii.Error, ValueError) as exc:
-        raise HTTPException(status_code=400, detail="invalid PCM payload") from exc
-    samples = pcm16le_to_float32(raw)
-    if samples.size == 0:
-        raise HTTPException(status_code=400, detail="audio payload is empty")
+    samples = _decode_pcm_payload(payload.pcmBase64)
 
     loop = asyncio.get_running_loop()
     try:
@@ -850,6 +1232,47 @@ async def separate_audio(payload: SeparateRequest) -> JSONResponse:
             else 0.0,
             "model": separator.name,
             "device": separator.device,
+        }
+    )
+
+
+@app.post("/api/enhance/denoise")
+async def denoise_audio(payload: DenoiseRequest) -> JSONResponse:
+    """DeepFilterNet3 denoise+dereverb over a whole recording, for A/B compare.
+
+    Runs the full clip through the same model the ASR pipeline uses per utterance,
+    but in one pass (no window-edge artifacts) — so the returned clip is a fair,
+    slightly cleaner stand-in for what recognition hears. Independent of the ASR
+    enhance settings so the compare works even when live/file enhancement is off.
+    """
+    if not denoiser.available:
+        raise HTTPException(
+            status_code=503,
+            detail="speech denoise not installed; install torch + deepfilternet "
+            "(see README 'Speech Enhancement & Source Separation')",
+        )
+    samples = _decode_pcm_payload(payload.pcmBase64)
+
+    loop = asyncio.get_running_loop()
+    try:
+        enhanced = await loop.run_in_executor(
+            None, denoiser.enhance, samples, payload.sampleRate
+        )
+    except Exception as exc:
+        LOGGER.exception("Speech denoise failed")
+        raise HTTPException(status_code=500, detail=f"speech denoise failed: {exc}") from exc
+
+    pcm = (np.clip(enhanced, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
+    return JSONResponse(
+        {
+            "ok": True,
+            "pcmBase64": base64.b64encode(pcm).decode("ascii"),
+            "sampleRate": payload.sampleRate,
+            "durationSeconds": round(enhanced.size / payload.sampleRate, 3)
+            if payload.sampleRate
+            else 0.0,
+            "model": denoiser.name,
+            "device": denoiser.device,
         }
     )
 
@@ -1013,7 +1436,13 @@ class StreamState:
     processor_task: asyncio.Task[None] | None = None
     transcript: str = ""
     dropped_windows: int = 0
+    # Whether this stream has been tallied into ``_active_stream_count`` (so the
+    # decrement in ``_stop_state`` fires exactly once, even when called twice).
+    counted_active: bool = False
     started_at: float = field(default_factory=time.monotonic)
+    # Per-connection speaker clusterer (diarization). Built at start only when the
+    # embedder is available, so labels are anonymous and reset every session.
+    clusterer: OnlineSpeakerClusterer | None = None
     # End (absolute seconds) of the last speech segment that reached the dedupe,
     # so the next utterance can tell a disjoint segment (real repeat → keep) from
     # a force-split continuation that re-includes the pre-roll (overlap → trim).
@@ -1090,9 +1519,19 @@ async def _handle_text_message(
         if state.started:
             await send_json(server_event("error", message="stream already started"))
             return False
+        # Closes the race where a stream starts mid-swap and captures a queue that
+        # ``_run_asr_switch`` is about to stop out from under it.
+        if asr_switch_state.is_loading:
+            await send_json(server_event("error", message="模型切換中,請稍後再試"))
+            return False
 
         state.mode = message.mode
         state.segmenter = _build_segmenter(message.sample_rate)
+        # A fresh clusterer per connection → anonymous, session-local speaker labels.
+        state.clusterer = build_clusterer(settings) if diarizer.available else None
+        # Translate only when both the client asked and the server has a model.
+        want_translate = message.translate and translator.available
+        target = message.translate_target or translate_target
         # File analysis streams a whole recording at once; an unbounded queue
         # keeps every window so nothing is dropped to backpressure. Live mic
         # streaming stays bounded so latency cannot snowball.
@@ -1101,10 +1540,19 @@ async def _handle_text_message(
         state.stop_event.clear()
         state.processor_task = asyncio.create_task(
             _process_windows(
-                state, send_json, asr_queue, message.languages, message.glossary
+                state,
+                send_json,
+                asr_queue,
+                message.languages,
+                message.glossary,
+                translate=want_translate,
+                translate_target=target,
             )
         )
         state.started = True
+        global _active_stream_count
+        _active_stream_count += 1
+        state.counted_active = True
         await send_json(
             server_event(
                 "ready",
@@ -1121,6 +1569,9 @@ async def _handle_text_message(
                 model=asr_queue.model,
                 computeType=asr_queue.compute_type,
                 enhance=(file_enhancer if message.mode == "file" else live_enhancer).name,
+                translate=want_translate,
+                translateTarget=target if want_translate else "",
+                diarize=state.clusterer is not None,
             )
         )
         return False
@@ -1178,6 +1629,9 @@ async def _process_windows(
     asr_queue: ASRQueue,
     languages: tuple[str, ...],
     glossary: tuple[GlossaryEntry, ...],
+    *,
+    translate: bool = False,
+    translate_target: str = "",
 ) -> None:
     assert state.queue is not None
 
@@ -1237,12 +1691,21 @@ async def _process_windows(
                     asr_samples = await loop.run_in_executor(
                         None, enhancer.enhance, asr_samples, settings.sample_rate
                     )
+                # Cross-segment 脈絡: seed the prompt with the tail of what has
+                # already been committed so proper nouns stay consistent. Off by
+                # default (chars == 0); the ASR engine drops it in free-detect mode.
+                context = (
+                    state.transcript[-settings.asr_context_chars :]
+                    if settings.asr_context_chars > 0
+                    else ""
+                )
                 queued_result = await asr_queue.transcribe(
                     asr_samples,
                     settings.sample_rate,
                     primary_language,
                     languages=languages,
                     prompt_terms=prompt_terms,
+                    context=context,
                 )
                 result = queued_result.result
                 asr_queue_wait_ms = queued_result.queue_wait_ms
@@ -1289,6 +1752,20 @@ async def _process_windows(
                 )
                 if novel_text:
                     state.transcript = f"{state.transcript}{novel_text}".strip()
+                    # Both run only on the committed (final) segment, never the
+                    # low-latency partial. Translation is of the block's own text so
+                    # the bilingual view stays 1:1 with blocks (no overlap-window
+                    # duplication). Speaker uses the RAW utterance audio.
+                    translation = ""
+                    if translate:
+                        translation = await loop.run_in_executor(
+                            None,
+                            translator.translate,
+                            novel_text,
+                            result.language,
+                            translate_target,
+                        )
+                    speaker = await _assign_speaker(loop, state, window, sample_rate)
                     await send_json(
                         server_event(
                             "final",
@@ -1301,6 +1778,8 @@ async def _process_windows(
                             endSeconds=round(window.end_seconds, 2),
                             pitch=pitch,
                             characters=characters,
+                            translation=translation or None,
+                            speaker=speaker,
                         )
                     )
 
@@ -1325,7 +1804,36 @@ async def _process_windows(
             state.queue.task_done()
 
 
+async def _assign_speaker(
+    loop: asyncio.AbstractEventLoop,
+    state: StreamState,
+    window: AudioWindow,
+    sample_rate: int,
+) -> int | None:
+    """The anonymous session speaker index for this utterance, or ``None``.
+
+    Very short or low-energy utterances are gated out (their embedding is noisy
+    and would pollute a centroid). The embedding is taken from the **raw**
+    ``window.samples`` — never the denoised ``asr_samples``, whose dereverb/denoise
+    strips the very voiceprint cues the speaker model relies on.
+    """
+    clusterer = state.clusterer
+    if clusterer is None:
+        return None
+    duration = window.end_seconds - window.start_seconds
+    if duration < settings.diarize_min_duration or window.rms < settings.rms_threshold:
+        return None
+    embedding = await loop.run_in_executor(None, diarizer.embed, window.samples, sample_rate)
+    if embedding is None:
+        return None
+    return clusterer.assign(embedding)
+
+
 async def _stop_state(state: StreamState, drain_timeout: float = 2.0) -> None:
+    if state.counted_active:
+        global _active_stream_count
+        _active_stream_count = max(0, _active_stream_count - 1)
+        state.counted_active = False
     if not state.stop_event.is_set() and state.segmenter is not None and hasattr(
         state.segmenter,
         "flush",
@@ -1356,6 +1864,7 @@ def _build_segmenter(sample_rate: int) -> AudioWindowBuffer | AudioUtteranceBuff
     detector = make_speech_detector(
         settings.vad_detector,
         rms_threshold=settings.rms_threshold,
+        rms_release_threshold=settings.rms_threshold * settings.vad_rms_release_ratio,
         speech_threshold=settings.vad_speech_threshold,
         neg_threshold=settings.vad_neg_threshold,
         model_path=settings.vad_silero_model_path or None,
@@ -1372,6 +1881,11 @@ def _build_segmenter(sample_rate: int) -> AudioWindowBuffer | AudioUtteranceBuff
 
 
 def _should_drop_asr_result(window: AudioWindow, result: ASRResult) -> bool:
+    # Subtitle-credit / sponsor boilerplate is never real speech, so drop it whatever
+    # the energy. This is the loud-歌詞 case: singing produces these at high volume and
+    # high confidence, where the quiet-silence gate below can never fire.
+    if _is_credit_hallucination(result.text):
+        return True
     # Note (silero VAD): the silero detector can onset a segment on quiet far-field
     # voice whose whole-window RMS is below asr_hallucination_rms_threshold, so
     # ``low_energy`` is True for windows the RMS segmenter would never have emitted.
@@ -1599,7 +2113,7 @@ def _block_spectrogram(
     finish = min(samples.size, int(math.ceil(float(end) * sample_rate)))
     if finish - begin < sample_rate // 50:
         return None
-    payload = compute_spectrogram(samples[begin:finish], sample_rate)
+    payload = compute_spectrogram(samples[begin:finish], sample_rate, clean_f0=settings.f0_clean)
     if payload is None:
         return None
     payload["durationSeconds"] = round((finish - begin) / sample_rate, 3)
@@ -1707,6 +2221,16 @@ def _round_intensity(value: float | None) -> float:
     if value is None:
         return 0.0
     return round(float(value), 4)
+
+
+def _is_credit_hallucination(text: str) -> bool:
+    """True when the text is subtitle-credit / sponsor boilerplate. Dropped regardless
+    of energy (unlike the silence fragments) because loud singing emits these at high
+    volume + high confidence, where the energy / no_speech gate can never fire."""
+    normalized = _normalize_hallucination_text(text)
+    if not normalized:
+        return False
+    return any(pattern.search(normalized) for pattern in HALLUCINATION_CREDIT_PATTERNS)
 
 
 def _is_common_silence_hallucination(text: str) -> bool:
@@ -1828,7 +2352,26 @@ def _dedupe_chars(text: str) -> list[tuple[str, int]]:
     return chars
 
 
-def run() -> None:
+def run(argv: list[str] | None = None) -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="breeze-elf", description="Breeze Elf local ASR server.")
+    sub = parser.add_subparsers(dest="command")
+    doctor_parser = sub.add_parser(
+        "doctor", help="Check GPU/torch/cuDNN/models and print an actionable report."
+    )
+    doctor_parser.add_argument(
+        "--load",
+        action="store_true",
+        help="Also load the Whisper model to confirm the resolved device/compute type.",
+    )
+    args = parser.parse_args(argv)
+
+    if args.command == "doctor":
+        from .doctor import run_doctor
+
+        raise SystemExit(run_doctor(load_model=args.load))
+
     import uvicorn
 
     logging.basicConfig(level=logging.INFO)

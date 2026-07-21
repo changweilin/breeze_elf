@@ -16,3 +16,6 @@ remote_transcripts/
 voices/
 checkpoints_v2/
 .smoke_voices*/
+# Local offline model dirs (Breeze CT2, NLLB, diarization ONNX, …) — large binaries.
+models/
+voice_outputs/

@@ -18,6 +18,17 @@ import {
   // stop voice.js from running, which also owns the page tab navigation.
 } from "./audio-utils.js?v=2";
 
+// Web cache for each 變聲 panel's loaded + generated data (convert/tts/sing/pitch), so
+// the whole working state is auto-restored on reload — not just the result player.
+// One record per panel keyed by its kind. A tiny self-contained IndexedDB store,
+// deliberately NOT sharing the 逐字稿 page's audio DB schema (per this project's
+// convention of duplicating small helpers across page controllers, not a shared module).
+const VOICE_DB_NAME = "breeze-elf-voice-v1";
+const VOICE_STORE_NAME = "results";
+const VOICE_PANELS = ["convert", "tts", "sing", "pitch"];
+const voicePersistTimers = {};
+let voiceDbPromise = null;
+
 const els = {
   page: document.querySelector("#page-voice"),
   status: document.querySelector("#voice-status"),
@@ -42,6 +53,7 @@ const els = {
   // convert
   cvRecord: document.querySelector("#cv-record"),
   cvUpload: document.querySelector("#cv-upload"),
+  cvClear: document.querySelector("#cv-clear"),
   cvFile: document.querySelector("#cv-file"),
   cvResultWrap: document.querySelector("#cv-result-wrap"),
   cvSource: document.querySelector("#cv-source"),
@@ -59,6 +71,7 @@ const els = {
   ttsBase: document.querySelector("#tts-base"),
   ttsSpeed: document.querySelector("#tts-speed"),
   ttsRun: document.querySelector("#tts-run"),
+  ttsClear: document.querySelector("#tts-clear"),
   ttsResultWrap: document.querySelector("#tts-result-wrap"),
   ttsResult: document.querySelector("#tts-result"),
   ttsDownload: document.querySelector("#tts-download"),
@@ -71,6 +84,7 @@ const els = {
   singTonic: document.querySelector("#sing-tonic"),
   singSpeed: document.querySelector("#sing-speed"),
   singRun: document.querySelector("#sing-run"),
+  singClear: document.querySelector("#sing-clear"),
   singResultWrap: document.querySelector("#sing-result-wrap"),
   singResult: document.querySelector("#sing-result"),
   singDownload: document.querySelector("#sing-download"),
@@ -84,6 +98,7 @@ const els = {
   pitchVisMeta: document.querySelector("#pitch-vis-meta"),
   pitchSpeed: document.querySelector("#pitch-speed"),
   pitchRun: document.querySelector("#pitch-run"),
+  pitchClear: document.querySelector("#pitch-clear"),
   pitchResultWrap: document.querySelector("#pitch-result-wrap"),
   pitchResult: document.querySelector("#pitch-result"),
   pitchDownload: document.querySelector("#pitch-download"),
@@ -96,6 +111,7 @@ const state = {
   initialized: false,
   modelReady: false,
   loading: false,
+  provider: "",
   pollTimer: 0,
   voices: [],
   selectedId: "",
@@ -275,11 +291,20 @@ function idleLabel(button) {
   return button?.dataset.idleLabel || "開始錄音";
 }
 
-// Record buttons are icon + label; swap both together so the glyph survives the toggle.
+// Record buttons swap icon (+ label) together so the glyph survives the toggle. The
+// operation-panel record button is icon-only (.icon-run) — keep its name on aria/title
+// for screen readers; the 聲音庫 record button keeps a visible label.
 function setRecordButton(button, recording) {
   if (!button) return;
   const label = recording ? "停止錄音" : idleLabel(button);
-  button.innerHTML = `<svg class="ic" aria-hidden="true"><use href="#${recording ? "i-stop" : "i-mic"}"></use></svg><span class="btn-label">${label}</span>`;
+  const svg = `<svg class="ic" aria-hidden="true"><use href="#${recording ? "i-stop" : "i-mic"}"></use></svg>`;
+  if (button.classList.contains("icon-run")) {
+    button.innerHTML = svg;
+    button.setAttribute("aria-label", label);
+    button.title = label;
+  } else {
+    button.innerHTML = `${svg}<span class="btn-label">${label}</span>`;
+  }
 }
 
 // Record/stop toggle. On stop the captured blob is handed to onDone, which kicks
@@ -367,6 +392,7 @@ async function initVoicePage() {
   if (!state.initialized) {
     state.initialized = true;
     await refreshVoices();
+    void restoreVoiceCache();
   }
   void ensureModelLoaded();
 }
@@ -376,7 +402,7 @@ async function ensureModelLoaded() {
     return;
   }
   state.loading = true;
-  showProgress("載入變聲模型中", 0, true);
+  showProgress(`載入${providerLabel()}中`, 0, true);
   try {
     const response = await fetch("/api/voice/load", { method: "POST" });
     const data = await response.json().catch(() => ({}));
@@ -433,7 +459,21 @@ function stopPolling() {
   }
 }
 
+// Human-readable name for the loading progress bar so it says which 變聲 model is
+// actually being loaded (Req: 進度條說明正在載入哪些模型).
+const PROVIDER_LABELS = {
+  mock: "變聲引擎(DSP 合成)",
+  openvoice: "OpenVoice 音色轉換模型",
+};
+
+function providerLabel() {
+  return PROVIDER_LABELS[state.provider] || "變聲模型";
+}
+
 function applyEngineMeta(data) {
+  if (data?.provider) {
+    state.provider = String(data.provider).toLowerCase();
+  }
   if (data?.backend) {
     const device = data.device && data.device !== "unknown" ? ` · ${data.device}` : "";
     els.engineTag.textContent = `${data.provider || data.backend}${device}`;
@@ -464,7 +504,8 @@ function applyStatus(data) {
   } else if (status === "loading") {
     state.loading = true;
     const fraction = typeof data.progress === "number" ? data.progress : 0;
-    showProgress(data.stage || "載入中", fraction, fraction <= 0.001);
+    const stage = data.stage ? `${providerLabel()} · ${data.stage}` : `載入${providerLabel()}中`;
+    showProgress(stage, fraction, fraction <= 0.001);
   }
   refreshButtons();
 }
@@ -979,6 +1020,7 @@ async function loadTranscriptFile(file) {
   els.singTonic.value = tonic ? String(tonic) : "";
   els.singTonic.placeholder = "自動";
   refreshButtons();
+  persistPanel("sing");
   setStatus(
     `已載入逐字稿「${file.name}」,共 ${sungCount} 個音、${singBlocks.length} 句${
       tonic ? ` · 以原曲音高 ${tonic} Hz 演唱(可調整基音 Hz)` : ""
@@ -1012,6 +1054,7 @@ function renderSingBlocks() {
     jianpu.addEventListener("input", () => {
       block.jianpu = jianpu.value;
       refreshButtons();
+      persistPanel("sing");
     });
 
     const lyric = document.createElement("input");
@@ -1023,6 +1066,7 @@ function renderSingBlocks() {
     lyric.addEventListener("input", () => {
       block.text = lyric.value;
       refreshButtons();
+      persistPanel("sing");
     });
 
     fields.append(jianpu, lyric);
@@ -1045,6 +1089,7 @@ function renderSingBlocks() {
       state.singBlocks.splice(index, 1);
       renderSingBlocks();
       refreshButtons();
+      persistPanel("sing");
     });
 
     // 段落播放鍵在上、刪除鍵在下,上下並排在這一句的右側。
@@ -1231,6 +1276,7 @@ async function loadAnalysisFile(file) {
     els.pitchVisMeta.textContent = `${built.voicedCount} 音 · ${seconds.toFixed(1)} 秒`;
   }
   refreshButtons();
+  persistPanel("pitch");
   setStatus(
     `已載入基頻分析「${file.name}」,共 ${built.voicedCount} 音(含滑音/氣音),將依實測音高演唱`,
   );
@@ -1729,7 +1775,7 @@ const RESULT_TARGETS = {
   },
 };
 
-function showResult(kind, audioBase64) {
+function showResult(kind, audioBase64, { scroll = true, persist = true } = {}) {
   const target = RESULT_TARGETS[kind];
   const audioEl = els[target.audio];
   const wrapEl = els[target.wrap];
@@ -1747,17 +1793,20 @@ function showResult(kind, audioBase64) {
   // Make sure the freshly revealed player is actually on screen so the user can
   // listen before deciding to download / save. "nearest" avoids the big viewport
   // jump that "center" can cause on phones.
-  try {
-    wrapEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  } catch {
-    /* scrollIntoView options unsupported — ignore */
+  if (scroll) {
+    try {
+      wrapEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    } catch {
+      /* scrollIntoView options unsupported — ignore */
+    }
   }
+  if (persist) persistPanel(kind);
 }
 
 // 聲音轉換 shows the original input clip next to the converted one so they can be
 // compared. Per-clip 下載/雲端儲存 live in each player's ⋮ menu; the buttons below
 // act on both as a 打包 (bundle).
-function showConvertResult(sourceBase64, convertedBase64) {
+function showConvertResult(sourceBase64, convertedBase64, { scroll = true, persist = true } = {}) {
   if (state.cvSourceUrl) {
     URL.revokeObjectURL(state.cvSourceUrl);
   }
@@ -1774,11 +1823,14 @@ function showConvertResult(sourceBase64, convertedBase64) {
   els.cvResult.load();
   closeAllPlayerMenus();
   els.cvResultWrap.hidden = false;
-  try {
-    els.cvResultWrap.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  } catch {
-    /* scrollIntoView options unsupported — ignore */
+  if (scroll) {
+    try {
+      els.cvResultWrap.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    } catch {
+      /* scrollIntoView options unsupported — ignore */
+    }
   }
+  if (persist) persistPanel("convert");
 }
 
 // Low-level remote save: POST one WAV to the outputs endpoint, return its server
@@ -2053,6 +2105,207 @@ function base64ToBlob(base64, type) {
   return new Blob([base64ToBytes(base64)], { type });
 }
 
+// --------------------------------------------------------------------------- //
+// web cache — auto-restore the last generated result into its player on reload
+// --------------------------------------------------------------------------- //
+
+function openVoiceDatabase() {
+  if (!("indexedDB" in window)) {
+    return Promise.resolve(null);
+  }
+  if (!voiceDbPromise) {
+    voiceDbPromise = new Promise((resolve, reject) => {
+      const request = indexedDB.open(VOICE_DB_NAME, 1);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(VOICE_STORE_NAME)) {
+          db.createObjectStore(VOICE_STORE_NAME, { keyPath: "id" });
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error("IndexedDB failed"));
+      request.onblocked = () => reject(new Error("IndexedDB blocked"));
+    });
+  }
+  return voiceDbPromise;
+}
+
+async function runVoiceStore(operation, mode = "readonly") {
+  const db = await openVoiceDatabase();
+  if (!db) {
+    return null;
+  }
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(VOICE_STORE_NAME, mode);
+    const store = transaction.objectStore(VOICE_STORE_NAME);
+    const request = operation(store);
+    let result = null;
+    request.onsuccess = () => {
+      result = request.result;
+    };
+    request.onerror = () => reject(request.error || new Error("IndexedDB request failed"));
+    transaction.oncomplete = () => resolve(result);
+    transaction.onerror = () => reject(transaction.error || new Error("IndexedDB transaction failed"));
+    transaction.onabort = () => reject(transaction.error || new Error("IndexedDB transaction aborted"));
+  });
+}
+
+// Snapshot everything a panel loaded or generated (base64 held in hand, so no
+// blob<->b64 round trip). convert keeps the echoed 來源 + 轉換 clips; the others keep
+// their editable inputs (text / 簡譜句 / 基頻列 + 參數) alongside the result clip.
+function snapshotPanel(kind) {
+  if (kind === "convert") {
+    return { sourceB64: state.cvSourceB64, resultB64: state.cvResultB64 };
+  }
+  if (kind === "tts") {
+    return {
+      text: els.ttsText.value,
+      base: els.ttsBase.value,
+      speed: els.ttsSpeed.value,
+      resultB64: state.ttsResultB64,
+    };
+  }
+  if (kind === "sing") {
+    return {
+      singBlocks: state.singBlocks,
+      tonic: els.singTonic.value,
+      speed: els.singSpeed.value,
+      resultB64: state.singResultB64,
+    };
+  }
+  if (kind === "pitch") {
+    return {
+      pitchRows: state.pitchRows,
+      pitchNotes: state.pitchNotes,
+      pitchTonic: state.pitchTonic,
+      speed: els.pitchSpeed.value,
+      resultB64: state.pitchResultB64,
+    };
+  }
+  return {};
+}
+
+// Debounced per-panel write so a burst of keystrokes / edits collapses to one put.
+function persistPanel(kind) {
+  window.clearTimeout(voicePersistTimers[kind]);
+  voicePersistTimers[kind] = window.setTimeout(() => {
+    void runVoiceStore(
+      (store) => store.put({ id: kind, ...snapshotPanel(kind) }),
+      "readwrite",
+    ).catch(() => {});
+  }, 350);
+}
+
+async function readVoiceRecord(id) {
+  try {
+    return await runVoiceStore((store) => store.get(id));
+  } catch {
+    return null;
+  }
+}
+
+// Restore every panel's loaded + generated data on page open. persist:false / scroll:false
+// so re-applying a cached clip neither re-writes it nor yanks the viewport around.
+async function restoreVoiceCache() {
+  // Drop the pre-per-panel single "last" record from older builds (harmless if absent).
+  void runVoiceStore((store) => store.delete("last"), "readwrite").catch(() => {});
+  const [convert, tts, sing, pitch] = await Promise.all(VOICE_PANELS.map(readVoiceRecord));
+
+  if (convert?.sourceB64 && convert?.resultB64) {
+    showConvertResult(convert.sourceB64, convert.resultB64, { scroll: false, persist: false });
+  }
+
+  if (tts) {
+    if (typeof tts.text === "string") els.ttsText.value = tts.text;
+    if (tts.base) els.ttsBase.value = tts.base;
+    if (tts.speed) els.ttsSpeed.value = tts.speed;
+    if (tts.resultB64) showResult("tts", tts.resultB64, { scroll: false, persist: false });
+  }
+
+  if (sing) {
+    if (Array.isArray(sing.singBlocks) && sing.singBlocks.length) {
+      state.singBlocks = sing.singBlocks;
+      renderSingBlocks();
+    }
+    if (sing.tonic) els.singTonic.value = sing.tonic;
+    if (sing.speed) els.singSpeed.value = sing.speed;
+    if (sing.resultB64) showResult("sing", sing.resultB64, { scroll: false, persist: false });
+  }
+
+  if (pitch) {
+    if (Array.isArray(pitch.pitchRows) && pitch.pitchRows.length) {
+      state.pitchRows = pitch.pitchRows;
+      state.pitchNotes = pitch.pitchNotes || null;
+      state.pitchTonic = pitch.pitchTonic || 0;
+      els.pitchEmpty.hidden = true;
+      els.pitchVis.hidden = false;
+      // Draw now only if the pitch subtab is already on screen; otherwise defer to
+      // showVoicePanel('pitch'), which redraws when opened (a hidden canvas is 0-wide).
+      if (!document.querySelector("#vpanel-pitch")?.hidden) {
+        renderPitchRelation(pitch.pitchRows);
+      }
+    }
+    if (pitch.speed) els.pitchSpeed.value = pitch.speed;
+    if (pitch.resultB64) showResult("pitch", pitch.resultB64, { scroll: false, persist: false });
+  }
+
+  refreshButtons();
+}
+
+// Wipe a single panel: reset its state + UI + cached record. Blocked while a job runs.
+function clearResultPlayer(kind) {
+  const target = RESULT_TARGETS[kind];
+  if (!target) return;
+  if (state[target.url]) {
+    URL.revokeObjectURL(state[target.url]);
+    state[target.url] = "";
+  }
+  state[target.b64] = "";
+  const audioEl = els[target.audio];
+  if (audioEl) {
+    audioEl.removeAttribute("src");
+    audioEl.load();
+  }
+  if (els[target.wrap]) els[target.wrap].hidden = true;
+}
+
+function clearPanel(kind) {
+  if (state.busy) return;
+  if (kind === "convert") {
+    if (state.cvSourceUrl) URL.revokeObjectURL(state.cvSourceUrl);
+    if (state.cvResultUrl) URL.revokeObjectURL(state.cvResultUrl);
+    state.cvSourceB64 = state.cvResultB64 = "";
+    state.cvSourceUrl = state.cvResultUrl = "";
+    els.cvSource.removeAttribute("src");
+    els.cvResult.removeAttribute("src");
+    els.cvResultWrap.hidden = true;
+  } else if (kind === "tts") {
+    els.ttsText.value = "";
+    els.ttsBase.value = "";
+    els.ttsSpeed.value = "";
+    clearResultPlayer("tts");
+  } else if (kind === "sing") {
+    stopSegmentSing();
+    state.singBlocks = [];
+    renderSingBlocks(); // seeds one empty row
+    els.singTonic.value = "";
+    els.singSpeed.value = "";
+    clearResultPlayer("sing");
+  } else if (kind === "pitch") {
+    state.pitchRows = null;
+    state.pitchNotes = null;
+    state.pitchTonic = 0;
+    els.pitchVis.hidden = true;
+    els.pitchEmpty.hidden = false;
+    els.pitchSpeed.value = "";
+    clearResultPlayer("pitch");
+  }
+  window.clearTimeout(voicePersistTimers[kind]);
+  void runVoiceStore((store) => store.delete(kind), "readwrite").catch(() => {});
+  refreshButtons();
+  setStatus("已清理");
+}
+
 function downloadUrl(url, name) {
   if (!url) {
     return;
@@ -2245,6 +2498,7 @@ els.cvRecord.addEventListener("click", () =>
   toggleRecording(els.cvRecord, (blob) => convertFromBlob(blob)),
 );
 els.cvUpload.addEventListener("click", () => els.cvFile.click());
+els.cvClear.addEventListener("click", () => clearPanel("convert"));
 els.cvFile.addEventListener("change", (event) => {
   const file = event.target.files?.[0];
   event.target.value = "";
@@ -2271,7 +2525,13 @@ els.ttsFile.addEventListener("change", (event) => {
   event.target.value = "";
   void loadTextFile(file);
 });
-els.ttsText.addEventListener("input", refreshButtons);
+els.ttsText.addEventListener("input", () => {
+  refreshButtons();
+  persistPanel("tts");
+});
+els.ttsBase.addEventListener("input", () => persistPanel("tts"));
+els.ttsSpeed.addEventListener("input", () => persistPanel("tts"));
+els.ttsClear.addEventListener("click", () => clearPanel("tts"));
 els.ttsRun.addEventListener("click", runTts);
 els.ttsDownload.addEventListener("click", () =>
   downloadUrl(state.ttsResultUrl, `breeze-voice-tts-${Date.now()}.wav`),
@@ -2290,7 +2550,11 @@ els.singAdd.addEventListener("click", () => {
   state.singBlocks.push({ text: "", jianpu: "", durations: [], glides: [], leadRest: 0 });
   renderSingBlocks();
   refreshButtons();
+  persistPanel("sing");
 });
+els.singTonic.addEventListener("input", () => persistPanel("sing"));
+els.singSpeed.addEventListener("input", () => persistPanel("sing"));
+els.singClear.addEventListener("click", () => clearPanel("sing"));
 els.singRun.addEventListener("click", runSing);
 els.singDownload.addEventListener("click", () =>
   downloadUrl(state.singResultUrl, `breeze-voice-sing-${Date.now()}.wav`),
@@ -2305,6 +2569,8 @@ els.pitchFile.addEventListener("change", (event) => {
   event.target.value = "";
   void loadAnalysisFile(file);
 });
+els.pitchSpeed.addEventListener("input", () => persistPanel("pitch"));
+els.pitchClear.addEventListener("click", () => clearPanel("pitch"));
 els.pitchRun.addEventListener("click", runPitchSing);
 els.pitchDownload.addEventListener("click", () =>
   downloadUrl(state.pitchResultUrl, `breeze-voice-sing-${Date.now()}.wav`),

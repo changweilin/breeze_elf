@@ -37,8 +37,10 @@ class ImmediateASRQueue:
     device = "cpu"
     queue_depth = 0
 
-    async def transcribe(self, samples, sample_rate, language, *, languages=(), prompt_terms=()):
-        del samples, sample_rate, languages, prompt_terms
+    async def transcribe(
+        self, samples, sample_rate, language, *, languages=(), prompt_terms=(), context=""
+    ):
+        del samples, sample_rate, languages, prompt_terms, context
         return QueuedASRResult(
             result=ASRResult(
                 text="最後一句",
@@ -60,8 +62,10 @@ class RecordingASRQueue:
     def __init__(self):
         self.received_rms = 0.0
 
-    async def transcribe(self, samples, sample_rate, language, *, languages=(), prompt_terms=()):
-        del sample_rate, languages, prompt_terms
+    async def transcribe(
+        self, samples, sample_rate, language, *, languages=(), prompt_terms=(), context=""
+    ):
+        del sample_rate, languages, prompt_terms, context
         self.received_rms = calculate_rms(samples)
         return QueuedASRResult(
             result=ASRResult(
@@ -254,9 +258,9 @@ class MainTests(unittest.IsolatedAsyncioTestCase):
 
         class _FixedTextQueue(ImmediateASRQueue):
             async def transcribe(
-                self, samples, sample_rate, language, *, languages=(), prompt_terms=()
+                self, samples, sample_rate, language, *, languages=(), prompt_terms=(), context=""
             ):
-                del samples, sample_rate, languages, prompt_terms
+                del samples, sample_rate, languages, prompt_terms, context
                 return QueuedASRResult(
                     result=ASRResult(
                         text="機器學習很有趣",
@@ -283,6 +287,288 @@ class MainTests(unittest.IsolatedAsyncioTestCase):
         final = next(event for event in events if event["type"] == "final")
         self.assertEqual(final["text"], "Mike 學習很有趣")
         self.assertEqual(final["transcript"], "Mike 學習很有趣")
+
+    async def test_process_windows_seeds_context_when_enabled(self):
+        sample_rate = 16_000
+        time_axis = np.arange(sample_rate, dtype=np.float32) / sample_rate
+        samples = (0.05 * np.sin(2 * np.pi * 220.0 * time_axis)).astype(np.float32)
+        window = AudioWindow(
+            index=0,
+            start_seconds=0.0,
+            end_seconds=1.0,
+            samples=samples,
+            rms=calculate_rms(samples),
+            is_speech=True,
+            kind="utterance",
+        )
+
+        class _ContextQueue(ImmediateASRQueue):
+            def __init__(self):
+                self.contexts = []
+
+            async def transcribe(
+                self, samples, sample_rate, language, *, languages=(), prompt_terms=(), context=""
+            ):
+                del samples, sample_rate, languages, prompt_terms
+                self.contexts.append(context)
+                return QueuedASRResult(
+                    result=ASRResult(
+                        text="新的一句",
+                        language=language,
+                        duration_ms=0,
+                        backend=self.backend,
+                        device=self.device,
+                    ),
+                    queue_wait_ms=0,
+                    queue_depth=0,
+                )
+
+        state = StreamState(started=True, queue=asyncio.Queue(maxsize=1))
+        # 8-char transcript with a 4-char cap so real truncation is exercised — a
+        # regression to an unguarded `[-0:]`/`[-chars:]` slice would return the whole
+        # string and be caught here (it also silently turns the opt-in feature on).
+        state.transcript = "上一段的文字內容"
+        await state.queue.put(window)
+        state.stop_event.set()
+
+        async def send_json(payload):
+            del payload
+
+        queue = _ContextQueue()
+        with patch.object(
+            main,
+            "settings",
+            replace(main.settings, asr_context_chars=4, sample_rate=sample_rate),
+        ):
+            await main._process_windows(state, send_json, queue, ("zh",), ())
+
+        self.assertEqual(queue.contexts[0], "文字內容")
+
+    async def test_process_windows_omits_context_when_disabled(self):
+        # The off-by-default invariant: asr_context_chars=0 must pass "" (never the
+        # whole transcript), guarding against the `s[-0:]` == full-string footgun.
+        sample_rate = 16_000
+        time_axis = np.arange(sample_rate, dtype=np.float32) / sample_rate
+        samples = (0.05 * np.sin(2 * np.pi * 220.0 * time_axis)).astype(np.float32)
+        window = AudioWindow(
+            index=0,
+            start_seconds=0.0,
+            end_seconds=1.0,
+            samples=samples,
+            rms=calculate_rms(samples),
+            is_speech=True,
+            kind="utterance",
+        )
+
+        class _ContextQueue(ImmediateASRQueue):
+            def __init__(self):
+                self.contexts = []
+
+            async def transcribe(
+                self, samples, sample_rate, language, *, languages=(), prompt_terms=(), context=""
+            ):
+                del samples, sample_rate, languages, prompt_terms
+                self.contexts.append(context)
+                return QueuedASRResult(
+                    result=ASRResult(
+                        text="一句話",
+                        language=language,
+                        duration_ms=0,
+                        backend=self.backend,
+                        device=self.device,
+                    ),
+                    queue_wait_ms=0,
+                    queue_depth=0,
+                )
+
+        state = StreamState(started=True, queue=asyncio.Queue(maxsize=1))
+        state.transcript = "已經有很多內容了"
+        await state.queue.put(window)
+        state.stop_event.set()
+
+        async def send_json(payload):
+            del payload
+
+        queue = _ContextQueue()
+        with patch.object(
+            main,
+            "settings",
+            replace(main.settings, asr_context_chars=0, sample_rate=sample_rate),
+        ):
+            await main._process_windows(state, send_json, queue, ("zh",), ())
+
+        self.assertEqual(queue.contexts[0], "")
+
+    async def test_process_windows_attaches_translation_and_speaker_on_final(self):
+        from breeze_elf.diarize import OnlineSpeakerClusterer
+
+        sample_rate = 16_000
+        time_axis = np.arange(sample_rate, dtype=np.float32) / sample_rate
+        samples = (0.05 * np.sin(2 * np.pi * 220.0 * time_axis)).astype(np.float32)
+        window = AudioWindow(
+            index=0,
+            start_seconds=0.0,
+            end_seconds=1.0,
+            samples=samples,
+            rms=calculate_rms(samples),
+            is_speech=True,
+            kind="utterance",
+        )
+
+        class _FixedTextQueue(ImmediateASRQueue):
+            async def transcribe(
+                self, samples, sample_rate, language, *, languages=(), prompt_terms=(), context=""
+            ):
+                del samples, sample_rate, languages, prompt_terms, context
+                return QueuedASRResult(
+                    result=ASRResult(
+                        text="你好世界", language=language, duration_ms=0,
+                        backend=self.backend, device=self.device,
+                    ),
+                    queue_wait_ms=0, queue_depth=0,
+                )
+
+        class _FakeTranslator:
+            available = True
+
+            def translate(self, text, src, tgt):
+                return f"[{tgt}]{text}"
+
+        class _FakeEmbedder:
+            def embed(self, samples, sample_rate):
+                return np.array([1.0, 0.0, 0.0], dtype=np.float32)
+
+        state = StreamState(started=True, queue=asyncio.Queue(maxsize=1))
+        state.clusterer = OnlineSpeakerClusterer(max_speakers=4, threshold=0.75)
+        await state.queue.put(window)
+        state.stop_event.set()
+        events = []
+
+        async def send_json(payload):
+            events.append(payload)
+
+        with patch.object(main, "translator", _FakeTranslator()), patch.object(
+            main, "diarizer", _FakeEmbedder()
+        ):
+            await main._process_windows(
+                state, send_json, _FixedTextQueue(), ("zh",), (),
+                translate=True, translate_target="en",
+            )
+
+        final = next(event for event in events if event["type"] == "final")
+        self.assertEqual(final["translation"], "[en]你好世界")
+        self.assertEqual(final["speaker"], 0)  # first speaker, 0-based
+
+    async def test_process_windows_no_translation_or_speaker_when_disabled(self):
+        tone = 0.05 * np.sin(2 * np.pi * 220.0 * np.arange(16_000) / 16_000)
+        window = AudioWindow(
+            index=0, start_seconds=0.0, end_seconds=1.0,
+            samples=tone.astype(np.float32),
+            rms=0.03, is_speech=True, kind="utterance",
+        )
+
+        class _FixedTextQueue(ImmediateASRQueue):
+            async def transcribe(
+                self, samples, sample_rate, language, *, languages=(), prompt_terms=(), context=""
+            ):
+                del samples, sample_rate, languages, prompt_terms, context
+                return QueuedASRResult(
+                    result=ASRResult(text="嗨", language=language, duration_ms=0,
+                                     backend=self.backend, device=self.device),
+                    queue_wait_ms=0, queue_depth=0,
+                )
+
+        state = StreamState(started=True, queue=asyncio.Queue(maxsize=1))  # no clusterer
+        await state.queue.put(window)
+        state.stop_event.set()
+        events = []
+
+        async def send_json(payload):
+            events.append(payload)
+
+        await main._process_windows(state, send_json, _FixedTextQueue(), ("zh",), ())
+        final = next(event for event in events if event["type"] == "final")
+        self.assertIsNone(final["translation"])  # translate defaulted off
+        self.assertIsNone(final["speaker"])  # no clusterer built
+
+
+class _BatchEngine:
+    backend = "batch-test"
+    device = "cpu"
+
+    def transcribe_file(
+        self, samples, sample_rate, language, *, languages=None, prompt_terms=None,
+        context=None, batch_size=16,
+    ):
+        del samples, sample_rate, language, languages, prompt_terms, context, batch_size
+        from breeze_elf.asr import FileSegment, FileTranscription, WordTiming
+
+        segment = FileSegment(
+            text="機器學習", start=0.0, end=1.0, words=(WordTiming("機器學習", 0.0, 1.0),)
+        )
+        return FileTranscription(
+            segments=(segment,), language="zh", duration_ms=3,
+            backend=self.backend, device=self.device,
+        )
+
+
+class BatchedFileEndpointTests(unittest.IsolatedAsyncioTestCase):
+    async def test_returns_blocks_with_glossary_applied(self):
+        pcm = np.full(1600, 1000, dtype="<i2").tobytes()
+        payload = main.FileTranscribeRequest(
+            pcmBase64=base64.b64encode(pcm).decode("ascii"),
+            sampleRate=16000,
+            glossary=[{"from": "機器學習", "to": "Mike 學習"}],
+        )
+        with patch.object(main, "asr_engine", _BatchEngine()), patch.object(
+            main, "settings", replace(main.settings, asr_file_batch_size=8)
+        ):
+            response = await main.transcribe_file_endpoint(payload)
+
+        data = json.loads(response.body)
+        self.assertTrue(data["ok"])
+        self.assertEqual(len(data["blocks"]), 1)
+        # Glossary rewrites the display text, but per-character timings stay on the
+        # raw recognised word (same as the streaming path), so chars come from 機器學習.
+        self.assertEqual(data["blocks"][0]["text"], "Mike 學習")
+        self.assertEqual(data["blocks"][0]["characters"][0]["char"], "機")
+        self.assertEqual(len(data["blocks"][0]["characters"]), 4)
+        self.assertEqual(data["transcript"], "Mike 學習")
+        self.assertEqual(data["batchSize"], 8)
+
+    async def test_disabled_returns_503(self):
+        payload = main.FileTranscribeRequest(
+            pcmBase64=base64.b64encode(np.zeros(8, dtype="<i2").tobytes()).decode("ascii")
+        )
+        with patch.object(main, "settings", replace(main.settings, asr_file_batch_size=0)):
+            with self.assertRaises(main.HTTPException) as ctx:
+                await main.transcribe_file_endpoint(payload)
+        self.assertEqual(ctx.exception.status_code, 503)
+
+    async def test_oversized_payload_returns_413(self):
+        # 4000 decoded bytes against a 1000-byte cap → 413 before any decode/transcribe.
+        big = base64.b64encode(np.zeros(2000, dtype="<i2").tobytes()).decode("ascii")
+        payload = main.FileTranscribeRequest(pcmBase64=big)
+        with patch.object(main, "asr_engine", _BatchEngine()), patch.object(
+            main,
+            "settings",
+            replace(main.settings, asr_file_batch_size=8, max_audio_upload_bytes=1000),
+        ):
+            with self.assertRaises(main.HTTPException) as ctx:
+                await main.transcribe_file_endpoint(payload)
+        self.assertEqual(ctx.exception.status_code, 413)
+
+    async def test_wrong_sample_rate_returns_400(self):
+        payload = main.FileTranscribeRequest(
+            pcmBase64=base64.b64encode(np.zeros(1600, dtype="<i2").tobytes()).decode("ascii"),
+            sampleRate=48000,
+        )
+        with patch.object(main, "asr_engine", _BatchEngine()), patch.object(
+            main, "settings", replace(main.settings, asr_file_batch_size=8)
+        ):
+            with self.assertRaises(main.HTTPException) as ctx:
+                await main.transcribe_file_endpoint(payload)
+        self.assertEqual(ctx.exception.status_code, 400)
 
 
 class CharacterPayloadTests(unittest.TestCase):
@@ -500,6 +786,50 @@ class SilenceHallucinationTests(unittest.TestCase):
 
         self.assertTrue(_should_drop_asr_result(window, result))
 
+    def test_drops_subtitle_credit_even_when_loud(self):
+        # The regression: loud 歌詞 hallucinate subtitle credits at high volume and
+        # low no_speech_prob, so the quiet-silence gate can never fire — they must
+        # still be dropped.
+        window = AudioWindow(
+            index=0,
+            start_seconds=0.0,
+            end_seconds=1.0,
+            samples=np.ones(16000, dtype=np.float32) * 0.2,
+            rms=0.2,
+            is_speech=True,
+        )
+        result = ASRResult(
+            text="字幕由 Amara.org 社群提供",
+            language="zh",
+            duration_ms=1,
+            backend="test",
+            device="cpu",
+            no_speech_prob=0.05,
+        )
+
+        self.assertTrue(_should_drop_asr_result(window, result))
+
+    def test_drops_subtitle_credit_wording_variant_when_loud(self):
+        # A variant org name / wording that is not a literal blocklist fragment.
+        window = AudioWindow(
+            index=0,
+            start_seconds=0.0,
+            end_seconds=1.0,
+            samples=np.ones(16000, dtype=np.float32) * 0.2,
+            rms=0.2,
+            is_speech=True,
+        )
+        result = ASRResult(
+            text="字幕提供由 華納 社群提供的字",
+            language="zh",
+            duration_ms=1,
+            backend="test",
+            device="cpu",
+            no_speech_prob=0.05,
+        )
+
+        self.assertTrue(_should_drop_asr_result(window, result))
+
     def test_keeps_normal_speech(self):
         window = AudioWindow(
             index=0,
@@ -528,6 +858,147 @@ class StaticAssetsTests(unittest.TestCase):
     def test_root_static_assets_are_whitelisted_and_present(self):
         for asset_name in main.ROOT_STATIC_MEDIA_TYPES:
             self.assertTrue((Path(main.WEB_DIR) / asset_name).is_file(), asset_name)
+
+
+class _FakeSwitchEngine:
+    backend = "faster-whisper"
+
+    def __init__(self, model_name, device_preference="auto", *, load_ref=None):
+        self.model_name = model_name
+        self._load_ref = load_ref or model_name
+        self.device_preference = device_preference
+        self.device = "cpu"
+        self.compute_type = "int8"
+        self.loaded = False
+
+    def load(self):
+        self.loaded = True
+
+
+class _FakeSwitchQueue:
+    def __init__(self, asr=None, concurrency=1):
+        self.asr = asr
+        self.started = False
+        self.stopped = False
+
+    async def start(self):
+        self.started = True
+
+    async def stop(self):
+        self.stopped = True
+
+
+class ASRModelSwitchEndpointTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        # The switch state is a module singleton; keep tests independent.
+        main.asr_switch_state.status = "idle"
+        main.asr_switch_state.error = None
+
+    async def test_list_endpoint_exposes_presets_and_active(self):
+        response = await main.list_asr_model_options()
+        body = json.loads(response.body)
+        ids = [m["id"] for m in body["models"]]
+        self.assertIn("breeze", ids)
+        self.assertIn("medium", ids)
+        self.assertIn("large-v3", ids)
+        self.assertIn("activeId", body)
+
+    async def test_unknown_model_id_returns_404(self):
+        with self.assertRaises(main.HTTPException) as ctx:
+            await main.switch_asr_model(main.ASRModelSwitchRequest(id="does-not-exist"))
+        self.assertEqual(ctx.exception.status_code, 404)
+
+    async def test_switch_rejected_while_streaming(self):
+        with patch.object(main, "_active_stream_count", 1):
+            with self.assertRaises(main.HTTPException) as ctx:
+                await main.switch_asr_model(main.ASRModelSwitchRequest(id="large-v3"))
+        self.assertEqual(ctx.exception.status_code, 409)
+
+    async def test_switch_to_active_model_is_noop(self):
+        current = getattr(main.asr_engine, "model_name", "")
+        active_id = main.active_model_id(main.settings, current)
+        response = await main.switch_asr_model(main.ASRModelSwitchRequest(id=active_id))
+        body = json.loads(response.body)
+        self.assertTrue(body.get("noop"))
+
+    async def test_switch_hot_swaps_engine_and_queue(self):
+        original_engine = main.asr_engine
+        original_queue = getattr(main.app.state, "asr_queue", None)
+        old_queue = _FakeSwitchQueue()
+        main.app.state.asr_queue = old_queue
+        try:
+            with (
+                patch.object(main, "FasterWhisperASR", _FakeSwitchEngine),
+                patch.object(main, "ASRQueue", _FakeSwitchQueue),
+                patch.object(main, "_active_stream_count", 0),
+            ):
+                await main.switch_asr_model(main.ASRModelSwitchRequest(id="large-v3"))
+                await main.app.state.asr_switch_task
+
+            self.assertEqual(main.asr_switch_state.snapshot()["status"], "ready")
+            self.assertEqual(main.asr_engine.model_name, "large-v3")
+            self.assertTrue(main.asr_engine.loaded)
+            self.assertTrue(old_queue.stopped)
+            self.assertIsInstance(main.app.state.asr_queue, _FakeSwitchQueue)
+            self.assertTrue(main.app.state.asr_queue.started)
+        finally:
+            main.asr_engine = original_engine
+            main.app.state.asr = original_engine
+            if original_queue is not None:
+                main.app.state.asr_queue = original_queue
+            main.asr_switch_state.status = "idle"
+            main.asr_switch_state.error = None
+
+    async def test_switch_to_breeze_missing_dir_reports_clear_error(self):
+        # Offline-first: a missing local CT2 dir must fail with an actionable message
+        # (and never fall through to a HuggingFace lookup).
+        original_engine = main.asr_engine
+        fake_settings = replace(main.settings, asr_breeze_model="models/__nope_breeze__")
+        try:
+            with (
+                patch.object(main, "settings", fake_settings),
+                patch.object(main, "_active_stream_count", 0),
+            ):
+                await main.switch_asr_model(main.ASRModelSwitchRequest(id="breeze"))
+                await main.app.state.asr_switch_task
+
+            snapshot = main.asr_switch_state.snapshot()
+            self.assertEqual(snapshot["status"], "error")
+            self.assertIn("找不到 Breeze 模型目錄", snapshot["error"])
+            self.assertIs(main.asr_engine, original_engine)
+        finally:
+            main.asr_engine = original_engine
+            main.asr_switch_state.status = "idle"
+            main.asr_switch_state.error = None
+
+    async def test_switch_reports_error_on_load_failure(self):
+        class _FailingEngine(_FakeSwitchEngine):
+            def load(self):
+                raise RuntimeError("model dir not found")
+
+        original_engine = main.asr_engine
+        original_queue = getattr(main.app.state, "asr_queue", None)
+        main.app.state.asr_queue = _FakeSwitchQueue()
+        try:
+            with (
+                patch.object(main, "FasterWhisperASR", _FailingEngine),
+                patch.object(main, "ASRQueue", _FakeSwitchQueue),
+                patch.object(main, "_active_stream_count", 0),
+            ):
+                await main.switch_asr_model(main.ASRModelSwitchRequest(id="large-v3"))
+                await main.app.state.asr_switch_task
+
+            snapshot = main.asr_switch_state.snapshot()
+            self.assertEqual(snapshot["status"], "error")
+            self.assertIn("model dir not found", snapshot["error"])
+            # A failed load must leave the running engine untouched.
+            self.assertIs(main.asr_engine, original_engine)
+        finally:
+            main.asr_engine = original_engine
+            if original_queue is not None:
+                main.app.state.asr_queue = original_queue
+            main.asr_switch_state.status = "idle"
+            main.asr_switch_state.error = None
 
 
 if __name__ == "__main__":

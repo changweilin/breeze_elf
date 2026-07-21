@@ -6,10 +6,14 @@ const els = {
   clear: document.querySelector("#clear"),
   lang: document.querySelector("#lang"),
   glossary: document.querySelector("#glossary"),
+  translate: document.querySelector("#translate"),
   search: document.querySelector("#search"),
   searchDialog: document.querySelector("#search-dialog"),
   searchInput: document.querySelector("#search-input"),
   searchResults: document.querySelector("#search-results"),
+  summarize: document.querySelector("#summarize"),
+  summaryDialog: document.querySelector("#summary-dialog"),
+  summaryBody: document.querySelector("#summary-body"),
   viewTabs: Array.from(document.querySelectorAll(".view-tab")),
   analyze: document.querySelector("#analyze"),
   analyzeProgress: document.querySelector("#analyze-progress"),
@@ -23,7 +27,17 @@ const els = {
   audioPlayer: document.querySelector("#recording"),
   audioDownload: document.querySelector("#audio-download"),
   audioSave: document.querySelector("#audio-save"),
+  audioDenoise: document.querySelector("#audio-denoise"),
+  audioSeparate: document.querySelector("#audio-separate"),
+  comparePanel: document.querySelector("#compare-panel"),
+  compareAudio: document.querySelector("#compare-audio"),
+  compareTitle: document.querySelector("#compare-title"),
+  compareDownload: document.querySelector("#compare-download"),
+  audioModelProgress: document.querySelector("#audio-model-progress"),
+  audioModelProgressLabel: document.querySelector("#audio-model-progress-label"),
   theme: document.querySelector("#theme"),
+  settings: document.querySelector("#settings"),
+  settingsPanel: document.querySelector("#settings-panel"),
   themeColor: document.querySelector("meta[name='theme-color']"),
   status: document.querySelector("#status"),
   stats: document.querySelector("#stats"),
@@ -32,6 +46,12 @@ const els = {
   backend: document.querySelector("#backend"),
   about: document.querySelector("#about"),
   aboutBackend: document.querySelector("#about-backend"),
+  asrModelOptions: document.querySelector("#asr-model-options"),
+  asrSwitchProgress: document.querySelector("#asr-switch-progress"),
+  asrSwitchLabel: document.querySelector("#asr-switch-label"),
+  asrSwitchPct: document.querySelector("#asr-switch-pct"),
+  asrSwitchBar: document.querySelector("#asr-switch-bar"),
+  asrSwitchStatus: document.querySelector("#asr-switch-status"),
 };
 
 // Buttons are icon-only; swap the sprite glyph instead of writing text (which would wipe the icon).
@@ -68,6 +88,9 @@ const LANGUAGE_LABELS = new Map(LANGUAGE_OPTIONS.map((item) => [item.code, item.
 const AUDIO_DB_NAME = "breeze-elf-audio-v1";
 const AUDIO_STORE_NAME = "sessions";
 const AUDIO_RECORD_ID = "current";
+// The 降噪/分離 compare clip is cached alongside the recording (same store, own key)
+// so the second player survives a reload — invalidated whenever the recording changes.
+const COMPARE_RECORD_ID = "compare";
 const AUDIO_SAMPLE_RATE = 16000;
 const AUDIO_CHANNEL_COUNT = 1;
 const AUDIO_BYTES_PER_SAMPLE = 2;
@@ -182,6 +205,20 @@ const state = {
   savingAudio: false,
   analyzingPitch: false,
   fileLanguageShown: false,
+  // Whether the server offers whole-file batched transcription (BREEZE_ASR_FILE_BATCH_SIZE>0);
+  // resolved once from /health. null = not yet checked → fall back to WS streaming.
+  fileBatchAvailable: null,
+  // 原始/降噪 A/B compare: whether the server can run each pass (resolved from
+  // /health), plus the current generated clip's object URL + blob for download.
+  denoiseAvailable: null,
+  separateAvailable: null,
+  compareObjectUrl: "",
+  compareBlob: null,
+  compareFilename: "",
+  compareBusy: false,
+  // True only while the initial restore runs, so resetComparePanel (fired by
+  // refreshAudioPreview during that restore) keeps the cached clip instead of deleting it.
+  restoringCompare: false,
   openBlocks: new Set(),
   demoRunning: false,
   demoTimers: [],
@@ -190,8 +227,12 @@ const state = {
   autoDetectLang: Boolean(INITIAL_SETTINGS.autoDetectLang),
   // 載入音檔的後製情境:"general" 直接辨識,"music" 先 Demucs 分離人聲再辨識歌詞。
   scenario: INITIAL_SETTINGS.scenario === "music" ? "music" : "general",
+  // 翻譯:辨識後把每段翻成繁體中文(伺服器需啟用 NLLB;預設關)。雙語堆疊顯示。
+  translateEnabled: Boolean(INITIAL_SETTINGS.translateEnabled),
   glossary: loadStoredGlossary(),
   editingIndex: null,
+  // 辨識模型熱切換(模型與演算法對話框):防重入,切換中禁點其他模型。
+  asrSwitching: false,
 };
 
 let audioDatabasePromise = null;
@@ -269,6 +310,7 @@ function persistSettings() {
         languages: state.languages,
         autoDetectLang: state.autoDetectLang,
         scenario: state.scenario,
+        translateEnabled: state.translateEnabled,
       }),
     );
   } catch {
@@ -648,6 +690,194 @@ function openAbout() {
   } else {
     els.about.setAttribute("open", "");
   }
+  // Refresh the model switcher each open so it reflects the running model (and
+  // any switch a previous open kicked off).
+  void loadAsrModels();
+}
+
+// ── 辨識模型切換 ──────────────────────────────────────────────────────────────
+function setAsrSwitchStatus(text, isError) {
+  if (!els.asrSwitchStatus) {
+    return;
+  }
+  els.asrSwitchStatus.textContent = text || "";
+  els.asrSwitchStatus.classList.toggle("error", Boolean(isError));
+}
+
+function showAsrSwitchProgress(sw) {
+  if (!els.asrSwitchProgress) {
+    return;
+  }
+  const fraction = Math.max(0, Math.min(1, Number(sw?.progress) || 0));
+  els.asrSwitchProgress.hidden = false;
+  els.asrSwitchLabel.textContent = sw?.stage || "載入中";
+  els.asrSwitchPct.textContent = `${Math.round(fraction * 100)}%`;
+  els.asrSwitchBar.style.width = `${(fraction * 100).toFixed(0)}%`;
+  els.asrSwitchBar.classList.toggle("error", sw?.status === "error");
+}
+
+function hideAsrSwitchProgress() {
+  if (els.asrSwitchProgress) {
+    els.asrSwitchProgress.hidden = true;
+  }
+}
+
+function setAsrOptionsDisabled(disabled) {
+  els.asrModelOptions
+    ?.querySelectorAll(".model-switch-option")
+    .forEach((btn) => {
+      // Keep the active model non-interactive regardless; disable all while switching.
+      btn.disabled = disabled || btn.getAttribute("aria-pressed") === "true";
+    });
+}
+
+function backendLabelFromModels(data) {
+  const device = data.computeType ? `${data.device}/${data.computeType}` : data.device;
+  return [data.backend, data.activeModel, device, data.segmenter || "audio"]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+function renderAsrModels(data) {
+  if (!els.asrModelOptions) {
+    return;
+  }
+  const options = data.models || [];
+  const activeId = data.activeId;
+  const switching = data.switch?.status === "loading";
+  state.asrSwitching = switching;
+  els.asrModelOptions.replaceChildren();
+  options.forEach((opt) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "model-switch-option";
+    btn.textContent = opt.label;
+    btn.dataset.id = opt.id;
+    const isActive = opt.id === activeId;
+    btn.setAttribute("aria-pressed", String(isActive));
+    btn.disabled = switching || isActive;
+    btn.addEventListener("click", () => void switchAsrModel(opt.id, opt.label));
+    els.asrModelOptions.append(btn);
+  });
+
+  if (switching) {
+    showAsrSwitchProgress(data.switch);
+    void pollAsrSwitch();
+    return;
+  }
+  hideAsrSwitchProgress();
+  if (data.switch?.status === "error" && data.switch.error) {
+    setAsrSwitchStatus(`切換失敗:${data.switch.error}`, true);
+  } else {
+    const active = options.find((opt) => opt.id === activeId);
+    setAsrSwitchStatus(active ? `目前使用:${active.label}` : "", false);
+  }
+}
+
+async function loadAsrModels() {
+  if (!els.asrModelOptions) {
+    return;
+  }
+  if (DEMO_MODE) {
+    els.asrModelOptions.replaceChildren();
+    hideAsrSwitchProgress();
+    setAsrSwitchStatus("示意模式無法切換模型", false);
+    return;
+  }
+  try {
+    const response = await fetch("/api/asr/models");
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    renderAsrModels(await response.json());
+  } catch {
+    els.asrModelOptions.replaceChildren();
+    hideAsrSwitchProgress();
+    setAsrSwitchStatus("無法取得模型清單(伺服器未連線)", true);
+  }
+}
+
+async function switchAsrModel(id, label) {
+  if (state.asrSwitching) {
+    return;
+  }
+  state.asrSwitching = true;
+  setAsrOptionsDisabled(true);
+  setAsrSwitchStatus(`切換到 ${label}…`, false);
+  showAsrSwitchProgress({ progress: 0.05, stage: "準備中", status: "loading" });
+  try {
+    const response = await fetch("/api/asr/model", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(data?.detail || `HTTP ${response.status}`);
+    }
+    if (data?.noop) {
+      state.asrSwitching = false;
+      hideAsrSwitchProgress();
+      renderAsrModels(data);
+      return;
+    }
+    await pollAsrSwitch();
+  } catch (err) {
+    state.asrSwitching = false;
+    hideAsrSwitchProgress();
+    setAsrSwitchStatus(`切換失敗:${err.message}`, true);
+    void loadAsrModels();
+  }
+}
+
+let asrPollActive = false;
+
+async function pollAsrSwitch() {
+  // Single poller only: re-opening the dialog mid-switch must not start a rival loop.
+  if (asrPollActive) {
+    return;
+  }
+  asrPollActive = true;
+  // Poll the switch status until the load finishes; the model loads in a server
+  // worker thread, so this can take a few seconds for large-v3.
+  try {
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      let data;
+      try {
+        const response = await fetch("/api/asr/model/status");
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        data = await response.json();
+      } catch {
+        continue; // transient; keep polling
+      }
+      const sw = data.switch || {};
+      if (sw.status === "loading") {
+        showAsrSwitchProgress(sw);
+        continue;
+      }
+      state.asrSwitching = false;
+      hideAsrSwitchProgress();
+      if (sw.status === "error") {
+        setAsrSwitchStatus(`切換失敗:${sw.error || "未知錯誤"}`, true);
+        renderAsrModels(data);
+      } else {
+        // Reflect the new model in the footer + about backend line immediately.
+        const label = backendLabelFromModels(data);
+        els.backend.textContent = label;
+        if (els.aboutBackend) {
+          els.aboutBackend.textContent = label;
+        }
+        renderAsrModels(data);
+        setAsrSwitchStatus(`已切換到 ${data.activeModel}`, false);
+      }
+      return;
+    }
+  } finally {
+    asrPollActive = false;
+  }
 }
 
 function setRunning(isRunning) {
@@ -706,6 +936,8 @@ function appendTranscriptBlock(data, { persist = true } = {}) {
     windowIndex: Number.isInteger(data.windowIndex) ? data.windowIndex : null,
     pitch: normalizePitch(data.pitch),
     characters: normalizeCharacters(data.characters),
+    translation: typeof data.translation === "string" ? data.translation : null,
+    speaker: Number.isInteger(data.speaker) ? data.speaker : null,
   });
   renderTranscriptView({ scrollToEnd: true });
   setTranscriptActions(Boolean(state.transcript.trim()));
@@ -758,6 +990,10 @@ function renderTranscriptEntry(block, index) {
 
   const meta = document.createElement("span");
   meta.className = "entry-meta";
+  // 語者分離:匿名的 session 內說話者標籤(說話者 1／2…),顏色依索引區分。
+  if (Number.isInteger(block.speaker)) {
+    meta.append(createSpeakerChip(block.speaker));
+  }
   // 段落播放 of the original recording — available in 文字/簡譜/基頻 views alike.
   const playButton = createSegmentPlayButton(block, index);
   if (playButton) {
@@ -795,6 +1031,10 @@ function renderTranscriptEntry(block, index) {
     const body = document.createElement("span");
     body.className = "entry-body";
     body.append(text);
+    // 雙語堆疊行:翻譯掛在整段之下(只在 final 產生,restore/儲存也帶著)。
+    if (block.translation) {
+      body.append(createTranslationLine(block.translation));
+    }
     main.append(body, meta);
   }
 
@@ -820,6 +1060,40 @@ function renderTranscriptEntry(block, index) {
     entry.append(details);
   }
   return entry;
+}
+
+// Distinct chip colours per anonymous speaker (cycled; white text sits legibly on
+// all of them). The server label is 0-based, so the UI shows `speaker + 1`.
+const SPEAKER_COLORS = ["#2f80ed", "#27ae60", "#eb5757", "#9b51e0", "#f2994a", "#0aa2c0"];
+
+function createSpeakerChip(speaker) {
+  const chip = document.createElement("span");
+  chip.className = "speaker-chip";
+  chip.style.setProperty("--speaker-color", SPEAKER_COLORS[speaker % SPEAKER_COLORS.length]);
+  chip.textContent = `說話者 ${speaker + 1}`;
+  return chip;
+}
+
+function createTranslationLine(translation) {
+  const line = document.createElement("span");
+  line.className = "entry-translation";
+  line.textContent = translation;
+  return line;
+}
+
+function setTranslateEnabled(on) {
+  state.translateEnabled = Boolean(on);
+  persistSettings();
+  updateTranslateButton();
+  flashStats(state.translateEnabled ? "翻譯已開啟(下次開始生效)" : "翻譯已關閉");
+}
+
+function updateTranslateButton() {
+  if (!els.translate) {
+    return;
+  }
+  els.translate.classList.toggle("on", state.translateEnabled);
+  els.translate.setAttribute("aria-pressed", String(state.translateEnabled));
 }
 
 // ── 逐字稿編輯 → 慣用詞庫學習 ─────────────────────────────────────────────────
@@ -1627,6 +1901,9 @@ function setTranscriptActions(hasTranscript) {
   els.copy.disabled = !hasTranscript;
   els.download.disabled = !hasTranscript;
   els.save.disabled = DEMO_MODE || !hasTranscript || state.savingRemote;
+  if (els.summarize) {
+    els.summarize.disabled = DEMO_MODE || !hasTranscript;
+  }
   updateAnalyzeButton();
 }
 
@@ -1675,6 +1952,8 @@ function normalizeTranscriptBlockForRestore(block) {
     windowIndex: Number.isInteger(block.windowIndex) ? block.windowIndex : null,
     pitch: normalizePitch(block.pitch),
     characters: normalizeCharacters(block.characters),
+    translation: typeof block.translation === "string" ? block.translation : null,
+    speaker: Number.isInteger(block.speaker) ? block.speaker : null,
   };
 }
 
@@ -1791,11 +2070,33 @@ function buildSearchResult(item) {
   if (item.snippet) {
     const snippet = document.createElement("span");
     snippet.className = "search-result-snippet";
-    snippet.textContent = item.snippet;
+    const inner = document.createElement("span");
+    inner.className = "marquee-inner";
+    inner.textContent = item.snippet;
+    snippet.append(inner);
     entry.append(snippet);
+    // Measure after layout: only run the marquee when the content actually
+    // overflows its block, so short snippets stay still.
+    requestAnimationFrame(() => setupSnippetMarquee(snippet, inner));
   }
   entry.addEventListener("click", () => void openSearchResult(item.id));
   return entry;
+}
+
+// A snippet that doesn't fit its block scrolls back and forth (跑馬燈). Distance and
+// duration are derived from the overflow so every row scrolls at the same ~40px/s.
+function setupSnippetMarquee(viewport, inner) {
+  const overflow = inner.scrollWidth - viewport.clientWidth;
+  if (overflow <= 2) {
+    viewport.classList.remove("marquee");
+    viewport.style.removeProperty("--marquee-shift");
+    viewport.style.removeProperty("--marquee-dur");
+    return;
+  }
+  const duration = Math.max(4, overflow / 40 + 2); // seconds, incl. end pauses
+  viewport.style.setProperty("--marquee-shift", `-${Math.round(overflow)}px`);
+  viewport.style.setProperty("--marquee-dur", `${duration.toFixed(1)}s`);
+  viewport.classList.add("marquee");
 }
 
 function formatSearchDate(value) {
@@ -1851,6 +2152,66 @@ function loadTranscriptRecord(data) {
   setTranscriptActions(Boolean(state.transcript.trim()));
   persistSessionNow();
   flashStats(`已開啟:${data.title || data.id}`);
+}
+
+// --- 會後摘要 ---------------------------------------------------------------
+
+async function openSummary() {
+  if (DEMO_MODE) {
+    flashStats("示意模式無法摘要");
+    return;
+  }
+  const text = state.transcript.trim();
+  if (!text) {
+    flashStats("沒有可摘要的逐字稿");
+    return;
+  }
+  const dialog = els.summaryDialog;
+  if (!dialog || typeof dialog.showModal !== "function") {
+    return;
+  }
+  const body = els.summaryBody;
+  const copyButton = dialog.querySelector(".summary-copy");
+  body.textContent = "摘要中…";
+  body.classList.add("loading");
+  if (copyButton) {
+    copyButton.disabled = true;
+  }
+  dialog.showModal();
+
+  const seq = (state.summarySeq = (state.summarySeq || 0) + 1);
+  try {
+    const response = await fetch("/api/summary", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (seq !== state.summarySeq || !dialog.open) {
+      return;
+    }
+    if (!response.ok) {
+      body.textContent = response.status === 503 ? "摘要功能未啟用" : "摘要失敗";
+      body.classList.remove("loading");
+      return;
+    }
+    const data = await response.json();
+    if (seq !== state.summarySeq || !dialog.open) {
+      return;
+    }
+    const summary = (data.summary || "").trim();
+    body.textContent = summary || "(無摘要)";
+    body.classList.remove("loading");
+    if (copyButton && summary) {
+      copyButton.disabled = false;
+    }
+  } catch (error) {
+    if (seq !== state.summarySeq) {
+      return;
+    }
+    console.error("summary failed", error);
+    body.textContent = "摘要失敗";
+    body.classList.remove("loading");
+  }
 }
 
 function scheduleSessionPersist() {
@@ -1925,6 +2286,11 @@ function setAudioActions() {
   const hasAudio = state.audioBytes > 0;
   els.audioDownload.disabled = !hasAudio;
   els.audioSave.disabled = DEMO_MODE || !hasAudio || state.savingAudio || state.running;
+  // 降噪比較: gated on a recording, the matching server pass being installed, and
+  // no other run in flight. Disabled (not hidden) so the reason is discoverable.
+  const compareBlocked = DEMO_MODE || !hasAudio || state.running || state.compareBusy;
+  els.audioDenoise.disabled = compareBlocked || !state.denoiseAvailable;
+  els.audioSeparate.disabled = compareBlocked || !state.separateAvailable;
   // Audio availability gates 校準音準 too, so keep that button in sync.
   updateAnalyzeButton();
 }
@@ -1932,6 +2298,9 @@ function setAudioActions() {
 function refreshAudioPreview() {
   window.clearTimeout(state.audioPreviewTimer);
   state.audioPreviewTimer = 0;
+
+  // Any change to the recording invalidates a previously generated 降噪 clip.
+  resetComparePanel();
 
   if (state.audioObjectUrl) {
     URL.revokeObjectURL(state.audioObjectUrl);
@@ -2095,6 +2464,31 @@ async function restoreAudioSession() {
     refreshAudioPreview();
   } catch {
     flashStats("本機錄音讀取失敗");
+  }
+}
+
+// Restore the recording, then its 降噪/分離 compare clip. The compare record is read
+// up-front and the delete inside resetComparePanel is suppressed (state.restoringCompare)
+// so restoreAudioSession's refreshAudioPreview can't wipe the cached clip before we reapply it.
+async function restoreAudioAndCompareSession() {
+  if (DEMO_MODE) {
+    return;
+  }
+  let compareRecord = null;
+  try {
+    compareRecord = await runAudioStore((store) => store.get(COMPARE_RECORD_ID));
+  } catch {
+    compareRecord = null;
+  }
+  state.restoringCompare = true;
+  try {
+    await restoreAudioSession();
+  } finally {
+    state.restoringCompare = false;
+  }
+  // A compare clip without its source recording is meaningless — only restore both together.
+  if (compareRecord?.blob && state.audioBytes) {
+    applyCompareRecord(compareRecord);
   }
 }
 
@@ -2349,6 +2743,7 @@ async function start() {
         languages: startLanguages(),
         glossary: state.glossary,
         chunkMs: AUDIO_CHUNK_MS,
+        translate: state.translateEnabled,
       }),
     );
     setStatus("收音中", "live");
@@ -2395,6 +2790,7 @@ async function analyzeFile(file) {
   if (state.scenario === "music") {
     try {
       setStatus("分離人聲中(Demucs)", "live");
+      showAudioModelProgress("載入 Demucs 人聲分離模型…");
       const vocals = await separateVocals(decoded.pcm, decoded.sampleRate);
       if (vocals && vocals.length) {
         decoded = { pcm: vocals, sampleRate: decoded.sampleRate };
@@ -2402,6 +2798,8 @@ async function analyzeFile(file) {
     } catch (error) {
       console.error("separateVocals failed", error);
       flashStats(error?.message || "人聲分離失敗,改用原始音檔");
+    } finally {
+      hideAudioModelProgress();
     }
   }
 
@@ -2419,6 +2817,27 @@ async function analyzeFile(file) {
   els.stats.textContent = "0 ms";
   renderLevel(0);
 
+  // Long recordings: one batched pass (3-4x) when the server offers it, instead of
+  // streaming utterance-by-utterance. No live partials; per-character 基頻/簡譜 comes
+  // from 校準音準 (the offline analyze pass) afterwards.
+  await ensureServerCapabilities();
+  if (state.fileBatchAvailable) {
+    startClock();
+    try {
+      await transcribeFileBatched(decoded);
+      setStatus("待命");
+    } catch (error) {
+      console.error("batched analyzeFile failed", error);
+      setStatus(error?.message || "分析失敗", "error");
+    } finally {
+      state.analyzing = false;
+      state.stopping = false;
+      setRunning(false);
+      stopClock();
+    }
+    return;
+  }
+
   try {
     const ws = connectSocket();
     await waitForOpen(ws);
@@ -2433,6 +2852,7 @@ async function analyzeFile(file) {
         glossary: state.glossary,
         chunkMs: AUDIO_CHUNK_MS,
         mode: "file",
+        translate: state.translateEnabled,
       }),
     );
     startClock();
@@ -2449,6 +2869,67 @@ async function analyzeFile(file) {
     setRunning(false);
     state.ws?.close();
     setStatus(error?.message || "分析失敗", "error");
+  }
+}
+
+let capabilitiesPromise = null;
+
+// Resolve server capabilities once (cached): file-batch transcription plus the
+// two 降噪比較 passes. A failed fetch leaves every flag false so file loads use the
+// WS streaming path and the compare buttons stay disabled.
+function ensureServerCapabilities() {
+  if (!capabilitiesPromise) {
+    capabilitiesPromise = fetch("/health")
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data) => {
+        state.fileBatchAvailable = Boolean(data?.fileBatchAvailable);
+        state.denoiseAvailable = Boolean(data?.denoiseAvailable);
+        state.separateAvailable = Boolean(data?.separatorAvailable);
+      })
+      .catch(() => {
+        state.fileBatchAvailable = false;
+        state.denoiseAvailable = false;
+        state.separateAvailable = false;
+      })
+      .finally(() => setAudioActions());
+  }
+  return capabilitiesPromise;
+}
+
+async function transcribeFileBatched(decoded) {
+  setStatus("辨識中(批次)", "live");
+  const response = await fetch("/api/transcribe/file", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      pcmBase64: pcmToBase64(decoded.pcm),
+      sampleRate: decoded.sampleRate,
+      // Loaded files use free detection (see the streaming path); 慣用詞庫 + 翻譯 still apply.
+      languages: ["auto"],
+      glossary: state.glossary,
+      translate: state.translateEnabled,
+    }),
+  });
+  if (!response.ok) {
+    let detail = `HTTP ${response.status}`;
+    try {
+      detail = (await response.json())?.detail || detail;
+    } catch {
+      // non-JSON error body; keep the status line
+    }
+    throw new Error(detail);
+  }
+  const data = await response.json();
+  (data.blocks || []).forEach((block) => appendTranscriptBlock(block, { persist: false }));
+  // The server returns the space-joined transcript; keep it for copy/save/search
+  // (block display already covers the on-screen view).
+  if (typeof data.transcript === "string" && data.transcript) {
+    state.transcript = data.transcript;
+  }
+  setTranscriptActions(Boolean(state.transcript.trim()));
+  scheduleSessionPersist();
+  if (data.language) {
+    flashStats(`偵測語言 ${data.language}`);
   }
 }
 
@@ -2488,6 +2969,192 @@ function base64ToPcm(base64) {
     bytes[index] = binary.charCodeAt(index);
   }
   return new Int16Array(bytes.buffer, 0, bytes.byteLength >> 1);
+}
+
+// ── 原始/降噪 A/B 比較 ───────────────────────────────────────────────────────
+// Each pass sends the whole recording once and plays the processed clip back in a
+// second player next to the original, so the user can hear what enhancement does.
+const COMPARE_MODES = {
+  denoise: {
+    endpoint: "/api/enhance/denoise",
+    title: "去噪",
+    progress: "去噪中(DeepFilter)",
+    model: "載入 DeepFilterNet3 去噪模型…",
+    filename: "denoise",
+  },
+  separate: {
+    endpoint: "/api/enhance/separate",
+    title: "人聲",
+    progress: "分離人聲中(Demucs)",
+    model: "載入 Demucs 人聲分離模型…",
+    filename: "vocals",
+    body: { scenario: "music" },
+  },
+};
+
+// Inline indeterminate bar for the audio-model operations (Demucs 人聲分離 /
+// DeepFilterNet3 去噪). These are single POSTs with no server-side progress feed, so
+// the honest UI is an indeterminate bar whose label names the model being loaded/run.
+function showAudioModelProgress(label) {
+  if (!els.audioModelProgress) {
+    return;
+  }
+  els.audioModelProgressLabel.textContent = label;
+  els.audioModelProgress.hidden = false;
+}
+
+function hideAudioModelProgress() {
+  if (els.audioModelProgress) {
+    els.audioModelProgress.hidden = true;
+  }
+}
+
+// Flatten the recorded 16-bit PCM chunks (ArrayBuffers) into one Int16Array for
+// the whole-file enhance endpoints.
+function recordedPcm() {
+  const total = state.audioChunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  const out = new Int16Array(total >> 1);
+  let offset = 0;
+  for (const chunk of state.audioChunks) {
+    const view = new Int16Array(chunk);
+    out.set(view, offset);
+    offset += view.length;
+  }
+  return out;
+}
+
+function pcmToWavBlob(int16, sampleRate) {
+  const bytes = new Uint8Array(int16.buffer, int16.byteOffset, int16.byteLength);
+  const header = new ArrayBuffer(44);
+  const view = new DataView(header);
+  const blockAlign = AUDIO_CHANNEL_COUNT * AUDIO_BYTES_PER_SAMPLE;
+  const byteRate = sampleRate * blockAlign;
+  writeAscii(view, 0, "RIFF");
+  view.setUint32(4, 36 + bytes.byteLength, true);
+  writeAscii(view, 8, "WAVE");
+  writeAscii(view, 12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, AUDIO_CHANNEL_COUNT, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, AUDIO_BYTES_PER_SAMPLE * 8, true);
+  writeAscii(view, 36, "data");
+  view.setUint32(40, bytes.byteLength, true);
+  return new Blob([header, bytes], { type: "audio/wav" });
+}
+
+function resetComparePanel() {
+  if (state.compareObjectUrl) {
+    URL.revokeObjectURL(state.compareObjectUrl);
+    state.compareObjectUrl = "";
+  }
+  state.compareBlob = null;
+  if (els.comparePanel) {
+    els.comparePanel.hidden = true;
+    els.compareAudio.removeAttribute("src");
+    els.compareAudio.load();
+  }
+  // The cached clip only makes sense for the recording it was derived from; dropping
+  // it here means any recording change (the single invalidation chokepoint) clears it.
+  // Skipped during the initial restore, which re-shows a cached clip via this same path.
+  if (!state.restoringCompare) {
+    void runAudioStore((store) => store.delete(COMPARE_RECORD_ID), "readwrite").catch(() => {});
+  }
+}
+
+// Cache the just-produced compare clip so its player is restored on the next load.
+async function persistCompareResult(record) {
+  if (DEMO_MODE) {
+    return;
+  }
+  try {
+    await runAudioStore(
+      (store) => store.put({ id: COMPARE_RECORD_ID, updatedAt: Date.now(), ...record }),
+      "readwrite",
+    );
+  } catch {
+    /* best-effort cache — a quota/IDB failure must not break the compare itself */
+  }
+}
+
+// Re-apply a cached compare clip into the second player. Called AFTER the recording is
+// restored (restoreAudioSession's refreshAudioPreview would otherwise reset the panel),
+// with the record read up-front so that reset's delete can't race it away.
+function applyCompareRecord(record) {
+  if (!record?.blob || !els.comparePanel) {
+    return;
+  }
+  state.compareBlob = record.blob;
+  state.compareObjectUrl = URL.createObjectURL(record.blob);
+  state.compareFilename = record.filename || "compare";
+  els.compareTitle.textContent = record.title || "比較";
+  els.compareAudio.src = state.compareObjectUrl;
+  els.compareAudio.load();
+  els.comparePanel.hidden = false;
+  setAudioActions();
+}
+
+async function runCompare(kind) {
+  const mode = COMPARE_MODES[kind];
+  if (!mode || DEMO_MODE || state.compareBusy || state.running || !state.audioBytes) {
+    return;
+  }
+  const pcm = recordedPcm();
+  if (!pcm.length) {
+    flashStats("沒有可處理的錄音");
+    return;
+  }
+
+  state.compareBusy = true;
+  setAudioActions();
+  window.clearTimeout(state.statsTimer);
+  const previousStats = els.stats.textContent;
+  els.stats.textContent = mode.progress;
+  showAudioModelProgress(mode.model);
+
+  try {
+    const response = await fetch(mode.endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pcmBase64: pcmToBase64(pcm),
+        sampleRate: state.audioSampleRate,
+        ...(mode.body || {}),
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) {
+      throw new Error(data.detail || "處理失敗");
+    }
+    const out = base64ToPcm(data.pcmBase64);
+    if (!out.length) {
+      throw new Error("處理結果為空");
+    }
+    resetComparePanel();
+    state.compareBlob = pcmToWavBlob(out, data.sampleRate || state.audioSampleRate);
+    state.compareObjectUrl = URL.createObjectURL(state.compareBlob);
+    state.compareFilename = mode.filename;
+    els.compareTitle.textContent = mode.title;
+    els.compareAudio.src = state.compareObjectUrl;
+    els.compareAudio.load();
+    els.comparePanel.hidden = false;
+    flashStats(`已產生${mode.title}`, previousStats);
+    void persistCompareResult({
+      blob: state.compareBlob,
+      sampleRate: data.sampleRate || state.audioSampleRate,
+      kind,
+      title: mode.title,
+      filename: mode.filename,
+    });
+  } catch (error) {
+    flashStats(error.message || "處理失敗", previousStats);
+  } finally {
+    hideAudioModelProgress();
+    state.compareBusy = false;
+    setAudioActions();
+  }
 }
 
 async function streamPcmToSocket(ws, pcm) {
@@ -2683,11 +3350,62 @@ applyRuntimeMode();
 setRunning(false);
 setViewMode(state.viewMode, { persist: false });
 restoreTranscriptSession();
-void restoreAudioSession();
+void restoreAudioAndCompareSession();
+// Resolve 降噪比較 availability up front so the menu items reflect it before the
+// first recording finishes (also refreshes the file-batch flag).
+if (!DEMO_MODE) {
+  void ensureServerCapabilities();
+}
 
 document.querySelectorAll(".theme-toggle").forEach((button) => {
   button.addEventListener("click", toggleTheme);
 });
+
+// ── 齒輪設定選單 ──────────────────────────────────────────────────────────────
+// 收納語言/翻譯/慣用詞庫/搜尋。內含按鈕沿用原本的 id 與處理器,這裡只管開合。
+function closeSettingsMenu() {
+  if (!els.settings || !els.settingsPanel || els.settingsPanel.hidden) {
+    return;
+  }
+  els.settingsPanel.hidden = true;
+  els.settings.setAttribute("aria-expanded", "false");
+}
+
+if (els.settings && els.settingsPanel) {
+  els.settings.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const willOpen = els.settingsPanel.hidden;
+    els.settingsPanel.hidden = !willOpen;
+    els.settings.setAttribute("aria-expanded", String(willOpen));
+  });
+
+  // 整列可點:點文字說明轉觸發該列按鈕;選了任一項就收合選單。
+  els.settingsPanel.querySelectorAll(".settings-row").forEach((row) => {
+    row.addEventListener("click", (event) => {
+      const button = row.querySelector("button");
+      if (!button) {
+        return;
+      }
+      if (!event.target.closest("button")) {
+        button.click();
+      }
+      closeSettingsMenu();
+    });
+  });
+
+  // 點選單外 / 按 Esc 收合。
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest(".settings-menu")) {
+      closeSettingsMenu();
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      closeSettingsMenu();
+    }
+  });
+}
+
 els.backend.addEventListener("click", openAbout);
 document.addEventListener("breeze:page", (event) => {
   if (event.detail?.page !== "transcribe" && (state.running || state.analyzing)) {
@@ -2705,6 +3423,8 @@ updateLangButton();
 updateGlossaryButton();
 els.lang?.addEventListener("click", openLanguageDialog);
 els.glossary?.addEventListener("click", openGlossaryDialog);
+els.translate?.addEventListener("click", () => setTranslateEnabled(!state.translateEnabled));
+updateTranslateButton();
 SYSTEM_DARK_QUERY.addEventListener("change", syncSystemTheme);
 els.toggle.addEventListener("click", handleToggle);
 els.load.addEventListener("click", () => {
@@ -2742,6 +3462,22 @@ if (els.searchDialog) {
   els.searchDialog.querySelector("form")?.addEventListener("submit", (event) => {
     event.preventDefault();
     void runSearch(els.searchInput.value);
+  });
+}
+if (els.summarize) {
+  els.summarize.addEventListener("click", () => void openSummary());
+}
+if (els.summaryDialog) {
+  els.summaryDialog
+    .querySelector(".summary-close")
+    ?.addEventListener("click", () => els.summaryDialog.close());
+  els.summaryDialog.querySelector(".summary-copy")?.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(els.summaryBody.textContent || "");
+      flashStats("已複製摘要");
+    } catch {
+      flashStats("複製失敗");
+    }
   });
 }
 els.clear.addEventListener("click", () => {
@@ -2918,6 +3654,23 @@ els.audioDownload.addEventListener("click", () => {
   flashStats("已下載音檔");
 });
 
+els.audioDenoise.addEventListener("click", () => void runCompare("denoise"));
+els.audioSeparate.addEventListener("click", () => void runCompare("separate"));
+
+els.compareDownload.addEventListener("click", () => {
+  if (!state.compareBlob) {
+    return;
+  }
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const url = URL.createObjectURL(state.compareBlob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `breeze-elf-${state.compareFilename || "compare"}-${stamp}.wav`;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  flashStats("已下載音檔");
+});
+
 els.audioSave.addEventListener("click", async () => {
   if (DEMO_MODE) {
     flashStats("示意模式不會雲端儲存");
@@ -2967,6 +3720,8 @@ function serializeBlocksForSave() {
     segmentKind: block.segmentKind || "",
     pitch: block.pitch || null,
     characters: Array.isArray(block.characters) ? block.characters : [],
+    translation: block.translation || null,
+    speaker: Number.isInteger(block.speaker) ? block.speaker : null,
   }));
 }
 

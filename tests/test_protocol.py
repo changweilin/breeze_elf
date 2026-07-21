@@ -22,6 +22,17 @@ class ProtocolTests(unittest.TestCase):
             ),
         )
         self.assertEqual(message.mode, "live")
+        # Translation defaults off with no target.
+        self.assertFalse(message.translate)
+        self.assertEqual(message.translate_target, "")
+
+    def test_parse_start_reads_translate_flags(self):
+        message = parse_client_text(
+            '{"type":"start","sampleRate":16000,"chunkMs":1000,"language":"en",'
+            '"translate":true,"translateTarget":"ZH"}'
+        )
+        self.assertTrue(message.translate)
+        self.assertEqual(message.translate_target, "zh")  # lower-cased
 
     def test_parse_start_languages_dedupes_lowercases_and_caps_at_four(self):
         message = parse_client_text(
