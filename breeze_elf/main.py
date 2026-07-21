@@ -2110,7 +2110,7 @@ def _block_spectrogram(
     finish = min(samples.size, int(math.ceil(float(end) * sample_rate)))
     if finish - begin < sample_rate // 50:
         return None
-    payload = compute_spectrogram(samples[begin:finish], sample_rate)
+    payload = compute_spectrogram(samples[begin:finish], sample_rate, clean_f0=settings.f0_clean)
     if payload is None:
         return None
     payload["durationSeconds"] = round((finish - begin) / sample_rate, 3)

@@ -334,6 +334,7 @@ def compute_spectrogram(
     rms_threshold: float = 0.01,
     yin_threshold: float = 0.15,
     confidence_threshold: float = 0.4,
+    clean_f0: bool = True,
 ) -> dict | None:
     """STFT magnitude spectrogram + an aligned per-frame f0 track for 基頻分析.
 
@@ -390,6 +391,10 @@ def compute_spectrogram(
                 hz = round(float(candidate), 1)
         f0.append(hz)
 
+    if clean_f0:
+        f0 = clean_f0_track(f0, times)
+        f0 = _extend_attack_release(f0, intensity)
+
     if nkeep > freq_bins:
         edges = np.linspace(0, nkeep, freq_bins + 1).astype(int)
         pooled = np.empty((mags.shape[0], freq_bins), dtype=np.float64)
@@ -417,6 +422,301 @@ def compute_spectrogram(
         "intensity": intensity,
         "times": times,
     }
+
+
+def clean_f0_track(
+    f0: list[float | None],
+    times: list[float] | None = None,
+    *,
+    stable_tol_semitones: float = 1.5,
+    stable_min_seconds: float = 0.06,
+    drastic_spread_semitones: float = 4.0,
+    smooth_ratio: float = 0.6,
+    spike_jump_semitones: float = 4.0,
+) -> list[float | None]:
+    """Replace 基頻 pitch-detection artifacts with pitch borrowed from the 平穩音高
+    (stable pitch) around them — never a hard cut.
+
+    First, YIN octave/harmonic errors are folded back onto the surrounding pitch
+    (:func:`_snap_harmonic_octaves`) — these mis-tracked ×2/×3/×4 plateaus look
+    stable and are the 劇烈變化 left standing between two consistent notes.
+
+    Then only **unstable** bins are touched: a bin belongs to a stable note when it
+    sits inside a window of consecutive bins whose pitch stays within
+    ``stable_tol_semitones`` for at least ``stable_min_seconds``. A sustained pitch
+    (even vibrato, whose steady portions still register as stable) is therefore left
+    exactly as measured. What remains are maximal runs of consecutive voiced-but-
+    unstable bins — the 音高劇烈變化 passages.
+
+    Such a run is treated as an artifact and removed when it either clears every
+    flanking stable anchor by ``spike_jump_semitones`` in one direction (a drastic
+    up-then-down / down-then-up 反方向 spike) or swings across
+    ``drastic_spread_semitones`` while zig-zagging (``smooth_ratio``). A one-way
+    sweep is kept — that is a real 滑音 (glide). When a run is removed, its bins are
+    **filled from the surrounding stable pitch** rather than deleted:
+
+    * stable pitch on both sides → a straight line between them (依前後穩定音高替補);
+    * stable pitch on one side only → that pitch is held across the run (接上鄰接的
+      穩定音高);
+    * silence on both sides (nothing to borrow) → the bins clear to ``None``.
+    """
+    n = len(f0)
+    result = list(f0)
+    if n < 3:
+        return result
+
+    bin_seconds = _bin_seconds(times)
+    # A held note lasts at least ``stable_min_seconds``; translate that to a bin
+    # count, falling back to a small constant when no times are supplied.
+    min_stable_bins = max(2, round(stable_min_seconds / bin_seconds)) if bin_seconds > 0 else 4
+
+    # Fold octave/harmonic mis-tracking back onto the surrounding pitch first, so the
+    # fill pass reads true anchors (and isn't fooled by a wrong-octave "stable" note).
+    result = _snap_harmonic_octaves(result, bin_seconds)
+
+    # Semitone space; only differences matter so the reference (1 Hz) is arbitrary.
+    st: list[float | None] = [
+        12.0 * math.log2(hz) if (hz is not None and hz > 0) else None for hz in result
+    ]
+    stable = _mark_stable(st, min_stable_bins, stable_tol_semitones)
+
+    i = 0
+    while i < n:
+        if st[i] is None or stable[i]:
+            i += 1
+            continue
+        # [i, j) is a maximal run of consecutive voiced-but-unstable bins. Its
+        # neighbours are, by construction, either stable pitch or silence/edge.
+        j = i
+        while j < n and st[j] is not None and not stable[j]:
+            j += 1
+        left = st[i - 1] if i > 0 and st[i - 1] is not None else None
+        right = st[j] if j < n and st[j] is not None else None
+        if _is_artifact_segment(
+            st[i:j], left, right, drastic_spread_semitones, smooth_ratio, spike_jump_semitones
+        ):
+            _fill_from_anchors(result, i, j, left, right)
+        i = j
+
+    return result
+
+
+def _bin_seconds(times: list[float] | None) -> float:
+    """Median spacing of the (possibly non-uniform) time axis, or ``0.0``."""
+    if times and len(times) >= 2:
+        diffs = [b - a for a, b in zip(times, times[1:]) if b > a]
+        if diffs:
+            return float(np.median(diffs))
+    return 0.0
+
+
+# Harmonic ratios YIN latches onto by mistake (2nd/3rd/4th harmonic → ×2/×3/×4,
+# period-doubling → ÷2/÷3/÷4), as semitone shifts.
+_HARMONIC_SHIFTS = tuple(12.0 * math.log2(r) for r in (0.25, 1 / 3, 0.5, 2.0, 3.0, 4.0))
+
+
+def _snap_harmonic_octaves(
+    f0: list[float | None],
+    bin_seconds: float,
+    *,
+    win_seconds: float = 0.8,
+    near_st: float = 5.0,
+    tol_st: float = 2.5,
+    iters: int = 2,
+) -> list[float | None]:
+    """Fold YIN octave/harmonic errors back onto the surrounding pitch.
+
+    A held note can be mis-tracked a whole octave (or ×3 / ×4) off for several bins,
+    which registers as a *stable* plateau the run-based cleanup never touches — this
+    is the residual 劇烈變化 left between two otherwise-consistent notes. Each voiced
+    bin more than ``near_st`` semitones from the median of its ``win_seconds``
+    neighbourhood is shifted by whichever harmonic ratio (½, ⅓, ¼, ×2, ×3, ×4) lands
+    it within ``tol_st`` of that median. Because only integer harmonic ratios are
+    tried and the result must fall within a narrow tolerance of the local pitch, a
+    real melodic leap (a fourth, fifth, even a major sixth) is never moved — only a
+    near-exact octave/harmonic error is. Two passes let the median clean up once the
+    grossest errors are folded in."""
+    n = len(f0)
+    if n == 0 or bin_seconds <= 0:
+        return list(f0)
+    win = max(5, round(win_seconds / bin_seconds))
+    out = list(f0)
+    for _ in range(iters):
+        st = [12.0 * math.log2(x) if (x is not None and x > 0) else None for x in out]
+        nxt = list(out)
+        for i in range(n):
+            here = st[i]
+            if here is None:
+                continue
+            lo, hi = max(0, i - win), min(n, i + win + 1)
+            window = [st[k] for k in range(lo, hi) if st[k] is not None]
+            # Only correct a bin embedded in continuous voice; a short blob floating
+            # in silence has no reliable local pitch and is left for the fill pass.
+            if len(window) < 4 or len(window) < 0.5 * (hi - lo):
+                continue
+            base = float(np.median(window))
+            gap = abs(here - base)
+            if gap <= near_st:
+                continue  # within a fourth of the local pitch → real melody, leave it
+            best_gap, best_val = gap, None
+            for shift in _HARMONIC_SHIFTS:
+                candidate_gap = abs(here + shift - base)
+                if candidate_gap < best_gap:
+                    best_gap, best_val = candidate_gap, here + shift
+            if best_val is not None and best_gap <= tol_st:
+                nxt[i] = round(2.0 ** (best_val / 12.0), 1)
+        out = nxt
+    return out
+
+
+def _mark_stable(st: list[float | None], min_bins: int, tol: float) -> list[bool]:
+    """Flag every bin that belongs to a stable note (see :func:`_mark_stable_run`)."""
+    n = len(st)
+    stable = [False] * n
+    run_start: int | None = None
+    for i in range(n + 1):
+        voiced = i < n and st[i] is not None
+        if voiced and run_start is None:
+            run_start = i
+        elif not voiced and run_start is not None:
+            _mark_stable_run(st, stable, run_start, i, min_bins, tol)
+            run_start = None
+    return stable
+
+
+def _mark_stable_run(
+    st: list[float | None],
+    stable: list[bool],
+    start: int,
+    end: int,
+    min_bins: int,
+    tol: float,
+) -> None:
+    """Flag every bin in ``[start, end)`` that sits inside a window of ``min_bins``
+    consecutive voiced bins whose pitch spread stays within ``tol`` semitones."""
+    vals = [float(st[k]) for k in range(start, end)]  # every bin here is voiced
+    m = len(vals)
+    if m < min_bins:
+        return
+    for a in range(0, m - min_bins + 1):
+        window = vals[a : a + min_bins]
+        if max(window) - min(window) <= tol:
+            for b in range(a, a + min_bins):
+                stable[start + b] = True
+
+
+def _is_artifact_segment(
+    seg_st: list[float | None],
+    left: float | None,
+    right: float | None,
+    spread_threshold: float,
+    smooth_ratio: float,
+    jump: float,
+) -> bool:
+    """True when an unstable run is a detection artifact, not a sung 滑音/技巧.
+
+    A run that clears every present stable anchor by ``jump`` in one direction is a
+    drastic 變高又變低 / 變低又變高 spike — an artifact even when its own two bins
+    rise together (a real glide never overshoots both the note before *and* after
+    it). A one-directional sweep between the anchors is a 滑音 and is kept. Anything
+    left that zig-zags across ``spread_threshold`` is erratic and removed."""
+    vals = [float(v) for v in seg_st]
+    if not vals:
+        return False
+
+    anchors = [a for a in (left, right) if a is not None]
+    if anchors:
+        peak = all(x - a >= jump for x in vals for a in anchors)
+        valley = all(a - x >= jump for x in vals for a in anchors)
+        if peak or valley:
+            return True  # drastic spike vs the held note(s) → artifact
+
+    total_variation = sum(abs(b - a) for a, b in zip(vals, vals[1:]))
+    net = abs(vals[-1] - vals[0])
+    if total_variation > 0 and net / total_variation >= smooth_ratio:
+        return False  # smooth one-way sweep → 滑音, keep
+
+    return (max(vals) - min(vals)) >= spread_threshold
+
+
+def _fill_from_anchors(
+    result: list[float | None],
+    start: int,
+    end: int,
+    left: float | None,
+    right: float | None,
+) -> None:
+    """Replace ``result[start:end]`` using the flanking stable pitch: interpolate
+    between both anchors, hold the single available one, or clear to ``None`` when
+    neither side has pitch to borrow. ``left`` / ``right`` are semitones."""
+    length = end - start
+    if left is not None and right is not None:
+        for t in range(length):
+            val = left + (right - left) * (t + 1) / (length + 1)
+            result[start + t] = round(2.0 ** (val / 12.0), 1)
+    elif left is not None:
+        for t in range(length):
+            result[start + t] = result[start - 1]  # hold the note before (exact Hz)
+    elif right is not None:
+        for t in range(length):
+            result[start + t] = result[end]  # hold the note after (exact Hz)
+    else:
+        for t in range(length):
+            result[start + t] = None
+
+
+def _extend_attack_release(
+    f0: list[float | None],
+    intensity: list[float],
+    *,
+    floor_percentile: float = 15.0,
+    gate_ratio: float = 1.8,
+    max_bins: int = 3,
+) -> list[float | None]:
+    """Grow each voiced run into its 頭尾 (attack / release) where the loudness
+    envelope shows the note is still sounding.
+
+    The onset and tail of a note are quiet, so the pitch detector often drops them
+    even though the 字 is clearly audible — leaving the 基頻 curve starting late and
+    ending early. Each unvoiced bin adjacent to a run is filled with the run's edge
+    pitch **only while its intensity stays above a noise-relative gate**
+    (``gate_ratio`` × the ``floor_percentile`` intensity), and never more than
+    ``max_bins`` bins out. That keeps a real attack/release but stops at the room
+    noise floor, so a quiet breath or hiss is not mistaken for pitch (勿補太多抓到
+    noise)."""
+    n = len(f0)
+    if n == 0 or len(intensity) != n:
+        return f0
+    floor = float(np.percentile(np.asarray(intensity, dtype=float), floor_percentile))
+    gate = floor * gate_ratio
+    if gate <= 0:
+        return f0
+
+    out = list(f0)
+    i = 0
+    while i < n:
+        if f0[i] is None:
+            i += 1
+            continue
+        j = i
+        while j < n and f0[j] is not None:
+            j += 1
+        # attack: hold the onset pitch backward through the rising edge
+        onset = f0[i]
+        count, k = 0, i - 1
+        while k >= 0 and f0[k] is None and out[k] is None and count < max_bins and intensity[k] >= gate:
+            out[k] = onset
+            k -= 1
+            count += 1
+        # release: hold the offset pitch forward through the decaying tail
+        offset = f0[j - 1]
+        count, k = 0, j
+        while k < n and f0[k] is None and out[k] is None and count < max_bins and intensity[k] >= gate:
+            out[k] = offset
+            k += 1
+            count += 1
+        i = j
+    return out
 
 
 def hz_to_jianpu(hz: float | None, tonic_hz: float | None) -> str:

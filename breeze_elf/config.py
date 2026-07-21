@@ -80,6 +80,11 @@ class Settings:
     # floor (an unvoiced consonant / breath) — kept while RMS stays above
     # ``noise_floor * char_voiceless_margin`` — so 基頻/簡譜 cover the whole 字.
     char_voiceless_margin: float = 1.6
+    # 基頻分析 post-processing: drop erratic f0 blobs that never settle and have no
+    # 平穩音高 (stable pitch) on either side — pitch-detection artifacts, not singing.
+    # Conservative by design (滑音/抖音 and other techniques are preserved); ``0``
+    # keeps the raw per-bin YIN track for the 基頻 curve.
+    f0_clean: bool = True
     language: str = "zh"
     asr_model: str = "medium"
     asr_device: str = "auto"
@@ -204,6 +209,7 @@ def get_settings() -> Settings:
         char_attack_ms=max(0, _int_env("BREEZE_CHAR_ATTACK_MS", 40)),
         char_release_ms=max(0, _int_env("BREEZE_CHAR_RELEASE_MS", 90)),
         char_voiceless_margin=max(1.0, _float_env("BREEZE_CHAR_VOICELESS_MARGIN", 1.6)),
+        f0_clean=_bool_env("BREEZE_F0_CLEAN", True),
         language=os.getenv("BREEZE_LANGUAGE", "zh"),
         asr_model=os.getenv("BREEZE_ASR_MODEL", "medium"),
         asr_device=os.getenv("BREEZE_ASR_DEVICE", "auto"),
