@@ -1538,7 +1538,7 @@
       }
 
       .voice-page {
-        width: min(720px, 100%);
+        width: min(900px, 100%);
         max-width: 100%;
         height: 100%;
         margin: 0 auto;
@@ -1550,7 +1550,7 @@
         display: flex;
         flex-direction: column;
         gap: 14px;
-        padding: max(18px, env(safe-area-inset-top)) 16px 18px;
+        padding: max(18px, env(safe-area-inset-top)) 16px 14px;
       }
 
       /* The voice status echoes filenames and long messages — let it wrap instead
@@ -2153,7 +2153,7 @@
 
       .voice-item-actions {
         display: inline-flex;
-        gap: 4px;
+        gap: 3px;
       }
 
       .icon-btn {
@@ -2165,6 +2165,15 @@
         place-items: center;
         font-size: 1rem;
         border-radius: 8px;
+      }
+
+      /* 聲音庫清單的按鍵縮小,把寬度讓給檔名。 */
+      .voice-item-actions .icon-btn {
+        width: 30px;
+        min-width: 30px;
+        min-height: 30px;
+        font-size: 0.86rem;
+        border-radius: 7px;
       }
 
       .icon-btn.star.on {
@@ -2409,7 +2418,8 @@
       @media (max-width: 520px) {
         /* Mobile is height-constrained: trim the fixed chrome (gaps, paddings, header,
            control/action rows) so the transcript — the data — keeps the room. */
-        .shell {
+        .shell,
+        .voice-page {
           gap: 8px;
           padding: max(12px, env(safe-area-inset-top)) 12px 8px;
         }
@@ -2516,7 +2526,7 @@
       <header>
         <div class="brand">
           <img class="brand-mark" src="./favicon.svg" width="42" height="42" alt="" />
-          <h1>Breeze Elf</h1>
+          <h1>聲音工作室</h1>
         </div>
         <div class="header-actions">
           <!-- 非核心工具(語言/翻譯/慣用詞庫/搜尋)收進齒輪選單,讓收音鍵那一列在手機端維持一排。 -->
@@ -2637,7 +2647,7 @@
       <header>
         <div class="brand">
           <img class="brand-mark" src="./favicon.svg" width="42" height="42" alt="" />
-          <h1>變聲工作室</h1>
+          <h1>聲音工作室</h1>
         </div>
         <button class="theme-toggle" type="button" aria-label="切換深色模式" aria-pressed="false" title="切換深色模式">☾</button>
       </header>
@@ -2657,7 +2667,7 @@
           <h2>聲音庫</h2>
           <span id="voice-engine-tag" class="voice-tag">—</span>
         </div>
-        <p class="voice-hint">
+        <p class="voice-hint" hidden>
           目前目標聲音:<strong id="voice-target-name">尚未選擇</strong>
         </p>
         <div class="voice-source">
@@ -2665,7 +2675,6 @@
           <button id="vc-upload" type="button" class="btniconlabel"><svg class="ic" aria-hidden="true"><use href="#i-upload"></use></svg><span class="btn-label">上傳音檔</span></button>
           <input id="vc-file" class="visually-hidden" type="file" accept="audio/*" />
         </div>
-        <p class="voice-hint voice-hint-sub">錄製或上傳後會自動建立聲紋,並設為目標聲音;在清單中點名稱可改名、☆ 設為最愛。</p>
         <p id="voice-empty" class="voice-hint" hidden>還沒有任何聲音。先錄一段或上傳一個音檔,系統會自動建立聲紋。</p>
         <ul id="voice-list" class="voice-list"></ul>
       </section>
