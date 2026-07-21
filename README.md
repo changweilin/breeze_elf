@@ -269,6 +269,7 @@ Environment variables:
 | `BREEZE_VAD_DETECTOR` | `rms` | Speech-onset gate for the `vad` segmenter: `rms` (energy threshold) or `silero` (neural voice detector via the ONNX model bundled with faster-whisper — no new dependency; silently falls back to `rms` if the model/onnxruntime is missing). |
 | `BREEZE_VAD_SPEECH_THRESHOLD` | `0.5` | Silero speech probability at/above which a frame is speech. |
 | `BREEZE_VAD_NEG_THRESHOLD` | `0.35` | Silero silence probability; between this and the speech threshold the previous decision is held (hysteresis). |
+| `BREEZE_VAD_RMS_RELEASE_RATIO` | `0.5` | RMS gate attack/release hysteresis: an utterance ends only once RMS drops below `BREEZE_RMS_THRESHOLD × this` (onset still uses the full threshold), so a naturally decaying 句尾 syllable isn't clipped. `1.0` restores the old single-threshold gate. |
 | `BREEZE_VAD_SILERO_MODEL` | *(bundled)* | Override path to a `silero_vad*.onnx`; defaults to the one shipped inside faster-whisper. |
 | `BREEZE_VAD_FRAME_MS` | `100` | VAD frame size (RMS gate; Silero re-chunks internally to 32 ms). |
 | `BREEZE_VAD_PRE_ROLL_MS` | `300` | Audio kept before detected speech. |

@@ -60,6 +60,11 @@ class Settings:
     vad_detector: str = "rms"
     vad_speech_threshold: float = 0.5
     vad_neg_threshold: float = 0.35
+    # RMS VAD attack/release hysteresis: a segment ends only once RMS falls below
+    # ``rms_threshold * vad_rms_release_ratio`` (onset still uses the full threshold).
+    # < 1.0 keeps a decaying 句尾 syllable attached to its utterance; 1.0 restores the
+    # old single-threshold gate. Clamped to [0, 1].
+    vad_rms_release_ratio: float = 0.5
     vad_silero_model_path: str = ""
     vad_frame_ms: int = 100
     vad_pre_roll_ms: int = 300
@@ -190,6 +195,7 @@ def get_settings() -> Settings:
         vad_detector=vad_detector,
         vad_speech_threshold=vad_speech_threshold,
         vad_neg_threshold=vad_neg_threshold,
+        vad_rms_release_ratio=min(1.0, max(0.0, _float_env("BREEZE_VAD_RMS_RELEASE_RATIO", 0.5))),
         vad_silero_model_path=os.getenv("BREEZE_VAD_SILERO_MODEL", ""),
         vad_frame_ms=max(1, _int_env("BREEZE_VAD_FRAME_MS", 100)),
         vad_pre_roll_ms=max(0, _int_env("BREEZE_VAD_PRE_ROLL_MS", 300)),

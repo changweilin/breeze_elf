@@ -1927,6 +1927,16 @@
         white-space: nowrap;
       }
 
+      #cv-result-wrap .voice-player,
+      #tts-result-wrap .voice-player,
+      #sing-result-wrap .voice-player,
+      #pitch-result-wrap .voice-player {
+        border: none;
+        border-radius: 0;
+        background: transparent;
+        padding: 8px 0;
+      }
+
       .player-menu {
         position: relative;
         flex: 0 0 auto;
@@ -2665,7 +2675,7 @@
         </div>
         <div id="cv-result-wrap" class="voice-result" hidden>
           <div class="voice-player">
-            <span class="voice-player-title">原始音檔</span>
+            <span class="voice-player-title">原始</span>
             <audio id="cv-source" class="voice-audio" controls controlsList="nodownload noplaybackrate" preload="metadata"></audio>
             <div class="player-menu">
               <button class="icon-btn player-menu-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-label="原始音檔功能選單" title="功能選單">⋮</button>
@@ -2676,7 +2686,7 @@
             </div>
           </div>
           <div class="voice-player">
-            <span class="voice-player-title">轉換音檔</span>
+            <span class="voice-player-title">轉換</span>
             <audio id="cv-result" class="voice-audio" controls controlsList="nodownload noplaybackrate" preload="metadata"></audio>
             <div class="player-menu">
               <button class="icon-btn player-menu-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-label="轉換音檔功能選單" title="功能選單">⋮</button>
@@ -2713,7 +2723,7 @@
         <textarea id="tts-text" class="voice-textarea" maxlength="2000" rows="3" placeholder="輸入想說的話,或上傳文字檔…"></textarea>
         <div id="tts-result-wrap" class="voice-result" hidden>
           <div class="voice-player">
-            <span class="voice-player-title">結果</span>
+            <span class="voice-player-title">文字</span>
             <audio id="tts-result" class="voice-audio" controls controlsList="nodownload noplaybackrate" preload="metadata"></audio>
             <div class="player-menu">
               <button class="icon-btn player-menu-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-label="結果音檔功能選單" title="功能選單">⋮</button>
@@ -2751,7 +2761,7 @@
         <button id="sing-add" type="button" class="mini btniconlabel"><svg class="ic" aria-hidden="true"><use href="#i-plus"></use></svg><span class="btn-label">新增一句</span></button>
         <div id="sing-result-wrap" class="voice-result" hidden>
           <div class="voice-player">
-            <span class="voice-player-title">結果</span>
+            <span class="voice-player-title">簡譜</span>
             <audio id="sing-result" class="voice-audio" controls controlsList="nodownload noplaybackrate" preload="metadata"></audio>
             <div class="player-menu">
               <button class="icon-btn player-menu-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-label="結果音檔功能選單" title="功能選單">⋮</button>
@@ -2795,7 +2805,7 @@
         </div>
         <div id="pitch-result-wrap" class="voice-result" hidden>
           <div class="voice-player">
-            <span class="voice-player-title">結果</span>
+            <span class="voice-player-title">基頻</span>
             <audio id="pitch-result" class="voice-audio" controls controlsList="nodownload noplaybackrate" preload="metadata"></audio>
             <div class="player-menu">
               <button class="icon-btn player-menu-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-label="結果音檔功能選單" title="功能選單">⋮</button>

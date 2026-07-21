@@ -811,18 +811,45 @@ class SpeechDetector(Protocol):
         ...
 
 
+# A speech segment's *offset* is gated a factor below its *onset* by default, so a
+# sentence-final syllable trailing off in volume (自然的句尾漸弱) is still held as
+# speech down to this lower level instead of being cut the instant it dips under the
+# onset gate. Onset stays at the full threshold, so quiet steady noise can't start a
+# segment — only the tail of already-detected speech is extended.
+_RMS_RELEASE_RATIO = 0.5
+
+
 class RmsSpeechDetector:
-    """The original energy gate: a frame is speech when its RMS clears a fixed
-    threshold. Cheap and stateless, but can't tell speech from equally-loud
-    steady noise (冷氣/路噪) — the reason the Silero detector exists."""
+    """The original energy gate, now with attack/release hysteresis (a Schmitt
+    trigger). A frame *starts* speech when its RMS clears ``rms_threshold`` and
+    *keeps* being speech until RMS falls below the lower ``release_threshold``.
+
+    Cheap, and can't tell speech from equally-loud steady noise (冷氣/路噪) — the
+    reason the Silero detector exists — but the asymmetric gate stops a naturally
+    decaying 句尾 syllable (whose RMS slides under the onset gate while it is still
+    being spoken) from being clipped, which the single-threshold version dropped.
+    Onset is unchanged, so noise rejection at the start of a segment is unaffected."""
 
     name = "rms"
 
-    def __init__(self, rms_threshold: float) -> None:
-        self.rms_threshold = rms_threshold
+    def __init__(self, rms_threshold: float, *, release_threshold: float | None = None) -> None:
+        self.rms_threshold = float(rms_threshold)
+        release = (
+            self.rms_threshold * _RMS_RELEASE_RATIO
+            if release_threshold is None
+            else float(release_threshold)
+        )
+        # Keep release in [0, onset]: above onset would invert the hysteresis (offset
+        # harder than onset), below 0 is meaningless.
+        self.release_threshold = max(0.0, min(release, self.rms_threshold))
+        self._active = False
 
     def is_speech(self, frame: np.ndarray) -> bool:
-        return calculate_rms(frame) >= self.rms_threshold
+        rms = calculate_rms(frame)
+        # Once speaking, hold speech down to the lower release gate; when silent,
+        # require the full onset gate to (re)start — the asymmetry is the fix.
+        self._active = rms >= (self.release_threshold if self._active else self.rms_threshold)
+        return self._active
 
 
 # Silero v6 (as bundled by faster-whisper) is a 16 kHz model that scores exactly
@@ -871,10 +898,15 @@ class SileroSpeechDetector:
         self,
         *,
         rms_threshold: float,
+        rms_release_threshold: float | None = None,
         speech_threshold: float = 0.5,
         neg_threshold: float | None = None,
         model_path: str | None = None,
     ) -> None:
+        # The RMS fallback (below) shares the same attack/release hysteresis as the
+        # standalone RmsSpeechDetector so a mid-stream degrade doesn't regress the
+        # 句尾漸弱 handling back to a bare threshold.
+        self._rms_gate = RmsSpeechDetector(rms_threshold, release_threshold=rms_release_threshold)
         self.rms_threshold = rms_threshold
         self.speech_threshold = float(speech_threshold)
         # Hysteresis low edge: between neg and speech thresholds the previous
@@ -918,7 +950,7 @@ class SileroSpeechDetector:
 
     def is_speech(self, frame: np.ndarray) -> bool:
         if self._degraded or self._session is None:
-            return calculate_rms(frame) >= self.rms_threshold
+            return self._rms_gate.is_speech(frame)
 
         if frame.dtype != np.float32:
             frame = frame.astype(np.float32, copy=False)
@@ -935,7 +967,7 @@ class SileroSpeechDetector:
             except Exception as exc:  # pragma: no cover - depends on runtime
                 logger.warning("silero VAD inference failed; falling back to RMS: %s", exc)
                 self._degraded = True
-                return calculate_rms(frame) >= self.rms_threshold
+                return self._rms_gate.is_speech(frame)
             max_prob = prob if max_prob is None else max(max_prob, prob)
 
         if max_prob is None:
@@ -961,6 +993,7 @@ def make_speech_detector(
     kind: str,
     *,
     rms_threshold: float,
+    rms_release_threshold: float | None = None,
     speech_threshold: float = 0.5,
     neg_threshold: float | None = None,
     model_path: str | None = None,
@@ -970,6 +1003,7 @@ def make_speech_detector(
     if kind == "silero":
         detector = SileroSpeechDetector(
             rms_threshold=rms_threshold,
+            rms_release_threshold=rms_release_threshold,
             speech_threshold=speech_threshold,
             neg_threshold=neg_threshold,
             model_path=model_path,
@@ -980,7 +1014,7 @@ def make_speech_detector(
             "silero VAD unavailable (%s); using RMS energy VAD instead",
             detector.unavailable_reason,
         )
-    return RmsSpeechDetector(rms_threshold)
+    return RmsSpeechDetector(rms_threshold, release_threshold=rms_release_threshold)
 
 
 class AudioWindowBuffer:

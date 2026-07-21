@@ -426,6 +426,7 @@ asr_engine = build_asr_from_env(settings)
 effective_vad_detector = make_speech_detector(
     settings.vad_detector,
     rms_threshold=settings.rms_threshold,
+    rms_release_threshold=settings.rms_threshold * settings.vad_rms_release_ratio,
     speech_threshold=settings.vad_speech_threshold,
     neg_threshold=settings.vad_neg_threshold,
     model_path=settings.vad_silero_model_path or None,
@@ -1860,6 +1861,7 @@ def _build_segmenter(sample_rate: int) -> AudioWindowBuffer | AudioUtteranceBuff
     detector = make_speech_detector(
         settings.vad_detector,
         rms_threshold=settings.rms_threshold,
+        rms_release_threshold=settings.rms_threshold * settings.vad_rms_release_ratio,
         speech_threshold=settings.vad_speech_threshold,
         neg_threshold=settings.vad_neg_threshold,
         model_path=settings.vad_silero_model_path or None,
