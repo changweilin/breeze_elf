@@ -2941,13 +2941,13 @@ function base64ToPcm(base64) {
 const COMPARE_MODES = {
   denoise: {
     endpoint: "/api/enhance/denoise",
-    title: "去噪音檔 (DeepFilter)",
+    title: "去噪",
     progress: "去噪中(DeepFilter)",
     filename: "denoise",
   },
   separate: {
     endpoint: "/api/enhance/separate",
-    title: "人聲音檔 (Demucs)",
+    title: "人聲",
     progress: "分離人聲中(Demucs)",
     filename: "vocals",
     body: { scenario: "music" },
