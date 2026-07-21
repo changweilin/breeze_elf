@@ -291,11 +291,20 @@ function idleLabel(button) {
   return button?.dataset.idleLabel || "開始錄音";
 }
 
-// Record buttons are icon + label; swap both together so the glyph survives the toggle.
+// Record buttons swap icon (+ label) together so the glyph survives the toggle. The
+// operation-panel record button is icon-only (.icon-run) — keep its name on aria/title
+// for screen readers; the 聲音庫 record button keeps a visible label.
 function setRecordButton(button, recording) {
   if (!button) return;
   const label = recording ? "停止錄音" : idleLabel(button);
-  button.innerHTML = `<svg class="ic" aria-hidden="true"><use href="#${recording ? "i-stop" : "i-mic"}"></use></svg><span class="btn-label">${label}</span>`;
+  const svg = `<svg class="ic" aria-hidden="true"><use href="#${recording ? "i-stop" : "i-mic"}"></use></svg>`;
+  if (button.classList.contains("icon-run")) {
+    button.innerHTML = svg;
+    button.setAttribute("aria-label", label);
+    button.title = label;
+  } else {
+    button.innerHTML = `${svg}<span class="btn-label">${label}</span>`;
+  }
 }
 
 // Record/stop toggle. On stop the captured blob is handed to onDone, which kicks
