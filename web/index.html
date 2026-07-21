@@ -1700,6 +1700,10 @@
         grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 8px;
       }
+      /* 上傳 / 執行 / 清理 三顆等寬左右並排。 */
+      .voice-source.three {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
 
       /* 執行(念出來 / 唱出來)做成圖示鍵,與上傳鍵在同列右邊等寬並列。 */
       .icon-run {
@@ -2679,9 +2683,10 @@
           <button class="voice-desc-toggle" type="button" aria-expanded="false" aria-label="顯示說明" title="顯示說明"><svg class="ic" aria-hidden="true"><use href="#i-info"></use></svg></button>
         </div>
         <p class="voice-hint voice-desc" hidden>錄一段或上傳你的聲音,系統會自動用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」重新詮釋。</p>
-        <div class="voice-source">
+        <div class="voice-source three">
           <button id="cv-record" type="button" class="primary btniconlabel" data-idle-label="錄音並轉換"><svg class="ic" aria-hidden="true"><use href="#i-mic"></use></svg><span class="btn-label">錄音並轉換</span></button>
           <button id="cv-upload" type="button" class="btniconlabel"><svg class="ic" aria-hidden="true"><use href="#i-upload"></use></svg><span class="btn-label">上傳並轉換</span></button>
+          <button id="cv-clear" type="button" class="btniconlabel"><svg class="ic" aria-hidden="true"><use href="#i-trash"></use></svg><span class="btn-label">清理</span></button>
           <input id="cv-file" class="visually-hidden" type="file" accept="audio/*" />
         </div>
         <div id="cv-result-wrap" class="voice-result" hidden>
@@ -2718,9 +2723,10 @@
           <button class="voice-desc-toggle" type="button" aria-expanded="false" aria-label="顯示說明" title="顯示說明"><svg class="ic" aria-hidden="true"><use href="#i-info"></use></svg></button>
         </div>
         <p class="voice-hint voice-desc" hidden>輸入或上傳文字,用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」念出來。</p>
-        <div class="voice-source">
+        <div class="voice-source three">
           <button id="tts-upload" type="button" class="btniconlabel"><svg class="ic" aria-hidden="true"><use href="#i-upload"></use></svg><span class="btn-label">上傳文字檔</span></button>
           <button id="tts-run" type="button" class="primary icon-run" title="用目標聲音念出來" aria-label="用目標聲音念出來" disabled><svg class="ic" aria-hidden="true"><use href="#i-play"></use></svg></button>
+          <button id="tts-clear" type="button" class="btniconlabel"><svg class="ic" aria-hidden="true"><use href="#i-trash"></use></svg><span class="btn-label">清理</span></button>
         </div>
         <input id="tts-file" class="visually-hidden" type="file" accept=".txt,text/plain" />
         <div class="voice-params">
@@ -2755,9 +2761,10 @@
         <p class="voice-hint voice-desc" hidden>
           上傳逐字稿(含音高的 .json),或直接編輯下面的簡譜:<strong>一句一排</strong>,上排是<strong>簡譜</strong>(空格分隔,如 <code>1 1 5</code>;滑音用 <code>3↗5</code>;高八度加 <code>'</code>、低八度加 <code>,</code>),下排是<strong>文字</strong>(逐字),兩者可各自編輯,用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」唱出來。想依實測音高、抑揚頓挫演唱,請改用「基頻唱歌」。
         </p>
-        <div class="voice-source">
+        <div class="voice-source three">
           <button id="sing-upload" type="button" class="btniconlabel"><svg class="ic" aria-hidden="true"><use href="#i-upload"></use></svg><span class="btn-label">上傳逐字稿 JSON</span></button>
           <button id="sing-run" type="button" class="primary icon-run" title="用目標聲音唱出來" aria-label="用目標聲音唱出來" disabled><svg class="ic" aria-hidden="true"><use href="#i-play"></use></svg></button>
+          <button id="sing-clear" type="button" class="btniconlabel"><svg class="ic" aria-hidden="true"><use href="#i-trash"></use></svg><span class="btn-label">清理</span></button>
         </div>
         <input id="sing-file" class="visually-hidden" type="file" accept="application/json,.json" />
         <div class="voice-params">
@@ -2793,9 +2800,10 @@
         <p class="voice-hint voice-desc" hidden>
           載入「基頻分析(.csv)」後,下方會按段落完整呈現<strong>基頻</strong>(青色音高曲線)、<strong>強度</strong>(橘色填色)與<strong>文字</strong>(上方標記)的對應關係,再用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」依實測音高、抑揚頓挫與氣音重新唱出來。CSV 由逐字稿頁「後處理」後匯出。
         </p>
-        <div class="voice-source">
+        <div class="voice-source three">
           <button id="pitch-analysis-upload" type="button" class="btniconlabel"><svg class="ic" aria-hidden="true"><use href="#i-load"></use></svg><span class="btn-label">載入基頻分析 (.csv)</span></button>
           <button id="pitch-run" type="button" class="primary icon-run" title="用目標聲音唱出來" aria-label="用目標聲音唱出來" disabled><svg class="ic" aria-hidden="true"><use href="#i-play"></use></svg></button>
+          <button id="pitch-clear" type="button" class="btniconlabel"><svg class="ic" aria-hidden="true"><use href="#i-trash"></use></svg><span class="btn-label">清理</span></button>
         </div>
         <input id="pitch-analysis-file" class="visually-hidden" type="file" accept="text/csv,.csv" />
         <div class="voice-params solo">
@@ -3003,6 +3011,6 @@
     </dialog>
 
     <script src="./app.js?v=40" type="module"></script>
-    <script src="./voice.js?v=27" type="module"></script>
+    <script src="./voice.js?v=28" type="module"></script>
   </body>
 </html>
