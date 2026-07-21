@@ -863,8 +863,9 @@ class StaticAssetsTests(unittest.TestCase):
 class _FakeSwitchEngine:
     backend = "faster-whisper"
 
-    def __init__(self, model_name, device_preference="auto"):
+    def __init__(self, model_name, device_preference="auto", *, load_ref=None):
         self.model_name = model_name
+        self._load_ref = load_ref or model_name
         self.device_preference = device_preference
         self.device = "cpu"
         self.compute_type = "int8"

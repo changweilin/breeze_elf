@@ -2597,6 +2597,17 @@
         </div>
       </section>
 
+      <!-- 音檔類模型(Demucs 人聲分離 / DeepFilterNet3 去噪)載入與執行進度。單次 POST
+           無伺服器端進度,故用 indeterminate + 標明正在載入哪個模型。 -->
+      <div id="audio-model-progress" class="voice-progress" hidden aria-live="polite">
+        <div class="vp-head">
+          <span id="audio-model-progress-label">載入模型中</span>
+        </div>
+        <div class="progress-track">
+          <div class="progress-fill indeterminate"></div>
+        </div>
+      </div>
+
       <section id="compare-panel" class="recording" aria-label="降噪比較" hidden>
         <span class="voice-player-title" id="compare-title">去噪</span>
         <audio id="compare-audio" controls controlsList="nodownload noplaybackrate" preload="metadata"></audio>
@@ -2991,7 +3002,7 @@
       </form>
     </dialog>
 
-    <script src="./app.js?v=39" type="module"></script>
-    <script src="./voice.js?v=26" type="module"></script>
+    <script src="./app.js?v=40" type="module"></script>
+    <script src="./voice.js?v=27" type="module"></script>
   </body>
 </html>

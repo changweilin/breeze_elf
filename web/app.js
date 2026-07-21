@@ -33,6 +33,8 @@ const els = {
   compareAudio: document.querySelector("#compare-audio"),
   compareTitle: document.querySelector("#compare-title"),
   compareDownload: document.querySelector("#compare-download"),
+  audioModelProgress: document.querySelector("#audio-model-progress"),
+  audioModelProgressLabel: document.querySelector("#audio-model-progress-label"),
   theme: document.querySelector("#theme"),
   settings: document.querySelector("#settings"),
   settingsPanel: document.querySelector("#settings-panel"),
@@ -86,6 +88,9 @@ const LANGUAGE_LABELS = new Map(LANGUAGE_OPTIONS.map((item) => [item.code, item.
 const AUDIO_DB_NAME = "breeze-elf-audio-v1";
 const AUDIO_STORE_NAME = "sessions";
 const AUDIO_RECORD_ID = "current";
+// The 降噪/分離 compare clip is cached alongside the recording (same store, own key)
+// so the second player survives a reload — invalidated whenever the recording changes.
+const COMPARE_RECORD_ID = "compare";
 const AUDIO_SAMPLE_RATE = 16000;
 const AUDIO_CHANNEL_COUNT = 1;
 const AUDIO_BYTES_PER_SAMPLE = 2;
@@ -211,6 +216,9 @@ const state = {
   compareBlob: null,
   compareFilename: "",
   compareBusy: false,
+  // True only while the initial restore runs, so resetComparePanel (fired by
+  // refreshAudioPreview during that restore) keeps the cached clip instead of deleting it.
+  restoringCompare: false,
   openBlocks: new Set(),
   demoRunning: false,
   demoTimers: [],
@@ -2459,6 +2467,31 @@ async function restoreAudioSession() {
   }
 }
 
+// Restore the recording, then its 降噪/分離 compare clip. The compare record is read
+// up-front and the delete inside resetComparePanel is suppressed (state.restoringCompare)
+// so restoreAudioSession's refreshAudioPreview can't wipe the cached clip before we reapply it.
+async function restoreAudioAndCompareSession() {
+  if (DEMO_MODE) {
+    return;
+  }
+  let compareRecord = null;
+  try {
+    compareRecord = await runAudioStore((store) => store.get(COMPARE_RECORD_ID));
+  } catch {
+    compareRecord = null;
+  }
+  state.restoringCompare = true;
+  try {
+    await restoreAudioSession();
+  } finally {
+    state.restoringCompare = false;
+  }
+  // A compare clip without its source recording is meaningless — only restore both together.
+  if (compareRecord?.blob && state.audioBytes) {
+    applyCompareRecord(compareRecord);
+  }
+}
+
 async function clearRecordedAudio() {
   window.clearTimeout(state.audioPersistTimer);
   state.audioPersistTimer = 0;
@@ -2757,6 +2790,7 @@ async function analyzeFile(file) {
   if (state.scenario === "music") {
     try {
       setStatus("分離人聲中(Demucs)", "live");
+      showAudioModelProgress("載入 Demucs 人聲分離模型…");
       const vocals = await separateVocals(decoded.pcm, decoded.sampleRate);
       if (vocals && vocals.length) {
         decoded = { pcm: vocals, sampleRate: decoded.sampleRate };
@@ -2764,6 +2798,8 @@ async function analyzeFile(file) {
     } catch (error) {
       console.error("separateVocals failed", error);
       flashStats(error?.message || "人聲分離失敗,改用原始音檔");
+    } finally {
+      hideAudioModelProgress();
     }
   }
 
@@ -2943,16 +2979,35 @@ const COMPARE_MODES = {
     endpoint: "/api/enhance/denoise",
     title: "去噪",
     progress: "去噪中(DeepFilter)",
+    model: "載入 DeepFilterNet3 去噪模型…",
     filename: "denoise",
   },
   separate: {
     endpoint: "/api/enhance/separate",
     title: "人聲",
     progress: "分離人聲中(Demucs)",
+    model: "載入 Demucs 人聲分離模型…",
     filename: "vocals",
     body: { scenario: "music" },
   },
 };
+
+// Inline indeterminate bar for the audio-model operations (Demucs 人聲分離 /
+// DeepFilterNet3 去噪). These are single POSTs with no server-side progress feed, so
+// the honest UI is an indeterminate bar whose label names the model being loaded/run.
+function showAudioModelProgress(label) {
+  if (!els.audioModelProgress) {
+    return;
+  }
+  els.audioModelProgressLabel.textContent = label;
+  els.audioModelProgress.hidden = false;
+}
+
+function hideAudioModelProgress() {
+  if (els.audioModelProgress) {
+    els.audioModelProgress.hidden = true;
+  }
+}
 
 // Flatten the recorded 16-bit PCM chunks (ArrayBuffers) into one Int16Array for
 // the whole-file enhance endpoints.
@@ -3001,6 +3056,44 @@ function resetComparePanel() {
     els.compareAudio.removeAttribute("src");
     els.compareAudio.load();
   }
+  // The cached clip only makes sense for the recording it was derived from; dropping
+  // it here means any recording change (the single invalidation chokepoint) clears it.
+  // Skipped during the initial restore, which re-shows a cached clip via this same path.
+  if (!state.restoringCompare) {
+    void runAudioStore((store) => store.delete(COMPARE_RECORD_ID), "readwrite").catch(() => {});
+  }
+}
+
+// Cache the just-produced compare clip so its player is restored on the next load.
+async function persistCompareResult(record) {
+  if (DEMO_MODE) {
+    return;
+  }
+  try {
+    await runAudioStore(
+      (store) => store.put({ id: COMPARE_RECORD_ID, updatedAt: Date.now(), ...record }),
+      "readwrite",
+    );
+  } catch {
+    /* best-effort cache — a quota/IDB failure must not break the compare itself */
+  }
+}
+
+// Re-apply a cached compare clip into the second player. Called AFTER the recording is
+// restored (restoreAudioSession's refreshAudioPreview would otherwise reset the panel),
+// with the record read up-front so that reset's delete can't race it away.
+function applyCompareRecord(record) {
+  if (!record?.blob || !els.comparePanel) {
+    return;
+  }
+  state.compareBlob = record.blob;
+  state.compareObjectUrl = URL.createObjectURL(record.blob);
+  state.compareFilename = record.filename || "compare";
+  els.compareTitle.textContent = record.title || "比較";
+  els.compareAudio.src = state.compareObjectUrl;
+  els.compareAudio.load();
+  els.comparePanel.hidden = false;
+  setAudioActions();
 }
 
 async function runCompare(kind) {
@@ -3019,6 +3112,7 @@ async function runCompare(kind) {
   window.clearTimeout(state.statsTimer);
   const previousStats = els.stats.textContent;
   els.stats.textContent = mode.progress;
+  showAudioModelProgress(mode.model);
 
   try {
     const response = await fetch(mode.endpoint, {
@@ -3047,9 +3141,17 @@ async function runCompare(kind) {
     els.compareAudio.load();
     els.comparePanel.hidden = false;
     flashStats(`已產生${mode.title}`, previousStats);
+    void persistCompareResult({
+      blob: state.compareBlob,
+      sampleRate: data.sampleRate || state.audioSampleRate,
+      kind,
+      title: mode.title,
+      filename: mode.filename,
+    });
   } catch (error) {
     flashStats(error.message || "處理失敗", previousStats);
   } finally {
+    hideAudioModelProgress();
     state.compareBusy = false;
     setAudioActions();
   }
@@ -3248,7 +3350,7 @@ applyRuntimeMode();
 setRunning(false);
 setViewMode(state.viewMode, { persist: false });
 restoreTranscriptSession();
-void restoreAudioSession();
+void restoreAudioAndCompareSession();
 // Resolve 降噪比較 availability up front so the menu items reflect it before the
 // first recording finishes (also refreshes the file-batch flag).
 if (!DEMO_MODE) {

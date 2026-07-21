@@ -18,6 +18,15 @@ import {
   // stop voice.js from running, which also owns the page tab navigation.
 } from "./audio-utils.js?v=2";
 
+// Web cache for the most recent 生成結果 (convert/tts/sing/pitch) so its player is
+// auto-restored on reload. A tiny self-contained IndexedDB store, deliberately NOT
+// sharing the 逐字稿 page's audio DB schema (per this project's convention of
+// duplicating small helpers across page controllers rather than a shared module).
+const VOICE_DB_NAME = "breeze-elf-voice-v1";
+const VOICE_STORE_NAME = "results";
+const VOICE_RESULT_ID = "last";
+let voiceDbPromise = null;
+
 const els = {
   page: document.querySelector("#page-voice"),
   status: document.querySelector("#voice-status"),
@@ -96,6 +105,7 @@ const state = {
   initialized: false,
   modelReady: false,
   loading: false,
+  provider: "",
   pollTimer: 0,
   voices: [],
   selectedId: "",
@@ -367,6 +377,7 @@ async function initVoicePage() {
   if (!state.initialized) {
     state.initialized = true;
     await refreshVoices();
+    void restoreLastResult();
   }
   void ensureModelLoaded();
 }
@@ -376,7 +387,7 @@ async function ensureModelLoaded() {
     return;
   }
   state.loading = true;
-  showProgress("載入變聲模型中", 0, true);
+  showProgress(`載入${providerLabel()}中`, 0, true);
   try {
     const response = await fetch("/api/voice/load", { method: "POST" });
     const data = await response.json().catch(() => ({}));
@@ -433,7 +444,21 @@ function stopPolling() {
   }
 }
 
+// Human-readable name for the loading progress bar so it says which 變聲 model is
+// actually being loaded (Req: 進度條說明正在載入哪些模型).
+const PROVIDER_LABELS = {
+  mock: "變聲引擎(DSP 合成)",
+  openvoice: "OpenVoice 音色轉換模型",
+};
+
+function providerLabel() {
+  return PROVIDER_LABELS[state.provider] || "變聲模型";
+}
+
 function applyEngineMeta(data) {
+  if (data?.provider) {
+    state.provider = String(data.provider).toLowerCase();
+  }
   if (data?.backend) {
     const device = data.device && data.device !== "unknown" ? ` · ${data.device}` : "";
     els.engineTag.textContent = `${data.provider || data.backend}${device}`;
@@ -464,7 +489,8 @@ function applyStatus(data) {
   } else if (status === "loading") {
     state.loading = true;
     const fraction = typeof data.progress === "number" ? data.progress : 0;
-    showProgress(data.stage || "載入中", fraction, fraction <= 0.001);
+    const stage = data.stage ? `${providerLabel()} · ${data.stage}` : `載入${providerLabel()}中`;
+    showProgress(stage, fraction, fraction <= 0.001);
   }
   refreshButtons();
 }
@@ -1729,7 +1755,7 @@ const RESULT_TARGETS = {
   },
 };
 
-function showResult(kind, audioBase64) {
+function showResult(kind, audioBase64, { scroll = true } = {}) {
   const target = RESULT_TARGETS[kind];
   const audioEl = els[target.audio];
   const wrapEl = els[target.wrap];
@@ -1747,17 +1773,20 @@ function showResult(kind, audioBase64) {
   // Make sure the freshly revealed player is actually on screen so the user can
   // listen before deciding to download / save. "nearest" avoids the big viewport
   // jump that "center" can cause on phones.
-  try {
-    wrapEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  } catch {
-    /* scrollIntoView options unsupported — ignore */
+  if (scroll) {
+    try {
+      wrapEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    } catch {
+      /* scrollIntoView options unsupported — ignore */
+    }
   }
+  void persistLastResult({ kind, b64: audioBase64 });
 }
 
 // 聲音轉換 shows the original input clip next to the converted one so they can be
 // compared. Per-clip 下載/雲端儲存 live in each player's ⋮ menu; the buttons below
 // act on both as a 打包 (bundle).
-function showConvertResult(sourceBase64, convertedBase64) {
+function showConvertResult(sourceBase64, convertedBase64, { scroll = true } = {}) {
   if (state.cvSourceUrl) {
     URL.revokeObjectURL(state.cvSourceUrl);
   }
@@ -1774,11 +1803,14 @@ function showConvertResult(sourceBase64, convertedBase64) {
   els.cvResult.load();
   closeAllPlayerMenus();
   els.cvResultWrap.hidden = false;
-  try {
-    els.cvResultWrap.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  } catch {
-    /* scrollIntoView options unsupported — ignore */
+  if (scroll) {
+    try {
+      els.cvResultWrap.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    } catch {
+      /* scrollIntoView options unsupported — ignore */
+    }
   }
+  void persistLastResult({ kind: "convert", sourceB64: sourceBase64, resultB64: convertedBase64 });
 }
 
 // Low-level remote save: POST one WAV to the outputs endpoint, return its server
@@ -2051,6 +2083,81 @@ function wirePlayerMenu(menu) {
 
 function base64ToBlob(base64, type) {
   return new Blob([base64ToBytes(base64)], { type });
+}
+
+// --------------------------------------------------------------------------- //
+// web cache — auto-restore the last generated result into its player on reload
+// --------------------------------------------------------------------------- //
+
+function openVoiceDatabase() {
+  if (!("indexedDB" in window)) {
+    return Promise.resolve(null);
+  }
+  if (!voiceDbPromise) {
+    voiceDbPromise = new Promise((resolve, reject) => {
+      const request = indexedDB.open(VOICE_DB_NAME, 1);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(VOICE_STORE_NAME)) {
+          db.createObjectStore(VOICE_STORE_NAME, { keyPath: "id" });
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error("IndexedDB failed"));
+      request.onblocked = () => reject(new Error("IndexedDB blocked"));
+    });
+  }
+  return voiceDbPromise;
+}
+
+async function runVoiceStore(operation, mode = "readonly") {
+  const db = await openVoiceDatabase();
+  if (!db) {
+    return null;
+  }
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(VOICE_STORE_NAME, mode);
+    const store = transaction.objectStore(VOICE_STORE_NAME);
+    const request = operation(store);
+    let result = null;
+    request.onsuccess = () => {
+      result = request.result;
+    };
+    request.onerror = () => reject(request.error || new Error("IndexedDB request failed"));
+    transaction.oncomplete = () => resolve(result);
+    transaction.onerror = () => reject(transaction.error || new Error("IndexedDB transaction failed"));
+    transaction.onabort = () => reject(transaction.error || new Error("IndexedDB transaction aborted"));
+  });
+}
+
+// Store the latest result (base64 held in hand, so no blob<->b64 round trip needed).
+// convert keeps both the echoed 來源 clip and the 轉換 output; the rest keep one clip.
+async function persistLastResult(record) {
+  try {
+    await runVoiceStore((store) => store.put({ id: VOICE_RESULT_ID, ...record }), "readwrite");
+  } catch {
+    /* best-effort cache — a quota/IDB failure must not break generation itself */
+  }
+}
+
+async function restoreLastResult() {
+  let record = null;
+  try {
+    record = await runVoiceStore((store) => store.get(VOICE_RESULT_ID));
+  } catch {
+    return;
+  }
+  if (!record?.kind) {
+    return;
+  }
+  // scroll:false — restoring on page open must not yank the viewport around.
+  if (record.kind === "convert") {
+    if (record.sourceB64 && record.resultB64) {
+      showConvertResult(record.sourceB64, record.resultB64, { scroll: false });
+    }
+  } else if (RESULT_TARGETS[record.kind] && record.b64) {
+    showResult(record.kind, record.b64, { scroll: false });
+  }
 }
 
 function downloadUrl(url, name) {

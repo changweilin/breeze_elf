@@ -21,7 +21,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.websockets import WebSocketState
 
-from .asr import ASRResult, FasterWhisperASR, WordTiming, build_asr_from_env
+from .asr import (
+    ASRResult,
+    FasterWhisperASR,
+    WordTiming,
+    build_asr_from_env,
+    resolve_breeze_model_dir,
+)
 from .asr_models import active_model_id, find_asr_model, list_asr_models
 from .asr_queue import ASRQueue
 from .audio import (
@@ -889,29 +895,26 @@ async def _run_asr_switch(option) -> None:
     global asr_engine
     loop = asyncio.get_running_loop()
     try:
-        model_ref = option.model
+        load_ref = option.model
         if option.kind == "breeze":
             # Offline-first: breeze is a LOCAL CTranslate2 directory. Resolve it
             # (CWD-independent) and fail with a clear message instead of letting
             # faster-whisper fall through to a confusing HuggingFace 404 — and an
             # unwanted network call — when the directory is absent.
-            path = Path(model_ref).expanduser()
-            if not path.is_absolute():
-                path = ROOT_DIR / path
-            if not path.exists():
+            breeze_dir = resolve_breeze_model_dir(settings)
+            if not breeze_dir.exists():
                 raise RuntimeError(
-                    f"找不到 Breeze 模型目錄:{path}(請放入 CTranslate2 模型,"
+                    f"找不到 Breeze 模型目錄:{breeze_dir}(請放入 CTranslate2 模型,"
                     "或用 BREEZE_ASR_BREEZE_MODEL 指定路徑)"
                 )
-            model_ref = str(path)
+            load_ref = str(breeze_dir)
         asr_switch_state.report(0.1, "建立引擎")
-        new_engine = FasterWhisperASR(model_ref, settings.asr_device)
+        # Identity/display uses the preset value (e.g. the relative breeze dir) so the
+        # switcher matches it back to its option; ``load_ref`` is the absolute path the
+        # local model is actually loaded from (CWD-independent).
+        new_engine = FasterWhisperASR(option.model, settings.asr_device, load_ref=load_ref)
         asr_switch_state.report(0.25, f"載入 {option.label}")
         await loop.run_in_executor(None, new_engine.load)
-        # Identity/display uses the preset value (e.g. the relative breeze dir) so the
-        # switcher matches it back to its option; the absolute path was only needed to
-        # load the local model CWD-independently.
-        new_engine.model_name = option.model
 
         asr_switch_state.report(0.85, "切換佇列")
         new_queue = ASRQueue(new_engine, settings.asr_concurrency)

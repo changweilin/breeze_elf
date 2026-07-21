@@ -86,7 +86,11 @@ class Settings:
     # keeps the raw per-bin YIN track for the 基頻 curve.
     f0_clean: bool = True
     language: str = "zh"
-    asr_model: str = "medium"
+    # Default recognition model. ``breeze`` is a preset sentinel resolved to the local
+    # CTranslate2 dir in ``asr_breeze_model`` by ``build_asr_from_env`` (falls back to
+    # Whisper ``medium`` when that dir is absent, so a fresh clone still boots). Any
+    # other value is passed straight to faster-whisper (a size, HF id, or CT2 path).
+    asr_model: str = "breeze"
     asr_device: str = "auto"
     asr_provider: str = "faster-whisper"
     # Local CTranslate2 directory the "breeze" model preset resolves to (the model
@@ -211,7 +215,7 @@ def get_settings() -> Settings:
         char_voiceless_margin=max(1.0, _float_env("BREEZE_CHAR_VOICELESS_MARGIN", 1.6)),
         f0_clean=_bool_env("BREEZE_F0_CLEAN", True),
         language=os.getenv("BREEZE_LANGUAGE", "zh"),
-        asr_model=os.getenv("BREEZE_ASR_MODEL", "medium"),
+        asr_model=os.getenv("BREEZE_ASR_MODEL", "breeze"),
         asr_device=os.getenv("BREEZE_ASR_DEVICE", "auto"),
         asr_provider=os.getenv("BREEZE_ASR_PROVIDER", "faster-whisper"),
         asr_breeze_model=os.getenv("BREEZE_ASR_BREEZE_MODEL", "models/breeze-asr-25-ct2"),

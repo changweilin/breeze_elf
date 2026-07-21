@@ -1,9 +1,17 @@
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
 
-from breeze_elf.asr import TRADITIONAL_CHINESE_PROMPT, FasterWhisperASR, MockASR
+from breeze_elf.asr import (
+    TRADITIONAL_CHINESE_PROMPT,
+    FasterWhisperASR,
+    MockASR,
+    build_asr_from_env,
+    resolve_breeze_model_dir,
+)
+from breeze_elf.config import get_settings
 
 
 class _StubWhisperModel:
@@ -218,6 +226,45 @@ class BatchedFileASRTests(unittest.TestCase):
         result = engine.transcribe_file(np.zeros(16000, dtype=np.float32), 16000, "auto")
 
         self.assertEqual([seg.text for seg in result.segments], ["有字"])
+
+
+class BuildASRFromEnvTests(unittest.TestCase):
+    def setUp(self):
+        self.settings = get_settings()
+
+    def test_default_asr_model_is_breeze(self):
+        self.assertEqual(self.settings.asr_model, "breeze")
+
+    def test_breeze_preset_loads_local_dir_when_present(self):
+        # Point the breeze preset at this repo's tests dir (guaranteed to exist) so the
+        # resolver treats it as a present CT2 model without needing the 2.9 GB weights.
+        settings = replace(self.settings, asr_model="breeze", asr_breeze_model="tests")
+        engine = build_asr_from_env(settings)
+        self.assertIsInstance(engine, FasterWhisperASR)
+        # Identity stays the relative preset value so the switcher highlights "breeze"…
+        self.assertEqual(engine.model_name, "tests")
+        # …while the actual load ref is the absolute on-disk path (offline-first).
+        self.assertEqual(engine._load_ref, str(resolve_breeze_model_dir(settings)))
+        self.assertTrue(engine._load_ref.endswith("tests"))
+
+    def test_breeze_preset_falls_back_to_medium_when_dir_absent(self):
+        settings = replace(
+            self.settings, asr_model="breeze", asr_breeze_model="models/__absent__"
+        )
+        engine = build_asr_from_env(settings)
+        self.assertIsInstance(engine, FasterWhisperASR)
+        self.assertEqual(engine.model_name, "medium")
+        self.assertEqual(engine._load_ref, "medium")
+
+    def test_non_breeze_model_passes_through_unchanged(self):
+        settings = replace(self.settings, asr_model="large-v3")
+        engine = build_asr_from_env(settings)
+        self.assertEqual(engine.model_name, "large-v3")
+        self.assertEqual(engine._load_ref, "large-v3")
+
+    def test_mock_provider_bypasses_breeze_resolution(self):
+        settings = replace(self.settings, asr_provider="mock", asr_model="breeze")
+        self.assertIsInstance(build_asr_from_env(settings), MockASR)
 
 
 if __name__ == "__main__":

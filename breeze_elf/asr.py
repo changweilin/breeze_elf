@@ -1,15 +1,23 @@
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 import numpy as np
 
 from .config import Settings, get_settings
+
+LOGGER = logging.getLogger(__name__)
+
+# Repo root (…/breeze_elf/asr.py → repo). Mirrors main.py / doctor.py so a relative
+# ``asr_breeze_model`` resolves CWD-independently to the on-disk CTranslate2 dir.
+ROOT_DIR = Path(__file__).resolve().parent.parent
 
 TRADITIONAL_CHINESE_PROMPT = (
     "以下是台灣繁體中文語音轉寫，內容可能包含國語、台灣用語、英文詞彙與標點。"
@@ -142,8 +150,19 @@ class MockASR:
 class FasterWhisperASR:
     backend = "faster-whisper"
 
-    def __init__(self, model_name: str = "medium", device_preference: str = "auto") -> None:
+    def __init__(
+        self,
+        model_name: str = "medium",
+        device_preference: str = "auto",
+        *,
+        load_ref: str | None = None,
+    ) -> None:
+        # ``model_name`` is the display/identity string the 模型與演算法 switcher matches
+        # against its presets (e.g. the *relative* breeze dir). ``load_ref`` is what
+        # faster-whisper actually loads — an absolute CT2 path for offline-first breeze,
+        # so a relative-but-present dir never falls through to a HuggingFace 404.
         self.model_name = model_name
+        self._load_ref = load_ref or model_name
         self.device_preference = device_preference
         self.device = "unloaded"
         self.compute_type = "unloaded"
@@ -172,7 +191,7 @@ class FasterWhisperASR:
             for device, compute_type in self._device_candidates():
                 try:
                     self._model = WhisperModel(
-                        self.model_name,
+                        self._load_ref,
                         device=device,
                         compute_type=compute_type,
                     )
@@ -415,10 +434,39 @@ def _build_prompt(
     return " ".join(parts) if parts else None
 
 
+def resolve_breeze_model_dir(settings: Settings) -> Path:
+    """Absolute path to the local Breeze CTranslate2 directory (offline-first).
+
+    faster-whisper can only load a size string, a HF id, or a *local* CT2 dir, so the
+    ``breeze`` preset is a directory on disk — resolved here CWD-independently."""
+    path = Path(settings.asr_breeze_model).expanduser()
+    if not path.is_absolute():
+        path = ROOT_DIR / path
+    return path
+
+
 def build_asr_from_env(settings: Settings | None = None) -> ASREngine:
     settings = settings or get_settings()
     if settings.asr_provider.strip().lower() == "mock":
         return MockASR()
+    if settings.asr_model.strip() == "breeze":
+        # Preset sentinel → local Breeze CT2 dir. Load via the absolute path but keep
+        # the relative preset value as identity so the 模型與演算法 switcher highlights
+        # "breeze". Missing dir → fall back to Whisper medium so a fresh clone (without
+        # the 2.9 GB model) still boots instead of crashing / hitting HuggingFace.
+        breeze_dir = resolve_breeze_model_dir(settings)
+        if breeze_dir.exists():
+            return FasterWhisperASR(
+                settings.asr_breeze_model,
+                settings.asr_device,
+                load_ref=str(breeze_dir),
+            )
+        LOGGER.warning(
+            "Breeze model dir not found (%s); falling back to Whisper medium. "
+            "Place a CTranslate2 model there or set BREEZE_ASR_BREEZE_MODEL.",
+            breeze_dir,
+        )
+        return FasterWhisperASR("medium", settings.asr_device)
     return FasterWhisperASR(settings.asr_model, settings.asr_device)
 
 
