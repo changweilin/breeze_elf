@@ -107,6 +107,10 @@ class PipelineConfig:
 
 _SECTION_TAG_LINE = re.compile(r"^\s*(\[[^\]]{0,60}\]|【[^】]{0,60}】)\s*$")
 _INLINE_TAG = re.compile(r"\[[^\]]{0,60}\]|【[^】]{0,60}】")
+# "大武(Tāi-bú)"-style Tai-lo reading annotations (Common Voice nan-tw, MOE
+# dictionaries): the word is sung/spoken once, so the transcript keeps Han only.
+_NAN_READING = re.compile(r"\(([A-Za-zÀ-ʯ̀-ͯ̍'’\- ·.,!?]+)\)")
+_HAN_CHAR = re.compile(r"[一-鿿]")
 _FURIGANA = re.compile(
     r"([一-鿿々々]+)[((]([぀-ゟ゠-ヿー]+)[))]"
 )
@@ -123,6 +127,16 @@ def _opencc_s2twp():
 
         _opencc_converter = opencc.OpenCC("s2twp")
     return _opencc_converter
+
+
+def _decode_text(raw: bytes) -> str:
+    """MIR-1K era corpora ship Big5 text files; try UTF-8 first, then cp950."""
+    for encoding in ("utf-8-sig", "cp950"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
 
 
 def load_nan_mapping(path: Path) -> list[tuple[str, str]]:
@@ -156,6 +170,8 @@ def normalize_text(
     if lang == "zh-TW":
         text = _opencc_s2twp().convert(text)
     elif lang == "nan":
+        if _HAN_CHAR.search(_NAN_READING.sub("", text)):
+            text = _NAN_READING.sub("", text)  # pure-Tai-lo lines keep their parens
         for src, dst in nan_mapping or []:
             text = text.replace(src, dst)
     elif lang == "ja":
@@ -434,6 +450,9 @@ def sanitize_id(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._") or "song"
 
 
+_CHUNK_NAME = re.compile(r"^chunks/(.+)_\d{4}\.wav$")
+
+
 class DatasetWriter:
     def __init__(self, output_dir: Path) -> None:
         self.output_dir = output_dir
@@ -441,11 +460,17 @@ class DatasetWriter:
         self.chunk_dir.mkdir(parents=True, exist_ok=True)
         self.csv_path = output_dir / "metadata.csv"
         self._existing: set[str] = set()
+        self._sources: set[str] = set()
         if self.csv_path.exists():
             with open(self.csv_path, encoding="utf-8", newline="") as fh:
                 for row in csv.DictReader(fh):
-                    if row.get("file_name"):
-                        self._existing.add(row["file_name"])
+                    name = row.get("file_name")
+                    if not name:
+                        continue
+                    self._existing.add(name)
+                    match = _CHUNK_NAME.match(name)
+                    if match:
+                        self._sources.add(match.group(1))
         self.written = 0
         self.skipped = 0
 
@@ -474,14 +499,14 @@ class DatasetWriter:
                 }
             )
         self._existing.add(rel_name)
+        self._sources.add(sanitize_id(source_id))
         self.written += 1
         return True
 
     def has_source(self, source_id: str) -> bool:
         """True when any chunk of this song is already exported — lets dataset
         re-runs skip the song before paying for separation again."""
-        pattern = re.compile(rf"^chunks/{re.escape(sanitize_id(source_id))}_\d{{4}}\.wav$")
-        return any(pattern.match(name) for name in self._existing)
+        return sanitize_id(source_id) in self._sources
 
 
 # ---------------------------------------------------------------------------
@@ -794,7 +819,7 @@ def ingest_mir1k(
         for directory in lyrics_dirs:
             candidate = directory / f"{wav.stem}.txt"
             if candidate.exists():
-                lyric_text = candidate.read_text(encoding="utf-8-sig", errors="replace")
+                lyric_text = _decode_text(candidate.read_bytes())
                 break
         if lyric_text is None or not lyric_text.strip():
             missing_lyrics += 1
@@ -805,7 +830,7 @@ def ingest_mir1k(
         try:
             data, sr = sf.read(str(wav), dtype="float32", always_2d=True)
             vocals = data[:, 1] if data.shape[1] >= 2 else data[:, 0]  # R = clean vocals
-            text = " ".join(lyric_text.split())
+            text = " ".join(lyric_text.replace("_", " ").split())  # _ delimits phrases
             timed = [LyricLine(0.0, len(vocals) / sr, text)]
             total += process_song(
                 writer,
@@ -840,43 +865,47 @@ def ingest_common_voice_dir(
             "https://datacollective.mozilla.org (e.g. nan-tw), extract it, and pass the "
             "folder containing validated.tsv + clips/ via --input."
         )
-    tsv = next(
-        (root / n for n in ("validated.tsv", "train.tsv", "dev.tsv") if (root / n).exists()),
-        None,
-    )
+    if (root / "validated.tsv").exists():
+        tsvs = [root / "validated.tsv"]
+    else:  # newer Data Collective drops ship pre-split train/dev/test instead
+        tsvs = [root / n for n in ("train.tsv", "dev.tsv", "test.tsv") if (root / n).exists()]
     clips = root / "clips"
-    if tsv is None or not clips.is_dir():
-        raise SystemExit(f"{root} lacks validated.tsv/clips/ — not a Common Voice extract")
+    if not tsvs or not clips.is_dir():
+        raise SystemExit(f"{root} lacks validated/train tsv + clips/ — not a Common Voice extract")
+
+    rows: list[dict] = []
+    for tsv in tsvs:
+        with open(tsv, encoding="utf-8", newline="") as fh:
+            rows.extend(csv.DictReader(fh, delimiter="\t"))
 
     total = 0
     processed = 0
-    with open(tsv, encoding="utf-8", newline="") as fh:
-        for row in csv.DictReader(fh, delimiter="\t"):
-            if cfg.limit is not None and processed >= cfg.limit:
-                break
-            clip = clips / row.get("path", "")
-            sentence = (row.get("sentence") or "").strip()
-            if not sentence or not clip.exists():
-                continue
-            if writer.has_source(f"cv_{clip.stem}"):
-                continue
-            processed += 1
-            try:
-                samples, sr = load_audio(clip)
-                timed = [LyricLine(0.0, len(samples) / sr, sentence)]
-                total += process_song(
-                    writer,
-                    samples,
-                    sr,
-                    lang=lang,
-                    source_id=f"cv_{clip.stem}",
-                    cfg=cfg,
-                    timed_lines=timed,
-                    is_mix=False,  # read speech — never separate
-                    nan_mapping=nan_mapping,
-                )
-            except Exception as exc:
-                logger.error("common_voice %s failed: %s", clip.name, exc)
+    for row in rows:
+        if cfg.limit is not None and processed >= cfg.limit:
+            break
+        clip = clips / row.get("path", "")
+        sentence = (row.get("sentence") or "").strip()
+        if not sentence or not clip.exists():
+            continue
+        if writer.has_source(f"cv_{clip.stem}"):
+            continue
+        processed += 1
+        try:
+            samples, sr = load_audio(clip)
+            timed = [LyricLine(0.0, len(samples) / sr, sentence)]
+            total += process_song(
+                writer,
+                samples,
+                sr,
+                lang=lang,
+                source_id=f"cv_{clip.stem}",
+                cfg=cfg,
+                timed_lines=timed,
+                is_mix=False,  # read speech — never separate
+                nan_mapping=nan_mapping,
+            )
+        except Exception as exc:
+            logger.error("common_voice %s failed: %s", clip.name, exc)
     return total
 
 

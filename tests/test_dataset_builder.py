@@ -60,6 +60,21 @@ def test_normalize_nan_applies_mapping_longest_first():
     assert normalize_text("我未记你", "nan", nan_mapping=mapping) == "我袂記你"
 
 
+def test_normalize_nan_strips_tailo_reading_annotations():
+    # Common Voice nan-tw style: Han text with a full-width Tai-lo reading.
+    assert normalize_text("蘋果派(phōng-kó-phài)真好食", "nan") == "蘋果派真好食"
+    assert normalize_text("大武(Tāi-bú)", "nan") == "大武"
+    # Pure Tai-lo sentences keep their content untouched.
+    assert normalize_text("Thinn-tíng ê gue̍h-niû", "nan") == "Thinn-tíng ê gue̍h-niû"
+
+
+def test_decode_text_big5_fallback():
+    from breeze_elf.dataset_builder import _decode_text
+
+    assert _decode_text("歌詞".encode("cp950")) == "歌詞"
+    assert _decode_text("歌詞".encode()) == "歌詞"
+
+
 def test_section_tag_lines():
     assert is_section_tag_line("[Verse 1]")
     assert is_section_tag_line("【副歌】")
