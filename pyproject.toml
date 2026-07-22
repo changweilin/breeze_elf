@@ -41,6 +41,17 @@ translate = [
 diarize = [
     "onnxruntime>=1.17.0",
 ]
+# Offline lyric-dataset builder (build_lyric_dataset.py). Needs the `enhance`
+# stack too (Demucs vocal separation + torchaudio MMS forced alignment) — torch
+# must stay the manually-installed CUDA wheel, so install these with
+# `uv pip install ...`, NOT `uv sync --extra dataset`.
+dataset = [
+    "soundfile>=0.12.1",
+    "yt-dlp>=2024.10.0",
+    "datasets>=3.0.0",
+    "uroman>=1.3.0",
+    "imageio-ffmpeg>=0.5.0",
+]
 
 [project.scripts]
 breeze-elf = "breeze_elf.main:run"
