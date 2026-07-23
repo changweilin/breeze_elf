@@ -1,3 +1,4 @@
+import tempfile
 import unittest
 from dataclasses import replace
 
@@ -12,11 +13,25 @@ from breeze_elf.config import get_settings
 
 class ASRModelRegistryTests(unittest.TestCase):
     def setUp(self):
-        self.settings = get_settings()
+        # Point the A/B nan preset at a path that does not exist so the base preset
+        # list is deterministic regardless of what CT2 dirs happen to be on disk.
+        self.settings = replace(
+            get_settings(), asr_breeze_nan_model="models/__no_such_nan_ct2__"
+        )
 
     def test_builtin_presets_present_and_ordered(self):
         ids = [opt.id for opt in builtin_asr_models(self.settings)]
         self.assertEqual(ids, ["breeze", "medium", "large-v3"])
+
+    def test_breeze_nan_preset_surfaced_only_when_dir_exists(self):
+        with tempfile.TemporaryDirectory() as d:
+            settings = replace(self.settings, asr_breeze_nan_model=d)
+            opts = builtin_asr_models(settings)
+            ids = [o.id for o in opts]
+            self.assertEqual(ids, ["breeze", "breeze-nan", "medium", "large-v3"])
+            nan = next(o for o in opts if o.id == "breeze-nan")
+            self.assertEqual(nan.model, d)
+            self.assertEqual(nan.kind, "breeze")
 
     def test_breeze_resolves_to_configured_local_dir(self):
         settings = replace(self.settings, asr_breeze_model="models/custom-breeze-ct2")

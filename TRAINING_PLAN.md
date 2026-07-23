@@ -86,12 +86,15 @@
 
 ## 進度追蹤
 
-- [ ] P0 依賴安裝
-- [ ] P0 manifests
-- [ ] P0 zero-shot 基線(Breeze nan / Breeze MIR-1K / whisper-medium Jamendo)
-- [ ] P1 Breeze 聯合 LoRA 訓練
-- [ ] P1 zh-TW 防遺忘驗證
-- [ ] P2 whisper-medium en LoRA
-- [ ] P3 test 評分對照
-- [ ] P3 CT2 轉換
-- [ ] P3 app A/B 接入
+- [x] P0 依賴安裝 — `tokenizers` 釘 0.22.2;訓練/評估用 `.venv/Scripts/python.exe` 直呼(**勿** `uv run`,會 sync 回 0.23.1 炸 transformers)。
+- [x] P0 manifests — `tools/make_manifests.py` → `dataset/manifests/{train,dev,test}.jsonl`(train 17697 / dev 6121 / test 6594;nan 防洩漏丟 1042)。
+- [x] P0 zero-shot 基線 — `tools/eval_asr.py`,報告在 `dataset/eval_reports/`:
+  - **Breeze nan CER = 1.0963**(n=6430;台語幾乎全錯)→ 驗收線 ≤0.767。
+  - **Breeze MIR-1K CER = 0.0646**(n=65;已很好,混訓勿退步)→ 驗收線 ≤0.0549。
+  - **whisper-medium Jamendo WER = 0.788**(n=99)→ 驗收線 ≤0.670。
+- [x] P1 Breeze 聯合 LoRA 訓練 — `tools/train_lora.py`(8-bit 底+LoRA r16 q/v+grad-ckpt+adamw_bnb_8bit,batch4×ga8 eff32、2 epoch、lr1e-4/warmup500、nan+MIR 10:1、MIR 伴奏摻回+pitch/tempo+SpecAugment)。9.6h,eval_loss 0.942→0.843,adapter `models/lora/breeze-nan/adapter_best`。
+- [x] P1 zh-TW 防遺忘驗證 — 用 MIR-1K zh-TW 當保留集:CER 0.0646→**0.0620**(微升,無退步)→ 無明顯遺忘,聯合 adapter 不需拆。
+- [x] P2 whisper-medium en LoRA — `train_lora.py --model_id openai/whisper-medium --language english --sources jamendo`(batch8×ga2、6 epoch、early-stop 取 epoch3)。dev eval_loss 1.60→0.724,但 **test WER 0.788→0.798(持平/略退,未達 −15%)**:16 首訓練歌過擬、無法泛化到 held-out 歌 —— 符合計畫「46 分鐘是 B 線天花板、結果不佳是資料問題」的預期。**不部署**(不優於 app 既有 whisper-medium);adapter 與 `whisper_lora.json` 留檔,未註冊 preset。第二輪需更多英文歌唱資料。
+- [x] P3 test 評分對照 — `tools/eval_asr.py`,`dataset/eval_reports/breeze_lora.json`:**nan CER 1.0963→0.6614(相對降 39.7% ✓≥30%)**;MIR-1K 0.0646→0.0620(降 4.0%,未達 15% 但因基線已 6.5% 近天花板且無退步)。
+- [x] P3 CT2 轉換 — `tools/merge_and_convert.py` → `models/breeze-asr-25-nan-ct2`(float16,faster-whisper 實測可載)。
+- [x] P3 app A/B 接入 — `config.py asr_breeze_nan_model`(env `BREEZE_ASR_BREEZE_NAN_MODEL`)+ `asr_models.py` dir-gated preset「Breeze ASR 台語強化」;預設仍原 breeze,新模型 opt-in;`tests/test_asr_models.py` 已更新(12/12 過)。**未覆蓋原 `models/breeze-asr-25-ct2`**。

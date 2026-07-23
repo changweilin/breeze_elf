@@ -8,6 +8,7 @@ separate source of truth to drift out of sync.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 from .config import Settings
@@ -28,11 +29,20 @@ def builtin_asr_models(settings: Settings) -> list[ASRModelOption]:
     """The curated switchable presets, in display order. Breeze is a local CT2
     directory (offline-first); the Whisper sizes are fetched/cached by
     faster-whisper on first use."""
-    return [
+    options = [
         ASRModelOption("breeze", "Breeze ASR", settings.asr_breeze_model, "breeze"),
+    ]
+    # A/B: the LoRA-adapted nan/台語 + 歌唱 variant, only when its CT2 dir is present —
+    # a preset pointing at a missing dir silently falls back to a HF fetch (see memory
+    # asr-model-switcher), so gate it on disk.
+    nan_model = settings.asr_breeze_nan_model
+    if nan_model and os.path.isdir(nan_model):
+        options.append(ASRModelOption("breeze-nan", "Breeze ASR 台語強化", nan_model, "breeze"))
+    options += [
         ASRModelOption("medium", "Whisper medium", "medium", "whisper"),
         ASRModelOption("large-v3", "Whisper large-v3", "large-v3", "whisper"),
     ]
+    return options
 
 
 def list_asr_models(settings: Settings, active_model: str) -> list[ASRModelOption]:
