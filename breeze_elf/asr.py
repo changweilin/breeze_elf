@@ -434,12 +434,15 @@ def _build_prompt(
     return " ".join(parts) if parts else None
 
 
-def resolve_breeze_model_dir(settings: Settings) -> Path:
-    """Absolute path to the local Breeze CTranslate2 directory (offline-first).
+def resolve_breeze_model_dir(settings: Settings, model: str | None = None) -> Path:
+    """Absolute path to a local Breeze CTranslate2 directory (offline-first).
 
     faster-whisper can only load a size string, a HF id, or a *local* CT2 dir, so the
-    ``breeze`` preset is a directory on disk — resolved here CWD-independently."""
-    path = Path(settings.asr_breeze_model).expanduser()
+    ``breeze`` presets are directories on disk — resolved here CWD-independently.
+    ``model`` selects which preset (default: the stock ``breeze`` dir); the LoRA
+    variant passes its own path so an A/B switch doesn't silently reload the stock
+    model under the fine-tuned label."""
+    path = Path(model or settings.asr_breeze_model).expanduser()
     if not path.is_absolute():
         path = ROOT_DIR / path
     return path

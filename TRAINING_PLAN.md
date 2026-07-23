@@ -98,3 +98,4 @@
 - [x] P3 test 評分對照 — `tools/eval_asr.py`,`dataset/eval_reports/breeze_lora.json`:**nan CER 1.0963→0.6614(相對降 39.7% ✓≥30%)**;MIR-1K 0.0646→0.0620(降 4.0%,未達 15% 但因基線已 6.5% 近天花板且無退步)。
 - [x] P3 CT2 轉換 — `tools/merge_and_convert.py` → `models/breeze-asr-25-nan-ct2`(float16,faster-whisper 實測可載)。
 - [x] P3 app A/B 接入 — `config.py asr_breeze_nan_model`(env `BREEZE_ASR_BREEZE_NAN_MODEL`)+ `asr_models.py` dir-gated preset「Breeze ASR 台語強化」;預設仍原 breeze,新模型 opt-in;`tests/test_asr_models.py` 已更新(12/12 過)。**未覆蓋原 `models/breeze-asr-25-ct2`**。
+- [x] P3 熱切換修正與實機 A/B(2026-07-23)— `_run_asr_switch` 原本對所有 breeze-kind preset 都解析 `settings.asr_breeze_model`,切到 `breeze-nan` 會**載入原版模型卻標示 nan 路徑**(假 A/B)。`resolve_breeze_model_dir(settings, model)` 加路徑參數、switch 傳 `option.model`;回歸測試 `test_switch_to_lora_preset_loads_its_own_dir`。實機同音檔對照(CV nan test):原版「外地之前要說事情做什麼」vs LoRA「話底真情愛講代誌做啥」(ref「月底進前愛共代誌做煞」)。前端動態渲染 preset,手機端不需改版;但**手機連的 server process 需重啟**才生效。

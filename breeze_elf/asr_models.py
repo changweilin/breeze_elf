@@ -12,6 +12,7 @@ import os
 from dataclasses import dataclass
 
 from .config import Settings
+from .model_registry import load_registry, registry_path, resolve_path
 
 
 @dataclass(frozen=True)
@@ -45,11 +46,35 @@ def builtin_asr_models(settings: Settings) -> list[ASRModelOption]:
     return options
 
 
+def deployed_asr_models(settings: Settings) -> list[ASRModelOption]:
+    """Presets registered by ``tools/deploy_model.py`` (models/presets.json).
+
+    Local ``breeze`` dirs are gated on existence for the same reason as the builtin
+    A/B preset: faster-whisper turns a missing dir into a HuggingFace fetch. Read
+    per call so a deploy appears in the switcher without restarting the server."""
+    options: list[ASRModelOption] = []
+    for entry in load_registry(registry_path(settings)):
+        if entry.kind == "breeze" and not resolve_path(entry.model).is_dir():
+            continue
+        options.append(ASRModelOption(entry.id, entry.label, entry.model, entry.kind))
+    return options
+
+
 def list_asr_models(settings: Settings, active_model: str) -> list[ASRModelOption]:
-    """Builtin presets plus, when the running model matches none of them, a
-    trailing ``current`` entry so the UI always shows what is actually loaded
-    (e.g. a ``BREEZE_ASR_MODEL=small`` override)."""
+    """Builtin presets, then deployed ones, plus — when the running model matches
+    none of them — a trailing ``current`` entry so the UI always shows what is
+    actually loaded (e.g. a ``BREEZE_ASR_MODEL=small`` override)."""
     options = builtin_asr_models(settings)
+    known_ids = {opt.id for opt in options}
+    known_models = {opt.model for opt in options}
+    for opt in deployed_asr_models(settings):
+        # A deployed entry never shadows a builtin: same id or same dir → skip, so a
+        # stale registry row can't hide (or rename) the stock model.
+        if opt.id in known_ids or opt.model in known_models:
+            continue
+        known_ids.add(opt.id)
+        known_models.add(opt.model)
+        options.append(opt)
     active = (active_model or "").strip()
     if active and not any(opt.model == active for opt in options):
         options.append(ASRModelOption("current", f"目前:{active}", active, "custom"))

@@ -949,6 +949,36 @@ class ASRModelSwitchEndpointTests(unittest.IsolatedAsyncioTestCase):
             main.asr_switch_state.status = "idle"
             main.asr_switch_state.error = None
 
+    async def test_switch_to_lora_preset_loads_its_own_dir(self):
+        # A/B regression: the LoRA preset must load ITS dir. Resolving the stock
+        # ``asr_breeze_model`` for every breeze-kind preset would load the stock model
+        # under the fine-tuned label — a comparison that silently compares nothing.
+        original_engine = main.asr_engine
+        original_queue = getattr(main.app.state, "asr_queue", None)
+        main.app.state.asr_queue = _FakeSwitchQueue()
+        try:
+            with tempfile.TemporaryDirectory() as nan_dir:
+                fake_settings = replace(main.settings, asr_breeze_nan_model=nan_dir)
+                with (
+                    patch.object(main, "settings", fake_settings),
+                    patch.object(main, "FasterWhisperASR", _FakeSwitchEngine),
+                    patch.object(main, "ASRQueue", _FakeSwitchQueue),
+                    patch.object(main, "_active_stream_count", 0),
+                ):
+                    await main.switch_asr_model(main.ASRModelSwitchRequest(id="breeze-nan"))
+                    await main.app.state.asr_switch_task
+
+                self.assertEqual(main.asr_switch_state.snapshot()["status"], "ready")
+                self.assertEqual(main.asr_engine.model_name, nan_dir)
+                self.assertEqual(main.asr_engine._load_ref, str(Path(nan_dir)))
+        finally:
+            main.asr_engine = original_engine
+            main.app.state.asr = original_engine
+            if original_queue is not None:
+                main.app.state.asr_queue = original_queue
+            main.asr_switch_state.status = "idle"
+            main.asr_switch_state.error = None
+
     async def test_switch_to_breeze_missing_dir_reports_clear_error(self):
         # Offline-first: a missing local CT2 dir must fail with an actionable message
         # (and never fall through to a HuggingFace lookup).

@@ -299,6 +299,31 @@ def check_models(settings: Settings) -> list[Check]:
                 )
             )
 
+    # Deployed presets (tools/deploy_model.py). A registered model whose dir vanished
+    # is silently hidden from the switcher — surface it here instead.
+    from .model_registry import load_registry, registry_path, resolve_path, verify_ct2_dir
+
+    presets_file = registry_path(settings)
+    for entry in load_registry(presets_file):
+        name = f"model: deployed {entry.id}"
+        if entry.kind != "breeze":
+            checks.append(Check(name, OK, f"{entry.label} -> {entry.model}"))
+            continue
+        model_dir = resolve_path(entry.model)
+        missing = verify_ct2_dir(model_dir)
+        if not missing:
+            checks.append(Check(name, OK, f"{entry.label} -> {model_dir}"))
+        else:
+            checks.append(
+                Check(
+                    name,
+                    WARN,
+                    f"{model_dir} missing {', '.join(missing)} (hidden from the switcher)",
+                    f"Re-run tools/deploy_model.py for this id, or remove it: "
+                    f"deploy_model.py --remove {entry.id}",
+                )
+            )
+
     if settings.voice_provider == "openvoice":
         converter = _resolve(settings.voice_checkpoints_dir) / "converter" / "checkpoint.pth"
         if converter.is_file():

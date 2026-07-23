@@ -90,15 +90,44 @@ output is the meaningful result.
 ### Switching the ASR model
 
 The 模型與演算法 dialog (tap the backend line in the footer) has a model switcher at the
-top. It hot-swaps the running engine between **Breeze ASR** (`breeze`), **Whisper medium**,
+top. It hot-swaps the running engine between **Breeze ASR** (`breeze`), **Breeze ASR 台語強化**
+(`breeze-nan`, shown only when its dir exists), **Whisper medium**,
 and **Whisper large-v3** without restarting the server — the new model loads in the
 background (a progress bar tracks it) and the old one is released once the swap completes.
 Switching is blocked while a recording is streaming, and the currently loaded model is
 always shown as the active option. The Whisper sizes are downloaded/cached by
 faster-whisper on first use; `breeze` is a local CTranslate2 directory (see
 `BREEZE_ASR_BREEZE_MODEL`) and reports a clear error if the directory is missing rather
-than reaching out to Hugging Face. Endpoints: `GET /api/asr/models`, `POST /api/asr/model`,
+than reaching out to Hugging Face. `breeze-nan` is the LoRA post-trained 台語/歌唱 variant
+(`BREEZE_ASR_BREEZE_NAN_MODEL`, see `TRAINING_PLAN.md`) offered side by side with the stock
+Breeze for A/B comparison — same audio, tap between the two, compare the transcripts.
+Endpoints: `GET /api/asr/models`, `POST /api/asr/model`,
 `GET /api/asr/model/status`.
+
+### Deploying a post-trained model
+
+`tools/deploy_model.py` is the pipeline from a trained LoRA adapter to a preset the phone
+can tap — merge + CT2 convert → verify the files → load it and transcribe a sample →
+register → switch a running server to it and confirm what actually loaded. Nothing is
+registered before it loads, so a broken conversion fails at deploy time instead of on the
+phone. Run it with the venv python directly (**not** `uv run`, which re-syncs and breaks the
+training stack's pinned `tokenizers`):
+
+```bash
+.venv/Scripts/python.exe tools/deploy_model.py --id nan-v2 --label "Breeze 台語強化 v2" --adapter models/lora/nan-v2/adapter_best --sample dataset/chunks/some_clip.wav --server http://127.0.0.1:8788
+```
+
+Pass `--ct2-dir` instead of `--adapter` to register a model that is already converted (no
+torch needed). Other flags: `--list`, `--remove <id>`, `--kind whisper` (a Whisper size / HF
+id rather than a local dir), `--note` (provenance kept in the registry), `--skip-smoke`,
+`--keep-active` (leave the server on the new model instead of restoring the previous one).
+
+Deployed models live in `models/presets.json` (`BREEZE_ASR_PRESETS_FILE`), which the server
+reads **on every request** — a deploy shows up in 模型與演算法 without restarting anything;
+reopen the dialog on the phone. Entries are dir-gated like the builtin presets (a model whose
+dir disappeared is hidden from the switcher and reported by `breeze-elf doctor`), a malformed
+registry degrades to "no extra presets" rather than breaking the switcher, and an entry can
+never shadow a builtin id or dir. Re-deploying the same `--id` replaces it in place.
 
 For long recordings, set `BREEZE_ASR_FILE_BATCH_SIZE` (e.g. `16`) to transcribe the whole
 file in one batched `BatchedInferencePipeline` pass (3–4× faster) via
@@ -279,6 +308,8 @@ Environment variables:
 | `BREEZE_F0_CLEAN` | `true` | 基頻分析 post-processing. **(1) Octave/harmonic snap:** a bin mis-tracked a whole octave (or ×3/×4) off — the wrong-octave "stable" plateau that shows up as 劇烈變化 between two consistent notes — is folded back onto its local pitch; only integer harmonic ratios are tried within a tight tolerance, so a real fourth/fifth/sixth leap is never moved. **(2) Unstable-run fill:** a 音高劇烈變化 run that spikes past the flanking notes (up-then-down / down-then-up 反方向) or zig-zags widely is **filled from the surrounding 平穩音高** — interpolated between both neighbouring notes, held from the one adjacent note, or (only when silence sits on both sides) cleared — while a one-way 滑音 and vibrato are kept. **(3) Attack/release fill:** each note is grown into its 頭尾 — the quiet onset/tail the pitch detector drops — by holding the edge pitch through adjacent bins whose intensity stays above a noise-relative gate (bounded, so a breath/hiss at the room floor is never picked up). `0` keeps the raw per-bin f0 track. |
 | `BREEZE_ASR_MODEL` | `breeze` | Recognition model loaded at startup. `breeze` is a preset that loads the local Breeze CT2 dir (`BREEZE_ASR_BREEZE_MODEL`), falling back to Whisper `medium` if that dir is absent; any other value (a Whisper size, HF id, or CT2 path) is passed straight to faster-whisper. Also switchable at runtime from 模型與演算法 (see below). |
 | `BREEZE_ASR_BREEZE_MODEL` | `models/breeze-asr-25-ct2` | Local **CTranslate2** directory the `breeze` preset in the model switcher resolves to. Offline-first — faster-whisper only loads a CT2 model, so this is a converted Breeze ASR dir on disk, not a HF id. A relative path is resolved against the project root. |
+| `BREEZE_ASR_PRESETS_FILE` | `models/presets.json` | JSON registry of models deployed by `tools/deploy_model.py`, appended to the builtin switcher presets and re-read on every request (deploy → visible, no restart). Machine-local state: it lives under the git-ignored `models/`. |
+| `BREEZE_ASR_BREEZE_NAN_MODEL` | `models/breeze-asr-25-nan-ct2` | Local CT2 directory of the LoRA post-trained 台語/歌唱 Breeze variant. Appears in the model switcher as `Breeze ASR 台語強化` **only when the directory exists** (a preset pointing at a missing dir would silently fall through to a Hugging Face fetch). Never overwrites the stock `breeze` dir — both stay switchable for A/B. |
 | `BREEZE_ASR_DEVICE` | `auto` | `auto`, `cuda`, or `cpu`. |
 | `BREEZE_ASR_COMPUTE_TYPE` | `int8` | Compute type for custom ASR device values. |
 | `BREEZE_ASR_CONCURRENCY` | `1` | Maximum concurrent ASR transcriptions. |

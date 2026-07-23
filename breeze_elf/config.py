@@ -100,6 +100,10 @@ class Settings:
     # LoRA post-trained variant (nan/台語 + zh-TW 歌唱域適應) offered as an A/B preset
     # in the model switcher — surfaced only when its CT2 dir exists (see asr_models).
     asr_breeze_nan_model: str = "models/breeze-asr-25-nan-ct2"
+    # JSON registry of models deployed by tools/deploy_model.py, appended to the
+    # switcher's builtin presets. Read per request, so a deploy shows up without a
+    # restart; lives under models/ (git-ignored) because it is machine-local state.
+    asr_presets_file: str = "models/presets.json"
     asr_load_on_startup: bool = True
     asr_concurrency: int = 1
     asr_no_speech_prob_threshold: float = 0.6
@@ -225,6 +229,7 @@ def get_settings() -> Settings:
         asr_breeze_nan_model=os.getenv(
             "BREEZE_ASR_BREEZE_NAN_MODEL", "models/breeze-asr-25-nan-ct2"
         ),
+        asr_presets_file=os.getenv("BREEZE_ASR_PRESETS_FILE", "models/presets.json"),
         asr_load_on_startup=_bool_env("BREEZE_ASR_LOAD_ON_STARTUP", True),
         asr_concurrency=max(1, _int_env("BREEZE_ASR_CONCURRENCY", 1)),
         asr_no_speech_prob_threshold=_float_env("BREEZE_ASR_NO_SPEECH_PROB_THRESHOLD", 0.6),
