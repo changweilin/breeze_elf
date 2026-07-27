@@ -1057,10 +1057,10 @@
       }
 
       /* Items inside the flex-column scroll lists must NOT shrink: a .search-result
-         is a <button>, and the global button{min-height} gives it an explicit floor,
-         so flex-shrink:1 would compress each row to ~46px and its taller content would
-         spill out over the neighbouring rows(即先前的「混疊在一起」). Pin them to
-         content height and let the list scroll instead. */
+         wraps a button (.search-result-open) whose global button{min-height} gives the
+         row an explicit floor, so flex-shrink:1 would compress each row to ~46px and its
+         taller content would spill out over the neighbouring rows(即先前的「混疊在一起」).
+         Pin them to content height and let the list scroll instead. */
       .pick-list > *,
       .gloss-list > *,
       .search-results > * {
@@ -1131,11 +1131,26 @@
 
       .search-result {
         display: flex;
+        align-items: stretch;
+        gap: 6px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+      }
+
+      .search-result:hover,
+      .search-result:focus-within {
+        border-color: var(--accent, var(--ink));
+        background: rgba(122, 232, 160, 0.1);
+      }
+
+      .search-result-open {
+        flex: 1 1 auto;
+        min-width: 0; /* let the snippet measure/clip inside the flex row */
+        display: flex;
         flex-direction: column;
         gap: 3px;
         padding: 10px 12px;
-        border: 1px solid var(--line);
-        border-radius: 8px;
+        border: 0;
         background: transparent;
         color: var(--ink);
         text-align: left;
@@ -1143,10 +1158,23 @@
         cursor: pointer;
       }
 
-      .search-result:hover,
-      .search-result:focus-visible {
+      .search-result-summary {
+        flex: none;
+        align-self: center;
+        margin-right: 8px;
+        padding: 6px 10px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: transparent;
+        color: var(--ink);
+        font: inherit;
+        font-size: 0.8rem;
+        cursor: pointer;
+      }
+
+      .search-result-summary:hover,
+      .search-result-summary:focus-visible {
         border-color: var(--accent, var(--ink));
-        background: rgba(122, 232, 160, 0.1);
       }
 
       .search-result-title {
@@ -3058,7 +3086,7 @@
       </form>
     </dialog>
 
-    <script src="./app.js?v=44" type="module"></script>
+    <script src="./app.js?v=45" type="module"></script>
     <script src="./voice.js?v=29" type="module"></script>
   </body>
 </html>

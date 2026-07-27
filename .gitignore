@@ -21,3 +21,5 @@ models/
 voice_outputs/
 # build_lyric_dataset.py output (audio chunks + metadata.csv + cached downloads).
 dataset/
+# Transient AI-tool working marker.
+.ai_working

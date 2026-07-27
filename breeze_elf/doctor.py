@@ -380,17 +380,26 @@ def _use_color() -> bool:
     return sys.stdout.isatty() and os.getenv("NO_COLOR") is None
 
 
+def _ascii(text: str) -> str:
+    """Coerce to pure ASCII so untrusted, data-derived strings (a deployed preset's
+    CJK label/note, a non-ASCII model path) can't raise UnicodeEncodeError on the
+    legacy-codepage console this tool exists to diagnose. Lossless backslash escapes
+    rather than silently dropping characters."""
+    return text.encode("ascii", "backslashreplace").decode("ascii")
+
+
 def _format_line(check: Check, color: bool) -> str:
     tag = f"[{check.status}]"
     if color:
         tag = f"{_ANSI.get(check.status, '')}{tag}{_RESET}"
     # ASCII-only scaffolding: doctor runs in exactly the legacy-codepage consoles
-    # where a decorative em-dash would raise UnicodeEncodeError.
-    line = f"  {tag:<7} {check.name}"
+    # where a decorative em-dash would raise UnicodeEncodeError. check.detail/action
+    # can carry data-derived text (e.g. a preset's CJK label) so coerce every field.
+    line = f"  {tag:<7} {_ascii(check.name)}"
     if check.detail:
-        line += f" - {check.detail}"
+        line += f" - {_ascii(check.detail)}"
     if check.action:
-        line += f"\n           -> {check.action}"
+        line += f"\n           -> {_ascii(check.action)}"
     return line
 
 
