@@ -193,6 +193,13 @@ Breeze for A/B comparison — same audio, tap between the two, compare the trans
 Endpoints: `GET /api/asr/models`, `POST /api/asr/model`,
 `GET /api/asr/model/status`.
 
+> **Appearing vs restart:** *switching* between listed presets is always live. Whether a
+> preset *appears* depends on how it is enabled — models registered via
+> `tools/deploy_model.py` (`models/presets.json`) show up on the next request with no
+> restart, but the `BREEZE_ASR_*` env-var presets like `breeze-nan` are read at process
+> start, so enabling one requires (re)starting the server. Prefer the `deploy_model.py`
+> path for anything you want to toggle on a running phone.
+
 ### Deploying a post-trained model
 
 `tools/deploy_model.py` is the pipeline from a trained LoRA adapter to a preset the phone
@@ -308,6 +315,34 @@ Enable with `BREEZE_DIARIZE=on`. **Privacy:** embeddings are computed from the *
 utterance audio (not the denoised ASR audio), are never stored, and the clusterer resets
 every connection — there is no cross-session voiceprint linkage. `GET /health` reports
 `diarizeEnabled` / `diarizeAvailable`.
+
+## 跨稿搜尋 (Cross-Transcript Search)
+
+Search across every transcript saved via [Remote Transcript Saving](#remote-transcript-saving)
+from one box. It is backed by **SQLite FTS5 trigram** — no extra dependency, and it
+degrades to disabled if the runtime SQLite lacks FTS5/trigram. Traditional and Simplified
+Chinese are folded into one column, so 台語 matches 台语 and vice-versa.
+
+Enabled by default (`BREEZE_SEARCH_ENABLED=true`). Endpoints, all reading the local index
+only: `GET /api/transcripts/search?q=…` (full-text hits), `GET /api/transcripts` (recent
+list), `GET /api/transcripts/{id}` (one transcript). Result count is capped by
+`BREEZE_SEARCH_MAX_RESULTS` (default `50`). `GET /health` reports `searchEnabled`.
+
+## 會議摘要 (Meeting Summary)
+
+Summarise the current transcript into a few bullet points via `POST /api/summary`, from the
+摘要 dialog on the transcribe page. Two providers, **no cloud path** — the transcript never
+leaves the machine:
+
+- `extractive` (default) — pure stdlib sentence scoring, zero model / VRAM / network.
+- `ollama` — a **local** Ollama daemon for abstractive quality; install
+  [ollama](https://ollama.com), `ollama pull qwen3:4b-instruct`, set
+  `BREEZE_SUMMARY_PROVIDER=ollama`. It degrades back to `extractive` on any failure, and the
+  endpoint (`BREEZE_SUMMARY_OLLAMA_URL`) is kept loopback to preserve the on-device
+  guarantee.
+
+`BREEZE_SUMMARY_MAX_SENTENCES` (default `5`) sets the point count; `GET /health` reports
+`summaryProvider`.
 
 ## 變聲工作室 (Voice Studio)
 
