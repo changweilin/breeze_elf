@@ -914,11 +914,18 @@ async def _run_asr_switch(option) -> None:
             # (CWD-independent) and fail with a clear message instead of letting
             # faster-whisper fall through to a confusing HuggingFace 404 — and an
             # unwanted network call — when the directory is absent.
-            breeze_dir = resolve_breeze_model_dir(settings)
+            # ``option.model`` — not the stock breeze setting — so the LoRA A/B preset
+            # loads its own dir instead of silently reloading the stock model.
+            breeze_dir = resolve_breeze_model_dir(settings, option.model)
             if not breeze_dir.exists():
+                env_hint = (
+                    "BREEZE_ASR_BREEZE_NAN_MODEL"
+                    if option.id == "breeze-nan"
+                    else "BREEZE_ASR_BREEZE_MODEL"
+                )
                 raise RuntimeError(
                     f"找不到 Breeze 模型目錄:{breeze_dir}(請放入 CTranslate2 模型,"
-                    "或用 BREEZE_ASR_BREEZE_MODEL 指定路徑)"
+                    f"或用 {env_hint} 指定路徑)"
                 )
             load_ref = str(breeze_dir)
         asr_switch_state.report(0.1, "建立引擎")
