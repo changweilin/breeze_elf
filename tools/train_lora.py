@@ -42,12 +42,26 @@ SR = 16000
 
 
 # ----------------------------- data ---------------------------------------
-def read_manifest(split: str) -> list[dict]:
+def read_manifest(name: str) -> list[dict]:
+    path = MANIFESTS / (name if name.endswith(".jsonl") else f"{name}.jsonl")
     rows = []
-    with open(MANIFESTS / f"{split}.jsonl", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             rows.append(json.loads(line))
     return rows
+
+
+PACK_GAP_S = 0.3  # must match tools/pack_manifest.py --gap
+
+
+def speed_perturb(audio: np.ndarray, factor: float) -> np.ndarray:
+    """Resample by `factor` (linear interp). Unlike a phase vocoder this moves
+    pitch and tempo together, which is what simulates a different speaker."""
+    n = int(round(len(audio) / factor))
+    if n < 2 or len(audio) < 2:
+        return audio
+    idx = np.linspace(0, len(audio) - 1, n, dtype=np.float32)
+    return np.interp(idx, np.arange(len(audio), dtype=np.float32), audio).astype(np.float32)
 
 
 def mir_accompaniment_path(chunk_id: str) -> Path:
@@ -70,12 +84,37 @@ class ASRDataset(Dataset):
     def __len__(self):
         return len(self.rows)
 
+    def _read(self, rel: str) -> np.ndarray:
+        audio, _ = sf.read(str(ROOT / rel), dtype="float32")
+        return audio.mean(axis=1) if audio.ndim > 1 else audio
+
     def _load(self, rec) -> np.ndarray:
-        audio, _ = sf.read(str(ROOT / rec["audio"]), dtype="float32")
-        if audio.ndim > 1:
-            audio = audio.mean(axis=1)
-        if self.augment and rec["id"].startswith(("mir1k_", "jamendo_")):
-            audio = self._augment_singing(audio, rec["id"])
+        if "audios" in rec:  # packed window: concatenate with a short silence gap
+            gap = np.zeros(int(PACK_GAP_S * SR), dtype=np.float32)
+            parts = []
+            for i, rel in enumerate(rec["audios"]):
+                if i:
+                    parts.append(gap)
+                parts.append(self._read(rel))
+            audio = np.concatenate(parts)
+        else:
+            audio = self._read(rec["audio"])
+
+        if not self.augment:
+            return audio
+        if rec["id"].startswith(("mir1k_", "jamendo_")):
+            return self._augment_singing(audio, rec["id"])
+        # nan: only 15 training speakers vs 255 unseen test speakers, so the
+        # generalisation gap is speaker-driven. Resampling-based speed perturbation
+        # shifts pitch AND rate together (cheap VTLP-like speaker simulation) —
+        # far more useful here than pitch-preserving stretch.
+        if self._rng.random() < 0.5:
+            cand = speed_perturb(audio, self._rng.choice((0.9, 1.1)))
+            # Never let slowing push a packed window past Whisper's 30s window:
+            # the encoder would truncate the audio while the label keeps the tail,
+            # which trains the model to hallucinate the missing words.
+            if len(cand) <= int(29.0 * SR):
+                audio = cand
         return audio
 
     def _augment_singing(self, vocal: np.ndarray, chunk_id: str) -> np.ndarray:
@@ -148,17 +187,17 @@ class Collator:
         return batch
 
 
-_PREFIX = {"nan": "cv_", "mir1k": "mir1k_", "jamendo": "jamendo_"}
+_PREFIX = {"nan": ("cv_", "nanpack_"), "mir1k": ("mir1k_",), "jamendo": ("jamendo_",)}
 
 
 def _pick(rows, source):
     return [r for r in rows if r["id"].startswith(_PREFIX[source])]
 
 
-def build_train_rows(sources, ratio, nan_cap, mir_cap, jam_cap, seed) -> list[dict]:
+def build_train_rows(sources, ratio, nan_cap, mir_cap, jam_cap, seed, manifest="train") -> list[dict]:
     """P1: sources=[nan,mir1k] → all nan + MIR oversampled to nan:mir==ratio:1.
     P2: sources=[jamendo] → all jamendo, no oversampling."""
-    rows = read_manifest("train")
+    rows = read_manifest(manifest)
     rng = random.Random(seed)
     nan = _pick(rows, "nan") if "nan" in sources else []
     mir = _pick(rows, "mir1k") if "mir1k" in sources else []
@@ -218,6 +257,10 @@ def main() -> int:
     ap.add_argument("--nan_cap", type=int, default=0, help="smoke: cap nan train")
     ap.add_argument("--mir_cap", type=int, default=0, help="smoke: cap mir train")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--manifest", default="train", help="train manifest stem (e.g. train_packed)")
+    ap.add_argument("--logging_steps", type=int, default=25)
+    ap.add_argument("--lora_targets", default="q_proj,v_proj",
+                    help="v2 uses q_proj,k_proj,v_proj,out_proj")
     args = ap.parse_args()
 
     from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
@@ -230,6 +273,8 @@ def main() -> int:
         WhisperProcessor,
     )
 
+    _bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    print(f"[precision] {'bf16' if _bf16 else 'fp16'}", flush=True)
     torch.manual_seed(args.seed)
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -259,7 +304,7 @@ def main() -> int:
     lora = LoraConfig(
         r=args.r,
         lora_alpha=2 * args.r,
-        target_modules=["q_proj", "v_proj"],
+        target_modules=[m.strip() for m in args.lora_targets.split(",") if m.strip()],
         lora_dropout=0.05,
         bias="none",
     )
@@ -276,7 +321,7 @@ def main() -> int:
     model.config.use_cache = False
 
     train_rows = build_train_rows(
-        sources, args.ratio, args.nan_cap, args.mir_cap, args.jam_cap, args.seed
+        sources, args.ratio, args.nan_cap, args.mir_cap, args.jam_cap, args.seed, args.manifest
     )
     dev_rows = build_dev_rows(sources, args.nan_dev, args.seed)
     train_ds = ASRDataset(train_rows, processor.feature_extractor, processor.tokenizer,
@@ -290,18 +335,21 @@ def main() -> int:
         output_dir=args.output_dir,
         per_device_train_batch_size=args.batch,
         gradient_accumulation_steps=args.grad_accum,
-        per_device_eval_batch_size=8,
+        per_device_eval_batch_size=4,
         learning_rate=args.lr,
         warmup_steps=args.warmup,
         num_train_epochs=args.epochs,
         max_steps=args.max_steps,
-        fp16=True,
+        # RTX 3060 is Ampere: bf16 has fp32's exponent range, so no GradScaler and
+        # none of the overflow-skipped steps (grad_norm=nan) that fp16 produced.
+        bf16=_bf16,
+        fp16=not _bf16,
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
         optim="adamw_bnb_8bit",
         eval_strategy="epoch",
         save_strategy="epoch",
-        logging_steps=25,
+        logging_steps=args.logging_steps,
         logging_first_step=True,
         disable_tqdm=True,  # clean file logs for the long unattended run
         save_total_limit=3,

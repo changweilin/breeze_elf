@@ -28,6 +28,9 @@ from pathlib import Path
 import jiwer
 import soundfile as sf
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from text_norm import strip_reference_gloss  # noqa: E402  (re-exported for rescore.py)
+
 ROOT = Path(__file__).resolve().parents[1]
 MANIFESTS = ROOT / "dataset" / "manifests"
 REPORTS = ROOT / "dataset" / "eval_reports"
@@ -86,7 +89,7 @@ def load_manifest(split: str, source: str) -> list[dict]:
     return rows
 
 
-def transcribe_one(model, audio_path: Path, language: str) -> str:
+def transcribe_one(model, audio_path: Path, language: str, beam: int = 1) -> str:
     samples, _sr = sf.read(str(audio_path), dtype="float32")
     if samples.ndim > 1:
         samples = samples.mean(axis=1)
@@ -94,7 +97,7 @@ def transcribe_one(model, audio_path: Path, language: str) -> str:
         samples,
         language=language,
         task="transcribe",
-        beam_size=1,
+        beam_size=beam,
         vad_filter=False,
         condition_on_previous_text=False,
     )
@@ -109,6 +112,7 @@ def main() -> int:
     ap.add_argument("--tag", required=True, help="report filename stem")
     ap.add_argument("--limit", type=int, default=0, help="cap clips per source (0=all)")
     ap.add_argument("--compute-type", default="float16")
+    ap.add_argument("--beam", type=int, default=1, help="beam_size (production uses 1)")
     args = ap.parse_args()
 
     from faster_whisper import WhisperModel
@@ -134,10 +138,11 @@ def main() -> int:
         refs, hyps, pairs = [], [], []
         t0 = time.perf_counter()
         for i, rec in enumerate(rows, 1):
-            raw = transcribe_one(model, ROOT / rec["audio"], language)
+            raw = transcribe_one(model, ROOT / rec["audio"], language, beam=args.beam)
             if use_cc and converter is not None:
                 raw = converter.convert(raw)
-            ref = normalize(rec["text"], cjk=cjk)
+            ref_text = strip_reference_gloss(rec["text"]) if source == "nan" else rec["text"]
+            ref = normalize(ref_text, cjk=cjk)
             hyp = normalize(raw, cjk=cjk)
             if not ref:
                 continue

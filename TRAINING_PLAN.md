@@ -70,6 +70,25 @@
 2. merge LoRA → `ct2-transformers-converter --model <merged_dir> --output_dir models/breeze-asr-25-nan-ct2 --quantization float16`。
 3. 接回 app:走 `breeze_elf/asr_models.py` 的模型熱切換(breeze/whisper 切換器)註冊新路徑做 A/B;**不要**直接覆蓋 `models/breeze-asr-25-ct2`。
 
+## 改善 v2(2026-07-23,誤差解剖後)
+
+誤差解剖(`tools/rescore.py` 從既有 preds 重算,免 GPU)推翻「殘留來自吐空」的猜測,找到兩大根因並對症:
+
+1. **指標/標籤 bug**:CV nan ref 含台羅發音註解 `漢字(Kong-kuán|…)`,佔訓練標籤字元 **48%**、且把「完全正確」判成大量刪除。`tools/text_norm.py::strip_reference_gloss`,`eval_asr.py`(僅 ref)+ `make_manifests.py`(訓練標籤)都套用。修正後 **v1 真實成績 = nan CER 0.4806(對 base 1.2149 = −60.4%)**,非原報 −39.7%。
+2. **CV 官方切分病態**:274 說話人裡 256 在 test、13 在 dev、**train 只剩 5 人**。改成 test 不動、非 test 全收進 train(留 3 中型當 dev)→ nan train 15 人 21654 句。
+3. **Utterance packing**(`tools/pack_manifest.py`):同 speaker 串 ~25s 窗補「短句 CER 高」弱點;`train_lora.py --manifest train_packed`、nan 用 resample speed-perturb(模擬 speaker)、Ampere 自動 bf16。
+
+**v2 配方**:`--r 32 --lora_targets q,k,v,out_proj --batch 2 --grad_accum 16 --epochs 3 --warmup 80`(batch 4 OOM;warmup 要 ~10% steps)。7h,eval_loss 0.747→0.612。
+
+**v2 結果(去註解計分)**:
+
+| test | base | v1 | **v2** |
+|---|---|---|---|
+| nan CER | 1.2149 | 0.4806 | **0.4356**(−64.1% vs base、−9.4% vs v1) |
+| MIR-1K CER | 0.0646 | 0.0620 | **0.0620**(零退步) |
+
+部署:`tools/deploy_model.py --id breeze-nan-v2 --ct2-dir models/breeze-asr-25-nan-v2-ct2`(→ `models/presets.json`)。switcher 現有 原始 / v1 / v2 三檔。
+
 ## 已知風險 / 陷阱
 
 - bitsandbytes 在 Windows 需 ≥0.43;若裝不起來,8-bit optimizer 改用 `adafactor` 也可(稍慢)。

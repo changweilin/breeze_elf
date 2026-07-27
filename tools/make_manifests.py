@@ -24,6 +24,9 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from text_norm import strip_reference_gloss  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[1]
 DATASET = ROOT / "dataset"
 NAN = DATASET / "nan-tw"
@@ -33,6 +36,10 @@ OUT = DATASET / "manifests"
 # reproducible; both have ~5 song prefixes so eval size is adequate).
 MIR_DEV = "titon"
 MIR_TEST = "yifen"
+
+# Non-test nan speakers sorted by clip count (desc); these ranks become the
+# early-stopping dev set. Mid-sized so the big voices stay in training.
+NAN_DEV_SPEAKER_RANKS = slice(9, 12)
 
 
 def read_tsv_stems(path: Path) -> set[str]:
@@ -57,11 +64,22 @@ def cv_stem(chunk_stem: str) -> str:
 
 
 def main() -> int:
-    train_stems = read_tsv_stems(NAN / "train.tsv")
-    dev_stems = read_tsv_stems(NAN / "dev.tsv")
+    # Common Voice's official split is pathological for our purpose: of the 274
+    # validated speakers it puts 256 in test and 13 in dev, leaving TRAIN with
+    # only 5 voices. Training Taiwanese on 5 speakers and testing on 256 unseen
+    # ones is the dominant generalisation gap. We keep test EXACTLY as the
+    # official test.tsv (so every previously measured number stays comparable)
+    # and pool every non-test speaker into training, holding out 3 mid-sized
+    # speakers for early stopping. Still strictly speaker-disjoint.
     test_stems = read_tsv_stems(NAN / "test.tsv")
     client = read_stem_to_client(NAN / "validated.tsv")
-    held_spk = {client.get(s) for s in dev_stems} | {client.get(s) for s in test_stems}
+    test_spk = {client[s] for s in test_stems if s in client}
+    clips_per_spk = Counter(client.values())
+    nontest_spk = sorted(
+        (s for s in clips_per_spk if s not in test_spk),
+        key=lambda s: (-clips_per_spk[s], s),
+    )
+    dev_spk = set(nontest_spk[NAN_DEV_SPEAKER_RANKS])
 
     # Jamendo songs -> deterministic split by sorted song id.
     jam_songs = sorted(
@@ -96,15 +114,21 @@ def main() -> int:
 
         if stem.startswith("cv_"):
             cs = cv_stem(stem)
+            # Drop the 台羅 pronunciation gloss — it is annotation, not speech.
+            cleaned = strip_reference_gloss(text)
+            if cleaned != text:
+                counts[("nan", "gloss_stripped")] += 1
+            rec["text"] = cleaned
+            rec["speaker"] = client.get(cs, "")
+            spk = client.get(cs, "")
             if cs in test_stems:
                 split = "test"
-            elif cs in dev_stems:
-                split = "dev"
-            elif cs in train_stems:
-                split = "train"
-            elif client.get(cs) in held_spk:
+            elif spk in test_spk:
+                # a test speaker's other clips would leak the test voices
                 dropped["nan_speaker_leak"] += 1
                 continue
+            elif spk in dev_spk:
+                split = "dev"
             else:
                 split = "train"
             counts[("nan", split)] += 1
@@ -143,6 +167,9 @@ def main() -> int:
     print("=== split totals ===")
     for split in ("train", "dev", "test"):
         print(f"  {split:6} {len(splits[split]):>6}")
+    spk_in = lambda sp: len({r["speaker"] for r in splits[sp] if r.get("speaker")})  # noqa: E731
+    print("=== nan speakers (disjoint) ===")
+    print(f"  train={spk_in('train')}  dev={spk_in('dev')}  test={spk_in('test')}")
     print(f"=== MIR-1K singer split: dev={MIR_DEV} test={MIR_TEST} (rest train) ===")
     print(f"=== Jamendo dev songs: {sorted(jam_dev)}")
     print(f"=== Jamendo test songs: {sorted(jam_test)}")
