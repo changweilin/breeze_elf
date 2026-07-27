@@ -1097,6 +1097,18 @@
         font: inherit;
       }
 
+      .lyrics-input {
+        width: 100%;
+        padding: 10px 12px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        color: var(--ink);
+        font: inherit;
+        line-height: 1.6;
+        resize: vertical;
+      }
+
       .search-results {
         display: flex;
         flex-direction: column;
@@ -2578,6 +2590,7 @@
           </div>
           <div class="bar-actions">
             <button id="analyze" class="mini iconbtn" type="button" disabled aria-label="後處理" title="後處理:用更精準的演算法重新計算每個字的音階與簡譜,並產生基頻分析(後續計算,有進度條)"><svg class="ic" aria-hidden="true"><use href="#i-wand"></use></svg></button>
+            <button id="lyrics" class="mini iconbtn" type="button" disabled aria-label="歌詞對齊" title="歌詞對齊:貼上這首歌的歌詞,用辨識到的時間軸把歌詞對到音檔上,取代聽錯的字"><svg class="ic" aria-hidden="true"><use href="#i-book"></use></svg></button>
             <button id="summarize" class="mini iconbtn" type="button" disabled aria-label="摘要" title="摘要逐字稿重點"><svg class="ic" aria-hidden="true"><use href="#i-summary"></use></svg></button>
             <button id="copy" class="mini iconbtn" type="button" disabled aria-label="複製" title="複製逐字稿"><svg class="ic" aria-hidden="true"><use href="#i-copy"></use></svg></button>
             <button id="download" class="mini iconbtn" type="button" disabled aria-label="下載" title="下載逐字稿"><svg class="ic" aria-hidden="true"><use href="#i-download"></use></svg></button>
@@ -3019,7 +3032,21 @@
       </form>
     </dialog>
 
-    <script src="./app.js?v=41" type="module"></script>
+    <dialog id="lyrics-dialog" class="pick-dialog" aria-labelledby="lyrics-title">
+      <form method="dialog" class="pick-form">
+        <h2 id="lyrics-title" class="pick-title">歌詞對齊</h2>
+        <p class="lang-hint">貼上這首歌的歌詞,一行一句。系統會拿辨識到的時間軸把歌詞對到音檔上:聽錯的字換成正確歌詞,間奏亂出的字自動刪掉。對完再按「後處理」就能得到正確的簡譜。</p>
+        <textarea id="lyrics-input" class="lyrics-input" rows="10" autocomplete="off"
+          placeholder="一閃一閃亮晶晶&#10;滿天都是小星星" aria-label="歌詞"></textarea>
+        <p class="lang-hint" id="lyrics-hint" aria-live="polite"></p>
+        <div class="pick-actions">
+          <button type="button" class="mini lyrics-close">取消</button>
+          <button type="button" class="primary lyrics-apply">對齊</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="./app.js?v=42" type="module"></script>
     <script src="./voice.js?v=29" type="module"></script>
   </body>
 </html>

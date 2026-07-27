@@ -53,6 +53,7 @@ from .audio import (
 from .config import get_settings
 from .diarize import OnlineSpeakerClusterer, build_clusterer, build_diarizer
 from .enhance import build_denoiser, build_enhancer, build_separator, preload_torch_cudnn
+from .lyrics import align_lyrics, timed_chars_from_blocks
 from .protocol import (
     GlossaryEntry,
     PingMessage,
@@ -987,6 +988,60 @@ async def analyze_transcript(payload: TranscriptAnalyzeRequest) -> JSONResponse:
 @app.get("/api/transcript/analyze/status")
 async def analyze_transcript_status() -> JSONResponse:
     return JSONResponse({"ok": True, **analyze_state.snapshot(include_result=True)})
+
+
+class LyricsAlignRequest(BaseModel):
+    """Replace a recognised transcript with the song's real lyrics, timed.
+
+    The blocks are the recognised transcript (with the per-character timings the
+    live pass measured); ``lyrics`` is what the user pasted, one sung line per
+    text line. No model runs — see :mod:`breeze_elf.lyrics`.
+    """
+
+    lyrics: str = Field(min_length=1, max_length=20_000)
+    blocks: list[TranscriptBlock] = Field(min_length=1, max_length=4000)
+
+
+@app.post("/api/transcript/lyrics")
+async def align_transcript_lyrics(payload: LyricsAlignRequest) -> JSONResponse:
+    recognised = timed_chars_from_blocks([block.model_dump() for block in payload.blocks])
+    try:
+        alignment = align_lyrics(payload.lyrics, recognised)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not alignment.lines:
+        raise HTTPException(status_code=400, detail="歌詞是空的")
+
+    blocks = [
+        {
+            "text": line.text,
+            "startSeconds": round(line.start, 2) if line.start is not None else None,
+            "endSeconds": round(line.end, 2) if line.end is not None else None,
+            "segmentKind": "lyrics",
+            "characters": [
+                {
+                    "char": char.char,
+                    "startSeconds": round(char.start, 3),
+                    "endSeconds": round(char.end, 3),
+                    "durationSeconds": round(max(0.0, char.end - char.start), 3),
+                }
+                for char in line.characters
+            ],
+            "matchedRatio": round(line.matched_ratio, 3),
+            "anchoredRatio": round(line.anchored_ratio, 3),
+        }
+        for line in alignment.lines
+    ]
+    return JSONResponse(
+        {
+            "ok": True,
+            "blocks": blocks,
+            "transcript": "\n".join(line.text for line in alignment.lines),
+            "matchedRatio": round(alignment.matched_ratio, 3),
+            "anchoredRatio": round(alignment.anchored_ratio, 3),
+            "dropped": alignment.dropped,
+        }
+    )
 
 
 class FileTranscribeRequest(BaseModel):

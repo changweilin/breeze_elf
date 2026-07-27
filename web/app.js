@@ -12,6 +12,10 @@ const els = {
   searchInput: document.querySelector("#search-input"),
   searchResults: document.querySelector("#search-results"),
   summarize: document.querySelector("#summarize"),
+  lyrics: document.querySelector("#lyrics"),
+  lyricsDialog: document.querySelector("#lyrics-dialog"),
+  lyricsInput: document.querySelector("#lyrics-input"),
+  lyricsHint: document.querySelector("#lyrics-hint"),
   summaryDialog: document.querySelector("#summary-dialog"),
   summaryBody: document.querySelector("#summary-body"),
   viewTabs: Array.from(document.querySelectorAll(".view-tab")),
@@ -184,6 +188,8 @@ const state = {
   // transcriptBlocks by index. Kept out of the persisted/saved transcript.
   analysisSpectra: [],
   viewMode: initialViewMode(),
+  // 歌詞對齊:低吻合度時要求再按一次才覆蓋逐字稿,每次重開對話框重置。
+  lyricsConfirmed: false,
   droppedClientChunks: 0,
   statsTimer: 0,
   sessionPersistTimer: 0,
@@ -1904,6 +1910,10 @@ function setTranscriptActions(hasTranscript) {
   if (els.summarize) {
     els.summarize.disabled = DEMO_MODE || !hasTranscript;
   }
+  if (els.lyrics) {
+    // 歌詞對齊要有逐字時間軸可搬,純文字稿沒有東西可對。
+    els.lyrics.disabled = DEMO_MODE || state.running || !hasStructuredTranscript();
+  }
   updateAnalyzeButton();
 }
 
@@ -2152,6 +2162,92 @@ function loadTranscriptRecord(data) {
   setTranscriptActions(Boolean(state.transcript.trim()));
   persistSessionNow();
   flashStats(`已開啟:${data.title || data.id}`);
+}
+
+// --- 歌詞對齊 ---------------------------------------------------------------
+// 一首歌的歌詞本來就是已知的,缺的只是「哪個字唱在哪個時間」。把貼上的歌詞和
+// 辨識結果對齊:歌詞取代聽錯的字、間奏亂出的字被刪掉,時間軸沿用辨識量到的。
+// 對完再跑「後處理」,簡譜就是對著正確的字算出來的。
+
+function openLyricsDialog() {
+  if (DEMO_MODE) {
+    flashStats("示意模式無法對齊歌詞");
+    return;
+  }
+  if (!hasStructuredTranscript()) {
+    flashStats("沒有可對齊的逐字稿,請先錄製或載入");
+    return;
+  }
+  const dialog = els.lyricsDialog;
+  if (!dialog || typeof dialog.showModal !== "function") {
+    return;
+  }
+  // 每次重開都要求重新確認低吻合度的覆蓋,否則上一次的確認會沿用到別首歌。
+  state.lyricsConfirmed = false;
+  els.lyricsHint.textContent = "";
+  dialog.showModal();
+  els.lyricsInput?.focus();
+}
+
+async function applyLyrics() {
+  const lyrics = (els.lyricsInput?.value || "").trim();
+  if (!lyrics) {
+    els.lyricsHint.textContent = "請先貼上歌詞。";
+    return;
+  }
+  els.lyricsHint.textContent = "對齊中…";
+  try {
+    const response = await fetch("/api/transcript/lyrics", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ lyrics, blocks: serializeBlocksForSave() }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) {
+      throw new Error(data.detail || "對齊失敗");
+    }
+    const blocks = (data.blocks || []).map(normalizeTranscriptBlockForRestore).filter(Boolean);
+    if (!blocks.length) {
+      throw new Error("對齊後沒有任何歌詞");
+    }
+
+    // 吻合度低就是「歌詞和這段音檔對不上」——貼錯歌、或辨識整段沒認出來。
+    // 對齊照樣會排出一條時間軸(替換每個字比刪掉再插入便宜),所以這裡必須攔,
+    // 否則一次貼錯就把原逐字稿蓋掉了。
+    const matched = Math.round((data.matchedRatio || 0) * 100);
+    if (matched < 30 && !state.lyricsConfirmed) {
+      state.lyricsConfirmed = true;
+      els.lyricsHint.textContent =
+        `辨識結果只和這份歌詞吻合 ${matched}%,可能貼錯歌或這段音檔認不出來。` +
+        "再按一次「對齊」仍要覆蓋目前的逐字稿。";
+      return;
+    }
+
+    state.transcriptBlocks = blocks;
+    state.transcript = data.transcript || blocks.map((block) => block.text).join("\n");
+    state.openBlocks.clear();
+    // 基頻分析的頻譜是照舊 blocks 的索引存的,換了文字就必須丟掉,否則會渲染
+    // 在對不上的句子底下(同 loadTranscriptRecord)。
+    state.analysisSpectra = [];
+    renderTranscriptView({ scrollToEnd: false });
+    setTranscriptActions(Boolean(state.transcript.trim()));
+    scheduleSessionPersist();
+    els.lyricsDialog?.close();
+
+    // 沒被辨識錨定的字是內插出來的(整句沒認到),時間只是估計值,要說清楚。
+    const guessed = blocks.filter((block, index) => (data.blocks[index]?.anchoredRatio ?? 1) < 1)
+      .length;
+    const parts = [`歌詞已對齊(吻合 ${matched}%`];
+    if (data.dropped) {
+      parts.push(`,刪掉 ${data.dropped} 個誤判字`);
+    }
+    if (guessed) {
+      parts.push(`,${guessed} 句時間為推估`);
+    }
+    flashStats(`${parts.join("")})`);
+  } catch (error) {
+    els.lyricsHint.textContent = error.message || "對齊失敗";
+  }
 }
 
 // --- 會後摘要 ---------------------------------------------------------------
@@ -3466,6 +3562,17 @@ if (els.searchDialog) {
 }
 if (els.summarize) {
   els.summarize.addEventListener("click", () => void openSummary());
+}
+if (els.lyrics) {
+  els.lyrics.addEventListener("click", () => openLyricsDialog());
+}
+if (els.lyricsDialog) {
+  els.lyricsDialog
+    .querySelector(".lyrics-close")
+    ?.addEventListener("click", () => els.lyricsDialog.close());
+  els.lyricsDialog.querySelector(".lyrics-apply")?.addEventListener("click", () => {
+    void applyLyrics();
+  });
 }
 if (els.summaryDialog) {
   els.summaryDialog

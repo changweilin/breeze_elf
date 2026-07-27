@@ -101,6 +101,29 @@ at a time. `POST /api/analyze` reports `tonicHz` plus `tonicConfidence` (the sha
 time landing on the chosen key's seven degrees, `null` when it fell back), and the 後處理
 toast shows both.
 
+## 歌詞對齊 (Lyrics Alignment)
+
+For a song the words are already known — what is missing is *when* each one is sung. Tap
+`歌詞對齊` in the transcript toolbar, paste the lyrics one sung line per text line, and the
+recognised transcript is replaced by the real words on the timeline that was measured from
+the audio: misheard characters are corrected in place, the credits and filler a speech model
+hallucinates over instrumental stretches are dropped, and a line the recogniser lost entirely
+is spread across the gap it left. Blank lines and section markers (`[Verse]`, `【副歌】`) are
+ignored.
+
+This is the cheap half of singing recognition. Recognition has to guess the words, which on
+singing it does badly; alignment only has to place words it was given, so run `後處理`
+afterwards and the 基頻/簡譜 are measured against the *correct* characters. No model runs and
+nothing is downloaded — it is one local request (`POST /api/transcript/lyrics`).
+
+The response reports two rates, and they mean different things. **吻合** (`matchedRatio`) is
+how much of the lyrics the recogniser independently agreed with — the evidence that these
+lyrics belong to this audio. Below 30% the app refuses the first `對齊` and asks again, since
+pasting the wrong song would otherwise silently overwrite the transcript: aligning *always*
+produces a timeline (substituting every character is cheaper than dropping and re-inserting
+them), so a high anchored rate on its own proves nothing. **推估** counts lines whose timings
+were interpolated rather than measured — usable for display, but not ground truth.
+
 ## Loading Audio Files
 
 Tap `載入音檔` to analyze a recording instead of the live microphone. Loaded files request
