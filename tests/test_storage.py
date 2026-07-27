@@ -1,7 +1,7 @@
 import json
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from breeze_elf.storage import save_transcript
@@ -9,7 +9,7 @@ from breeze_elf.storage import save_transcript
 
 class StorageTests(unittest.TestCase):
     def test_save_transcript_writes_utf8_text_with_safe_filename(self):
-        created_at = datetime(2026, 5, 26, 15, 30, 45, tzinfo=timezone.utc)
+        created_at = datetime(2026, 5, 26, 15, 30, 45, tzinfo=UTC)
 
         with tempfile.TemporaryDirectory() as tmp:
             stored = save_transcript(
@@ -31,7 +31,7 @@ class StorageTests(unittest.TestCase):
             )
 
     def test_save_transcript_allocates_unique_filenames(self):
-        created_at = datetime(2026, 5, 26, 15, 30, 45, tzinfo=timezone.utc)
+        created_at = datetime(2026, 5, 26, 15, 30, 45, tzinfo=UTC)
 
         with tempfile.TemporaryDirectory() as tmp:
             first = save_transcript("one", tmp, title="note", now=created_at)
@@ -46,7 +46,7 @@ class StorageTests(unittest.TestCase):
                 save_transcript(" \n\t ", tmp)
 
     def test_save_transcript_bundles_structured_metadata_and_audio(self):
-        created_at = datetime(2026, 5, 26, 15, 30, 45, tzinfo=timezone.utc)
+        created_at = datetime(2026, 5, 26, 15, 30, 45, tzinfo=UTC)
         structured = {
             "title": "note",
             "sampleRate": 16000,

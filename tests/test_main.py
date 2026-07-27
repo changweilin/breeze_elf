@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+from fastapi import HTTPException
 
 from breeze_elf import main
 from breeze_elf.asr import ASRResult, MockASR, WordTiming
@@ -569,6 +570,66 @@ class BatchedFileEndpointTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(main.HTTPException) as ctx:
                 await main.transcribe_file_endpoint(payload)
         self.assertEqual(ctx.exception.status_code, 400)
+
+
+class LyricsAlignEndpointTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _blocks(text, start=0.0, step=0.5):
+        return [
+            {
+                "text": text,
+                "startSeconds": start,
+                "endSeconds": start + step * len(text),
+                "characters": [
+                    {
+                        "char": char,
+                        "startSeconds": start + index * step,
+                        "endSeconds": start + (index + 1) * step,
+                    }
+                    for index, char in enumerate(text)
+                ],
+            }
+        ]
+
+    async def test_replaces_misheard_text_and_keeps_the_measured_timings(self):
+        payload = main.LyricsAlignRequest(
+            lyrics="一閃一閃亮晶晶\n滿天都是小星星",
+            blocks=self._blocks("一閃一閃亮晶晶滿天都四小星星"),
+        )
+        response = await main.align_transcript_lyrics(payload)
+
+        data = json.loads(response.body)
+        self.assertTrue(data["ok"])
+        texts = [block["text"] for block in data["blocks"]]
+        self.assertEqual(texts, ["一閃一閃亮晶晶", "滿天都是小星星"])
+        self.assertEqual(data["transcript"], "一閃一閃亮晶晶\n滿天都是小星星")
+        # 是 was misheard as 四, so it is corrected but keeps that syllable's time.
+        second = data["blocks"][1]
+        self.assertEqual(second["characters"][3]["char"], "是")
+        self.assertAlmostEqual(second["characters"][3]["startSeconds"], 5.0)
+        self.assertEqual(second["anchoredRatio"], 1.0)
+        self.assertLess(data["matchedRatio"], 1.0)
+        # Shape matches what /api/transcript/analyze consumes.
+        self.assertEqual(second["segmentKind"], "lyrics")
+        self.assertIn("durationSeconds", second["characters"][0])
+
+    async def test_drops_hallucinated_characters(self):
+        payload = main.LyricsAlignRequest(
+            lyrics="一閃一閃",
+            blocks=self._blocks("一閃一閃") + self._blocks("字幕由社群提供", start=20.0),
+        )
+        response = await main.align_transcript_lyrics(payload)
+
+        data = json.loads(response.body)
+        self.assertEqual(data["dropped"], 7)
+        self.assertEqual(len(data["blocks"]), 1)
+        self.assertAlmostEqual(data["blocks"][0]["endSeconds"], 2.0)
+
+    async def test_empty_lyrics_is_rejected(self):
+        payload = main.LyricsAlignRequest(lyrics="[Verse]\n\n", blocks=self._blocks("一閃"))
+        with self.assertRaises(HTTPException) as caught:
+            await main.align_transcript_lyrics(payload)
+        self.assertEqual(caught.exception.status_code, 400)
 
 
 class CharacterPayloadTests(unittest.TestCase):

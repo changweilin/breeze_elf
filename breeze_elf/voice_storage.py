@@ -17,7 +17,7 @@ import json
 import secrets
 import wave
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 
@@ -291,9 +291,9 @@ def _resolve_dir(storage_dir: str | Path) -> Path:
 
 
 def _now_iso(now: datetime | None) -> str:
-    moment = now or datetime.now(timezone.utc).astimezone()
+    moment = now or datetime.now(UTC).astimezone()
     if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
+        moment = moment.replace(tzinfo=UTC)
     return moment.isoformat(timespec="seconds")
 
 

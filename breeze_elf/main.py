@@ -34,11 +34,14 @@ from .audio import (
     AudioUtteranceBuffer,
     AudioWindow,
     AudioWindowBuffer,
+    IntonationScore,
     PitchSummary,
     SegmentAnalysis,
     analyze_segment,
     compute_spectrogram,
     estimate_noise_floor,
+    estimate_tempo,
+    estimate_tonic,
     extend_voiced_span,
     hz_to_jianpu,
     jianpu_glide,
@@ -47,11 +50,15 @@ from .audio import (
     pcm16le_to_float32,
     pitch_cents_off,
     prepare_asr_audio,
+    quantize_beats,
+    score_intonation,
     summarize_pitch,
+    tuning_label,
 )
 from .config import get_settings
 from .diarize import OnlineSpeakerClusterer, build_clusterer, build_diarizer
 from .enhance import build_denoiser, build_enhancer, build_separator, preload_torch_cudnn
+from .lyrics import align_lyrics, timed_chars_from_blocks
 from .protocol import (
     GlossaryEntry,
     PingMessage,
@@ -147,6 +154,11 @@ class TranscriptCharacter(BaseModel):
     intensity: float | None = None
     intensityStart: float | None = None
     intensityEnd: float | None = None
+    # Rhythm, from the offline pass only (the beat is measured over the whole
+    # recording). Kept on the model so they survive a save/restore round trip.
+    beats: float | None = None
+    noteValue: str | None = None
+    tuning: str | None = None
 
 
 class TranscriptBlock(BaseModel):
@@ -155,6 +167,7 @@ class TranscriptBlock(BaseModel):
     endSeconds: float | None = None
     segmentKind: str | None = None
     pitch: dict[str, Any] | None = None
+    intonation: dict[str, Any] | None = None
     characters: list[TranscriptCharacter] = Field(default_factory=list)
     # Optional post-recognition annotations: the translated line (#4) and the
     # anonymous per-session speaker index (#3, 0-based; UI shows index + 1).
@@ -995,6 +1008,60 @@ async def analyze_transcript_status() -> JSONResponse:
     return JSONResponse({"ok": True, **analyze_state.snapshot(include_result=True)})
 
 
+class LyricsAlignRequest(BaseModel):
+    """Replace a recognised transcript with the song's real lyrics, timed.
+
+    The blocks are the recognised transcript (with the per-character timings the
+    live pass measured); ``lyrics`` is what the user pasted, one sung line per
+    text line. No model runs — see :mod:`breeze_elf.lyrics`.
+    """
+
+    lyrics: str = Field(min_length=1, max_length=20_000)
+    blocks: list[TranscriptBlock] = Field(min_length=1, max_length=4000)
+
+
+@app.post("/api/transcript/lyrics")
+async def align_transcript_lyrics(payload: LyricsAlignRequest) -> JSONResponse:
+    recognised = timed_chars_from_blocks([block.model_dump() for block in payload.blocks])
+    try:
+        alignment = align_lyrics(payload.lyrics, recognised)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not alignment.lines:
+        raise HTTPException(status_code=400, detail="歌詞是空的")
+
+    blocks = [
+        {
+            "text": line.text,
+            "startSeconds": round(line.start, 2) if line.start is not None else None,
+            "endSeconds": round(line.end, 2) if line.end is not None else None,
+            "segmentKind": "lyrics",
+            "characters": [
+                {
+                    "char": char.char,
+                    "startSeconds": round(char.start, 3),
+                    "endSeconds": round(char.end, 3),
+                    "durationSeconds": round(max(0.0, char.end - char.start), 3),
+                }
+                for char in line.characters
+            ],
+            "matchedRatio": round(line.matched_ratio, 3),
+            "anchoredRatio": round(line.anchored_ratio, 3),
+        }
+        for line in alignment.lines
+    ]
+    return JSONResponse(
+        {
+            "ok": True,
+            "blocks": blocks,
+            "transcript": "\n".join(line.text for line in alignment.lines),
+            "matchedRatio": round(alignment.matched_ratio, 3),
+            "anchoredRatio": round(alignment.anchored_ratio, 3),
+            "dropped": alignment.dropped,
+        }
+    )
+
+
 class FileTranscribeRequest(BaseModel):
     # Raw 16-bit little-endian mono PCM (base64) — the same format the audio
     # WebSocket streams, so the client reuses its decoder; the whole recording is
@@ -1659,7 +1726,7 @@ async def _process_windows(
     while True:
         try:
             window = await asyncio.wait_for(state.queue.get(), timeout=0.25)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             if state.stop_event.is_set() and state.queue.empty():
                 return
             continue
@@ -1853,7 +1920,7 @@ async def _stop_state(state: StreamState, drain_timeout: float = 2.0) -> None:
         return
     try:
         await asyncio.wait_for(state.processor_task, timeout=drain_timeout)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         state.processor_task.cancel()
     except asyncio.CancelledError:
         pass
@@ -1928,8 +1995,12 @@ def _character_payloads(
         (char, start, end, _segment_pitch(window.samples, sample_rate, start, end))
         for char, start, end in segments
     ]
-    voiced = [seg.median_hz for *_, seg in analyzed if seg.median_hz]
-    tonic = float(np.median(voiced)) if voiced else (summary.median_hz or 0.0)
+    # 主音 from key detection over this utterance's notes, weighted by how long
+    # each is held; falls back to the median pitch when one utterance is too
+    # short to show a key. The offline 校準音準 pass re-estimates it once over
+    # the whole piece, which is where the estimate is actually reliable.
+    notes = [(seg.median_hz, end - start) for _, start, end, seg in analyzed]
+    tonic = estimate_tonic(notes).hz or (summary.median_hz or 0.0)
 
     return [
         _character_payload(window, char, start, end, seg, tonic)
@@ -1956,15 +2027,22 @@ def _analyzed_character_payload(
     end: float,
     seg: SegmentAnalysis,
     tonic: float,
+    beat_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Per-character timing, pitch, slide, tuning, and intensity, against a
-    given 主音 (``tonic``). Shared by the live window pass and the offline pass."""
+    given 主音 (``tonic``). Shared by the live window pass and the offline pass.
+
+    ``beat_seconds`` adds the note value (八分音符 / 四分音符 …). Only the offline
+    pass has it: the beat is measured over the whole recording, which one live
+    utterance cannot see."""
     median = seg.median_hz
     start_hz = seg.start_hz or median
     end_hz = seg.end_hz or median
     single = hz_to_jianpu(median, tonic)
     glide = jianpu_glide(start_hz, end_hz, tonic) if (start_hz and end_hz) else single
     is_glide = glide != single and (_JIANPU_GLIDE_UP in glide or _JIANPU_GLIDE_DOWN in glide)
+    beats, note_value = quantize_beats(max(0.0, end - start), beat_seconds)
+    cents_off = _round_cents(pitch_cents_off(median, tonic))
     return {
         "char": char,
         "startSeconds": round(start, 3),
@@ -1980,10 +2058,15 @@ def _analyzed_character_payload(
         "jianpuEnd": hz_to_jianpu(end_hz, tonic),
         "isGlide": is_glide,
         "glideMid": round(seg.glide_position, 3) if (is_glide and seg.glide_position) else None,
-        "centsOff": _round_cents(pitch_cents_off(median, tonic)),
+        "centsOff": cents_off,
         "intensity": _round_intensity(seg.intensity),
         "intensityStart": _round_intensity(seg.intensity_start),
         "intensityEnd": _round_intensity(seg.intensity_end),
+        "beats": beats,
+        "noteValue": note_value or None,
+        # 音準 is meaningless on a 滑音: it sweeps between two degrees by design,
+        # so its median pitch sits between them and would read as 走音.
+        "tuning": None if is_glide else (tuning_label(cents_off) or None),
     }
 
 
@@ -2058,6 +2141,7 @@ def _analyze_blocks_pitch(
     done = 0
     measured: list[list[tuple[str, float, float, SegmentAnalysis]]] = []
     all_medians: list[float] = []
+    notes: list[tuple[float, float]] = []
     # Room-tone floor for the content-aware boundary growth (task: cover the
     # sub-threshold-but-字詞 audio the live RMS VAD clipped).
     noise_floor = estimate_noise_floor(samples, sample_rate)
@@ -2073,23 +2157,32 @@ def _analyze_blocks_pitch(
             block_measured.append((char, start, end, seg))
             if seg.median_hz:
                 all_medians.append(seg.median_hz)
+                notes.append((seg.median_hz, end - start))
             if done % 8 == 0 or done == total:
                 progress(0.02 + 0.48 * min(1.0, done / total), f"分析音高 {done}/{total}")
         measured.append(block_measured)
 
-    tonic = float(np.median(all_medians)) if all_medians else 0.0
+    # One global 主音 for the whole piece, from key detection over every note in
+    # it — the median pitch is not the tonic, so writing 簡譜 against it shifts
+    # every degree. Thin / tuneless material falls back to the median.
+    tonic_estimate = estimate_tonic(notes)
+    tonic = tonic_estimate.hz or 0.0
+    # One pulse for the whole piece, from the recording's onset pattern. Free
+    # tempo / speech reports no beat at all, and the note values stay off.
+    tempo = estimate_tempo(samples, sample_rate)
 
     # Pass 2 (0.5–1.0): rebuild 簡譜 vs the global 主音 + per-block 基頻分析.
     block_total = len(blocks) or 1
     out_blocks: list[dict[str, Any]] = []
     for block_index, (block, block_measured) in enumerate(zip(blocks, measured)):
         characters = [
-            _analyzed_character_payload(char, start, end, seg, tonic)
+            _analyzed_character_payload(char, start, end, seg, tonic, tempo.beat_seconds)
             for char, start, end, seg in block_measured
         ]
         out_blocks.append(
             {
                 "text": block.get("text") or "",
+                "intonation": _intonation_payload(score_intonation(_intonation_notes(characters))),
                 "startSeconds": block.get("startSeconds"),
                 "endSeconds": block.get("endSeconds"),
                 "segmentKind": block.get("segmentKind") or "",
@@ -2105,7 +2198,38 @@ def _analyze_blocks_pitch(
     return {
         "blocks": out_blocks,
         "tonicHz": round(tonic, 1) if tonic else None,
+        "tonicConfidence": (
+            round(tonic_estimate.confidence, 2) if tonic_estimate.source == "key" else None
+        ),
+        "intonation": _intonation_payload(
+            score_intonation(
+                [note for block in out_blocks for note in _intonation_notes(block["characters"])]
+            )
+        ),
+        "tempoBpm": round(tempo.bpm, 1) if tempo.bpm else None,
+        "tempoConfidence": round(tempo.confidence, 2) if tempo.bpm else None,
         "characterCount": len(all_medians),
+    }
+
+
+def _intonation_notes(characters: list[dict[str, Any]]) -> list[tuple[float | None, float]]:
+    """The ``(cents, duration)`` pairs 音準 is scored from — glides excluded."""
+    return [
+        (char.get("centsOff"), char.get("durationSeconds") or 0.0)
+        for char in characters
+        if not char.get("isGlide")
+    ]
+
+
+def _intonation_payload(score: IntonationScore) -> dict[str, Any] | None:
+    if score.score is None:
+        return None
+    return {
+        "score": round(score.score, 1),
+        "medianAbsCents": round(score.median_abs_cents, 1),
+        "inTuneRatio": round(score.in_tune_ratio, 3),
+        "offPitchCount": score.off_pitch_count,
+        "counted": score.counted,
     }
 
 
