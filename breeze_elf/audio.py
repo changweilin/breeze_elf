@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import logging
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -704,14 +705,26 @@ def _extend_attack_release(
         # attack: hold the onset pitch backward through the rising edge
         onset = f0[i]
         count, k = 0, i - 1
-        while k >= 0 and f0[k] is None and out[k] is None and count < max_bins and intensity[k] >= gate:
+        while (
+            k >= 0
+            and f0[k] is None
+            and out[k] is None
+            and count < max_bins
+            and intensity[k] >= gate
+        ):
             out[k] = onset
             k -= 1
             count += 1
         # release: hold the offset pitch forward through the decaying tail
         offset = f0[j - 1]
         count, k = 0, j
-        while k < n and f0[k] is None and out[k] is None and count < max_bins and intensity[k] >= gate:
+        while (
+            k < n
+            and f0[k] is None
+            and out[k] is None
+            and count < max_bins
+            and intensity[k] >= gate
+        ):
             out[k] = offset
             k += 1
             count += 1
@@ -810,6 +823,413 @@ def pitch_cents_off(hz: float | None, tonic_hz: float | None) -> float | None:
         return None
     semitones = 12.0 * math.log2(hz / tonic_hz)
     return (semitones - round(semitones)) * 100.0
+
+
+# Krumhansl-Schmuckler key profiles: how stable each scale degree is perceived
+# to be in a major / minor key. Correlating a duration-weighted pitch-class
+# histogram against all 12 rotations picks the key. A plain "how many notes are
+# diatonic" score cannot do this alone — it is identical for all seven modes of
+# one scale — so the profile is what resolves the *root* within the scale.
+_KS_MAJOR = (6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88)
+_KS_MINOR = (6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17)
+# Semitones above the tonic that carry a plain (accidental-free) 簡譜 digit.
+_MAJOR_SCALE = (0, 2, 4, 5, 7, 9, 11)
+# Arbitrary anchor for the cents axis; only pitch *classes* are read off it, and
+# the octave is placed against the melody afterwards, so the value is immaterial.
+_TONIC_REF_HZ = 440.0
+
+
+@dataclass(frozen=True)
+class TonicEstimate:
+    """The 主音 a 簡譜 is written against.
+
+    ``source`` is ``key`` when the estimate came from key detection, ``median``
+    when the evidence was too thin and the melody's median pitch was used
+    instead, and ``empty`` when there was nothing to measure. ``confidence`` is
+    the share of sung time landing on the chosen key's seven degrees, and is
+    ``0`` for anything but a ``key`` estimate.
+    """
+
+    hz: float | None
+    confidence: float
+    source: str
+
+
+def estimate_tonic(
+    notes: Sequence[tuple[float | None, float]],
+    *,
+    min_notes: int = 8,
+    min_confidence: float = 0.75,
+    final_note_weight: float = 3.0,
+) -> TonicEstimate:
+    """Estimate the 主音 (the pitch that 簡譜 writes as ``1``) from sung notes.
+
+    ``notes`` is ``(hz, duration_seconds)`` per note, **in time order**. The
+    melody's *median* pitch is **not** the tonic — a tune usually sits around
+    its third or fifth, so writing 簡譜 against the median transposes every
+    degree, and once the median lands between two scale tones (which real,
+    imperfectly-tuned singing always does) a third to a half of the notes also
+    pick up a spurious accidental. Instead the notes are binned into a
+    duration-weighted pitch-class histogram (after correcting the recording's
+    own tuning) and matched against the key profiles.
+
+    A minor key is returned as its **relative major**, which is how 簡譜 writes
+    it: ``1`` stays the relative major's root and the melody centres on ``6``.
+
+    Falls back to the median when there are too few notes or the best key still
+    leaves too much of the melody off-scale — speech, or a tuneless recording,
+    should not be forced onto a key. A keyless (chromatic) melody scores around
+    ``0.6`` on that share and a real tune around ``0.95``, which is where
+    ``min_confidence`` sits between them.
+    """
+    valid = [(float(hz), float(weight)) for hz, weight in notes if hz and hz > 0]
+    if not valid:
+        return TonicEstimate(None, 0.0, "empty")
+
+    hz_values = np.array([hz for hz, _ in valid], dtype=np.float64)
+    fallback = TonicEstimate(float(np.median(hz_values)), 0.0, "median")
+    if len(valid) < min_notes:
+        return fallback
+
+    weights = np.array([weight for _, weight in valid], dtype=np.float64)
+    weights = np.where(np.isfinite(weights) & (weights > 0), weights, 0.0)
+    if not np.any(weights > 0):
+        weights = np.ones_like(hz_values)
+    # Cadence prior: a melody resolves onto its tonic, and the pitch-class
+    # histogram alone cannot separate a key from its dominant when the tune
+    # dwells on the fifth (this is what mis-reads 小蜜蜂 as G major). The boost
+    # scales the final note's own duration, so a stray short trailing note —
+    # a breath, a hallucinated character — cannot hijack the key.
+    weights = weights.copy()
+    weights[-1] *= max(1.0, final_note_weight)
+
+    cents = 1200.0 * np.log2(hz_values / _TONIC_REF_HZ)
+    offset = _tuning_offset_cents(cents, weights)
+    classes = np.mod(np.rint((cents - offset) / 100.0), 12).astype(int)
+    histogram = np.zeros(12, dtype=np.float64)
+    np.add.at(histogram, classes, weights)
+    total = float(histogram.sum())
+    if total <= 0:
+        return fallback
+    # A key needs a scale to be visible. One sustained tone, or a two-note
+    # chant, has no key to find and would otherwise "fit" any scale containing
+    # it perfectly — so require a tetrachord's worth of distinct pitch classes
+    # (ignoring slivers) before trusting the estimate over the median.
+    if int(np.count_nonzero(histogram >= total * 0.02)) < 4:
+        return fallback
+
+    best_score, best_root, best_mode = -2.0, 0, "major"
+    for mode, profile in (("major", _KS_MAJOR), ("minor", _KS_MINOR)):
+        template = np.asarray(profile, dtype=np.float64)
+        for root in range(12):
+            score = _correlation(np.roll(histogram, -root), template)
+            if score > best_score:
+                best_score, best_root, best_mode = score, root, mode
+    if best_score <= -1.5:  # every note in one pitch class → no key to find
+        return fallback
+
+    root = (best_root + 3) % 12 if best_mode == "minor" else best_root
+    diatonic = {(root + step) % 12 for step in _MAJOR_SCALE}
+    confidence = float(sum(histogram[pitch_class] for pitch_class in diatonic) / total)
+    if confidence < min_confidence:
+        return fallback
+
+    tonic_hz = _TONIC_REF_HZ * 2.0 ** ((offset + 100.0 * root) / 1200.0)
+    return TonicEstimate(_place_octave(tonic_hz, float(np.median(hz_values))), confidence, "key")
+
+
+#: Note values as multiples of a beat, with their 簡譜/樂理 names. A 簡譜 number
+#: on its own is one beat; shorter notes take underlines, longer ones trailing
+#: dashes, and the dotted values add half again.
+_NOTE_VALUES = (
+    (4.0, "全音符"),
+    (3.0, "附點二分音符"),
+    (2.0, "二分音符"),
+    (1.5, "附點四分音符"),
+    (1.0, "四分音符"),
+    (0.75, "附點八分音符"),
+    (0.5, "八分音符"),
+    (0.375, "附點十六分音符"),
+    (0.25, "十六分音符"),
+)
+
+
+#: Three-frame Hann, applied to the onset envelope — see :func:`_onset_envelope`.
+_ONSET_SMOOTHING = np.array([0.25, 0.5, 0.25])
+
+#: 音準 bands, in cents from the nearest scale degree. 50 cents is the midpoint
+#: between two semitones — the furthest a note can be from the grid, and the
+#: point where it stops being a note in tune and becomes the note next door.
+_IN_TUNE_CENTS = 20.0
+_OFF_PITCH_CENTS = 35.0
+_WORST_CENTS = 50.0
+
+
+@dataclass(frozen=True)
+class IntonationScore:
+    """How close the singing sits to its own tuning grid."""
+
+    #: 0–100: the duration-weighted share of sung time on pitch, with a note
+    #: exactly between two semitones scoring zero. ``None`` when nothing was
+    #: measurable.
+    score: float | None
+    median_abs_cents: float | None
+    #: Share of sung *time* within ±20 cents.
+    in_tune_ratio: float
+    #: Notes beyond ±35 cents — the ones worth looking at. A note a whole
+    #: semitone off is *not* one of them: it lands on the next degree, in tune.
+    #: This band is the sour, stuck-between-two-notes case.
+    off_pitch_count: int
+    #: Notes that were scored. Glides are the caller's job to exclude.
+    counted: int
+
+
+def tuning_label(cents: float | None) -> str:
+    """``準`` / ``略偏`` / ``走音`` for one note's distance from the grid."""
+    if cents is None:
+        return ""
+    distance = abs(cents)
+    if distance <= _IN_TUNE_CENTS:
+        return "準"
+    return "略偏" if distance <= _OFF_PITCH_CENTS else "走音"
+
+
+def score_intonation(notes: Sequence[tuple[float | None, float]]) -> IntonationScore:
+    """Score ``(cents_off, duration_seconds)`` notes for 音準.
+
+    Weighted by how long each note is held, because a sustained note sung flat
+    is heard and a passing one is not. The per-note quality falls linearly from
+    1 at the grid to 0 at 50 cents, so the score reads as "the share of sung
+    time that landed on pitch".
+
+Three things it deliberately does not measure:
+
+    * **Whether the right note was sung.** With no reference melody, a fifth
+      sung perfectly in tune scores full marks.
+    * **Absolute pitch.** The 主音 carries the recording's own tuning, so a
+      performance sung uniformly a quarter-tone sharp scores 100 — with no
+      reference there is nothing for it to be sharp *of*. What is scored is
+      note-to-note consistency, which is what an unaccompanied singer can be
+      judged on at all.
+    * **Glides**, which the caller must exclude: a 滑音 sweeps between two
+      degrees on purpose, so its median pitch sits between them and would read
+      as the worst kind of 走音.
+    """
+    valid = [
+        (abs(float(cents)), max(0.0, float(duration)))
+        for cents, duration in notes
+        if cents is not None and np.isfinite(cents)
+    ]
+    if not valid:
+        return IntonationScore(None, None, 0.0, 0, 0)
+
+    distances = np.array([cents for cents, _ in valid], dtype=np.float64)
+    weights = np.array([duration for _, duration in valid], dtype=np.float64)
+    if not np.any(weights > 0):
+        weights = np.ones_like(distances)
+
+    quality = np.clip(1.0 - distances / _WORST_CENTS, 0.0, 1.0)
+    total = float(weights.sum())
+    return IntonationScore(
+        score=float(100.0 * (quality * weights).sum() / total),
+        median_abs_cents=float(np.median(distances)),
+        in_tune_ratio=float(weights[distances <= _IN_TUNE_CENTS].sum() / total),
+        off_pitch_count=int(np.count_nonzero(distances > _OFF_PITCH_CENTS)),
+        counted=len(valid),
+    )
+
+
+@dataclass(frozen=True)
+class TempoEstimate:
+    """The pulse a 簡譜's note values are counted against."""
+
+    bpm: float | None
+    beat_seconds: float | None
+    #: Where the first beat falls, in seconds from the start of the audio.
+    phase_seconds: float
+    #: Normalised autocorrelation at the chosen period. Free-tempo singing and
+    #: speech score near zero — there is no pulse to find — so the caller should
+    #: leave note values off rather than quantise against a guess.
+    confidence: float
+
+
+def estimate_tempo(
+    samples: np.ndarray,
+    sample_rate: int,
+    *,
+    min_bpm: float = 60.0,
+    max_bpm: float = 200.0,
+    frame_ms: float = 10.0,
+    min_confidence: float = 0.4,
+) -> TempoEstimate:
+    """Estimate the beat from the audio's onset pattern.
+
+    A spectral-flux onset envelope is autocorrelated, and the period with the
+    strongest periodicity becomes the beat. Candidates are weighted by a
+    log-Gaussian prior centred on 120 BPM, which is what stops a tune being
+    reported at half or double speed — both are exactly as periodic, so the
+    autocorrelation alone cannot separate them. A consequence worth knowing: a
+    fast song may come back at half tempo with the note values doubled, which
+    notates the same music and is what the prior is choosing on purpose.
+
+    Returns ``bpm=None`` when nothing periodic is there. Measured on this repo's
+    own recordings, speech scores 0.21–0.25 against 0.85+ for steady singing,
+    which is where ``min_confidence`` sits — quantising a rubato performance
+    against an invented pulse is worse than showing no note values at all.
+    """
+    hop = max(1, round(sample_rate * frame_ms / 1000.0))
+    envelope = _onset_envelope(samples, hop)
+    if envelope is None:
+        return TempoEstimate(None, None, 0.0, 0.0)
+
+    frame_rate = sample_rate / hop
+    signal = envelope - envelope.mean()
+    size = signal.size
+    if size < 8 or not np.any(signal):
+        return TempoEstimate(None, None, 0.0, 0.0)
+
+    spectrum = np.fft.rfft(signal, 2 * size)
+    correlation = np.fft.irfft(spectrum * np.conj(spectrum), 2 * size)[:size]
+    if correlation[0] <= 0:
+        return TempoEstimate(None, None, 0.0, 0.0)
+    correlation = correlation / correlation[0]
+
+    # Search tempo directly rather than integer lags: a period of 37.5 frames is
+    # a real tempo (160 BPM at 10 ms frames), and rounding it to a frame is what
+    # makes an estimator report such a song at half speed.
+    tempos = np.arange(min_bpm, max_bpm + 1e-6, 0.5)
+    lags = frame_rate * 60.0 / tempos
+    usable = (lags >= 1.0) & (lags <= size - 1)
+    if not np.any(usable):
+        return TempoEstimate(None, None, 0.0, 0.0)
+    tempos, lags = tempos[usable], lags[usable]
+
+    scores = np.interp(lags, np.arange(size), correlation)
+    prior = np.exp(-0.5 * (np.log2(tempos / 120.0) / 0.9) ** 2)
+    best = int(np.argmax(scores * prior))
+    confidence = float(max(0.0, scores[best]))
+    if confidence < min_confidence:
+        return TempoEstimate(None, None, 0.0, confidence)
+
+    beat_seconds = float(lags[best]) / frame_rate
+    return TempoEstimate(
+        bpm=float(tempos[best]),
+        beat_seconds=beat_seconds,
+        phase_seconds=_beat_phase(envelope, max(1, round(lags[best]))) / frame_rate,
+        confidence=confidence,
+    )
+
+
+def quantize_beats(seconds: float | None, beat_seconds: float | None) -> tuple[float | None, str]:
+    """Snap a sounding duration to the nearest note value: ``(beats, name)``.
+
+    Compared in log space, so being 10% out weighs the same on a semiquaver as
+    on a semibreve. The character's own sounding length is used rather than the
+    gap to the next onset: a syllable held into a rest is a note plus a rest,
+    not a longer note.
+    """
+    if not seconds or not beat_seconds or seconds <= 0 or beat_seconds <= 0:
+        return None, ""
+    ratio = seconds / beat_seconds
+    return min(_NOTE_VALUES, key=lambda value: abs(math.log(ratio / value[0])))
+
+
+def _onset_envelope(
+    samples: np.ndarray, hop: int, *, n_fft: int = 512, chunk: int = 1024
+) -> np.ndarray | None:
+    """Spectral flux: how much energy *appeared* between adjacent frames.
+
+    Log-compressed first so the envelope follows perceived accents instead of
+    the loudest band, and computed in chunks because a whole recording's STFT
+    magnitudes would otherwise be held in memory all at once.
+
+    Smoothed at the end over three frames. The envelope's real time resolution
+    is the analysis window (32 ms), not the hop (10 ms), so a one-frame spike
+    over-sharpens it: an onset falling between frames alternates which frame it
+    lands on, and the autocorrelation then prefers *twice* the true period,
+    where the alternation cancels out.
+    """
+    if samples.size < n_fft + hop:
+        return None
+    count = 1 + (samples.size - n_fft) // hop
+    if count < 8:
+        return None
+
+    window = np.hanning(n_fft)
+    frames = np.lib.stride_tricks.sliding_window_view(samples.astype(np.float64), n_fft)
+    envelope = np.zeros(count - 1, dtype=np.float64)
+    previous: np.ndarray | None = None
+    for begin in range(0, count, chunk):
+        stop = min(count, begin + chunk)
+        magnitudes = np.log1p(
+            np.abs(np.fft.rfft(frames[np.arange(begin, stop) * hop] * window, axis=1))
+        )
+        if previous is not None:
+            envelope[begin - 1] = np.maximum(magnitudes[0] - previous, 0.0).sum()
+        if stop - begin > 1:
+            envelope[begin : stop - 1] = np.maximum(np.diff(magnitudes, axis=0), 0.0).sum(axis=1)
+        previous = magnitudes[-1]
+    return np.convolve(envelope, _ONSET_SMOOTHING, mode="same")
+
+
+def _refine_lag(correlation: np.ndarray, lag: int) -> float:
+    """Sub-frame period by fitting a parabola through the autocorrelation peak.
+
+    At a 10 ms frame a whole frame of error is ~2 BPM at 120 — enough to drift
+    a beat over a verse — and the peak's neighbours carry the missing fraction.
+    """
+    if lag <= 0 or lag + 1 >= correlation.size:
+        return float(lag)
+    left, centre, right = correlation[lag - 1], correlation[lag], correlation[lag + 1]
+    denominator = left - 2.0 * centre + right
+    if denominator == 0:
+        return float(lag)
+    shift = 0.5 * (left - right) / denominator
+    return float(lag) + float(np.clip(shift, -0.5, 0.5))
+
+
+def _beat_phase(envelope: np.ndarray, period: int) -> int:
+    """The offset within one period where the onsets pile up — the downbeat."""
+    if period <= 0 or envelope.size < period:
+        return 0
+    usable = envelope[: envelope.size - envelope.size % period]
+    if usable.size == 0:
+        return 0
+    return int(np.argmax(usable.reshape(-1, period).sum(axis=0)))
+
+
+def _tuning_offset_cents(cents: np.ndarray, weights: np.ndarray) -> float:
+    """The recording's own tuning, as a ±50 cent shift of the semitone grid.
+
+    Singing (and anything not cut to A440) sits off the nominal grid as a whole;
+    binning against the unshifted grid would smear one note across two pitch
+    classes. Averaged on the circle because the residual wraps at 100 cents.
+    """
+    angles = 2.0 * np.pi * (np.mod(cents, 100.0) / 100.0)
+    x = float(np.sum(weights * np.cos(angles)))
+    y = float(np.sum(weights * np.sin(angles)))
+    if x == 0.0 and y == 0.0:
+        return 0.0
+    return math.atan2(y, x) / (2.0 * math.pi) * 100.0
+
+
+def _correlation(values: np.ndarray, template: np.ndarray) -> float:
+    """Pearson correlation; ``-2`` (never a winner) when either side is flat."""
+    a = values - values.mean()
+    b = template - template.mean()
+    denom = float(np.sqrt(float(a @ a) * float(b @ b)))
+    if denom <= 0:
+        return -2.0
+    return float(a @ b) / denom
+
+
+def _place_octave(tonic_hz: float, reference_hz: float) -> float:
+    """Drop the tonic into the octave the melody sits in, so most notes keep the
+    plain degrees 1-7 instead of a pile of octave dots. This is the one thing
+    median-as-tonic got right, and it is preserved."""
+    if tonic_hz <= 0 or reference_hz <= 0:
+        return tonic_hz
+    return tonic_hz * 2.0 ** math.floor(math.log2(reference_hz / tonic_hz))
 
 
 def _glide_edges(

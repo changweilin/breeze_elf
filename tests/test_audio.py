@@ -5,11 +5,13 @@ import numpy as np
 from breeze_elf.audio import (
     AudioUtteranceBuffer,
     AudioWindowBuffer,
+    _extend_attack_release,
     analyze_segment,
     calculate_rms,
     clean_f0_track,
     estimate_noise_floor,
-    _extend_attack_release,
+    estimate_tempo,
+    estimate_tonic,
     extend_voiced_span,
     hz_to_jianpu,
     jianpu_glide,
@@ -17,7 +19,10 @@ from breeze_elf.audio import (
     pcm16le_to_float32,
     pitch_cents_off,
     prepare_asr_audio,
+    quantize_beats,
+    score_intonation,
     summarize_pitch,
+    tuning_label,
 )
 
 
@@ -541,6 +546,250 @@ class JianpuParseTests(unittest.TestCase):
     def test_rests_and_garbage_return_none(self):
         for token in ("", "0", "-", None, "x"):
             self.assertIsNone(jianpu_to_semitones(token))
+
+
+def _melody(tonic_hz, degrees, duration=0.4, detune_cents=0.0):
+    """(hz, seconds) notes at the given semitone offsets above ``tonic_hz``."""
+    return [
+        (tonic_hz * 2 ** ((semitones + detune_cents / 100.0) / 12.0), duration)
+        for semitones in degrees
+    ]
+
+
+# Real tunes, as semitones above their tonic. Each one's *median* pitch sits
+# well away from its tonic — writing 簡譜 against the median is the bug these
+# tests exist to catch. 小蜜蜂 dwells on the third and fifth and only touches
+# the tonic at the cadence; 五聲音階 is the pentatonic case Chinese songs hit.
+_TWINKLE = (0, 0, 7, 7, 9, 9, 7, 5, 5, 4, 4, 2, 2, 0)
+_LITTLE_BEE = (4, 2, 0, 2, 4, 4, 4, 2, 2, 2, 4, 7, 7, 4, 2, 0)
+_PENTATONIC = (0, 2, 4, 7, 9, 12, 9, 7, 4, 2, 0, 4, 7, 4, 2, 0)
+# A natural-minor tune resolving on its own root (semitones above that root).
+_MINOR_TUNE = (0, 3, 7, 3, 0, -2, 0, 3, 5, 7, 5, 3, 0, -2, 0)
+
+
+class TonicEstimateTests(unittest.TestCase):
+    def _assert_tonic(self, notes, expected_hz, *, delta_semitones=0.1):
+        estimate = estimate_tonic(notes)
+        self.assertEqual(estimate.source, "key")
+        self.assertAlmostEqual(12 * np.log2(estimate.hz / expected_hz), 0.0, delta=delta_semitones)
+        return estimate
+
+    def test_finds_the_root_not_the_median_pitch(self):
+        notes = _melody(261.63, _TWINKLE)
+        estimate = self._assert_tonic(notes, 261.63)
+        self.assertGreater(estimate.confidence, 0.95)
+        # The median pitch is 4.5 semitones above the tonic — the old 主音.
+        median = float(np.median([hz for hz, _ in notes]))
+        self.assertGreater(abs(12 * np.log2(median / estimate.hz)), 3.0)
+
+    def test_resolves_a_tune_that_dwells_on_the_fifth(self):
+        # Histogram alone reads this as G major; the cadence on the tonic is
+        # what makes it C.
+        self._assert_tonic(_melody(261.63, _LITTLE_BEE), 261.63)
+
+    def test_pentatonic_tune(self):
+        self._assert_tonic(_melody(261.63, _PENTATONIC), 261.63)
+
+    def test_every_note_lands_on_a_plain_degree(self):
+        notes = _melody(261.63, _TWINKLE)
+        estimate = estimate_tonic(notes)
+        for hz, _ in notes:
+            self.assertNotIn("#", hz_to_jianpu(hz, estimate.hz))
+
+    def test_minor_key_is_written_in_its_relative_major(self):
+        # A minor → 簡譜 convention writes 1 = C (three semitones up), so the
+        # melody centres on 6 rather than 1.
+        estimate = self._assert_tonic(_melody(220.0, _MINOR_TUNE), 220.0 * 2 ** (3 / 12.0))
+        self.assertEqual(hz_to_jianpu(220.0, estimate.hz), "6" + "̣")
+
+    def test_tracks_a_recording_tuned_off_the_grid(self):
+        # A whole performance sung 30 cents sharp still resolves to one key,
+        # shifted by that same 30 cents rather than smeared across two.
+        estimate = estimate_tonic(_melody(261.63, _TWINKLE, detune_cents=30.0))
+        self.assertEqual(estimate.source, "key")
+        self.assertAlmostEqual(12 * np.log2(estimate.hz / 261.63), 0.3, delta=0.1)
+
+    def test_long_notes_outweigh_passing_ones(self):
+        # Sustained scale tones plus fleeting chromatic passing notes: the key
+        # must come from the held pitches, not from a raw note count.
+        notes = _melody(261.63, _TWINKLE, duration=0.8)
+        notes[-1:] = _melody(261.63, (1, 3, 6, 8, 10, 1, 6, 8, 0), duration=0.02)
+        self._assert_tonic(notes, 261.63)
+
+    def test_falls_back_to_median_on_thin_evidence(self):
+        notes = _melody(261.63, (0, 4, 7))
+        estimate = estimate_tonic(notes)
+        self.assertEqual(estimate.source, "median")
+        self.assertEqual(estimate.confidence, 0.0)
+        self.assertAlmostEqual(estimate.hz, float(np.median([hz for hz, _ in notes])), places=3)
+
+    def test_falls_back_when_nothing_fits_a_key(self):
+        # A chromatic run is in no key; forcing one onto it would be worse than
+        # the median, so the estimator declines.
+        estimate = estimate_tonic(_melody(261.63, tuple(range(12)) * 2))
+        self.assertEqual(estimate.source, "median")
+
+    def test_survives_realistic_pitch_jitter(self):
+        # Real singing (and YIN's own error) never lands dead on the grid.
+        rng = np.random.default_rng(7)
+        notes = [
+            (hz * 2 ** (rng.uniform(-0.35, 0.35) / 12.0), duration + rng.uniform(-0.1, 0.1))
+            for hz, duration in _melody(261.63, _TWINKLE + _LITTLE_BEE)
+        ]
+        self._assert_tonic(notes, 261.63, delta_semitones=0.3)
+
+    def test_a_sustained_tone_has_no_key(self):
+        # One pitch class fits every scale containing it, so it would score a
+        # perfect confidence; without a scale in evidence, keep the median.
+        estimate = estimate_tonic(_melody(220.0, (0,) * 12))
+        self.assertEqual(estimate.source, "median")
+        self.assertAlmostEqual(estimate.hz, 220.0, places=3)
+
+    def test_no_notes(self):
+        self.assertEqual(estimate_tonic([]).source, "empty")
+        self.assertIsNone(estimate_tonic([(None, 0.4), (0.0, 0.4)]).hz)
+
+    def test_tonic_sits_in_the_melody_octave(self):
+        # Same key an octave apart: the tonic follows the melody so the 簡譜
+        # keeps plain degrees instead of a pile of octave dots.
+        self._assert_tonic(_melody(130.81, _TWINKLE), 130.81)
+        self._assert_tonic(_melody(523.25, _TWINKLE), 523.25)
+
+
+def _sung_notes(bpm, degrees, sample_rate=16_000, tonic_hz=261.63):
+    """A steady tune: one note per beat, each with an attack and a release so the
+    onset detector has something to find (no percussion, like real singing)."""
+    beat = 60.0 / bpm
+    out = []
+    for semitones in degrees:
+        count = int(sample_rate * beat)
+        axis = np.arange(count) / sample_rate
+        envelope = np.minimum(1.0, np.arange(count) / (0.02 * sample_rate)) * np.minimum(
+            1.0, (count - np.arange(count)) / (0.05 * sample_rate)
+        )
+        hz = tonic_hz * 2 ** (semitones / 12.0)
+        out.append((0.4 * np.sin(2 * np.pi * hz * axis) * envelope).astype(np.float32))
+    return np.concatenate(out)
+
+
+class TempoEstimateTests(unittest.TestCase):
+    def test_recovers_the_tempo_of_a_steady_tune(self):
+        for bpm in (75, 90, 120, 140):
+            estimate = estimate_tempo(_sung_notes(bpm, _TWINKLE * 3), 16_000)
+            self.assertIsNotNone(estimate.bpm, f"{bpm} BPM not detected")
+            self.assertAlmostEqual(estimate.bpm, bpm, delta=1.0)
+            self.assertAlmostEqual(estimate.beat_seconds, 60.0 / bpm, delta=0.01)
+            self.assertGreater(estimate.confidence, 0.8)
+
+    def test_a_tempo_whose_period_falls_between_frames(self):
+        # 160 BPM is 37.5 frames at a 10 ms hop. Rounding that to a whole frame
+        # is what makes an estimator report the song at half speed.
+        estimate = estimate_tempo(_sung_notes(160, _TWINKLE * 3), 16_000)
+        self.assertAlmostEqual(estimate.bpm, 160.0, delta=3.0)
+
+    def test_free_tempo_audio_reports_no_beat(self):
+        # Random syllable lengths — speech, or rubato singing. Quantising note
+        # values against an invented pulse is worse than showing none.
+        rng = np.random.default_rng(7)
+        sample_rate = 16_000
+        parts = []
+        for _ in range(40):
+            count = int(rng.uniform(0.15, 0.5) * sample_rate)
+            axis = np.arange(count) / sample_rate
+            parts.append(
+                (0.3 * np.sin(2 * np.pi * rng.uniform(120, 240) * axis) * np.hanning(count)).astype(
+                    np.float32
+                )
+            )
+            parts.append(np.zeros(int(rng.uniform(0.05, 0.5) * sample_rate), dtype=np.float32))
+        estimate = estimate_tempo(np.concatenate(parts), sample_rate)
+        self.assertIsNone(estimate.bpm)
+        self.assertIsNone(estimate.beat_seconds)
+
+    def test_silence_and_tiny_input(self):
+        self.assertIsNone(estimate_tempo(np.zeros(16_000, dtype=np.float32), 16_000).bpm)
+        self.assertIsNone(estimate_tempo(np.zeros(64, dtype=np.float32), 16_000).bpm)
+
+    def test_phase_points_at_a_note_onset(self):
+        estimate = estimate_tempo(_sung_notes(120, _TWINKLE * 3), 16_000)
+        # Notes start every 0.5 s from 0, so the downbeat must land on a
+        # multiple of the beat (within a couple of frames).
+        offset = estimate.phase_seconds % estimate.beat_seconds
+        self.assertLess(min(offset, estimate.beat_seconds - offset), 0.05)
+
+
+class QuantizeBeatsTests(unittest.TestCase):
+    def test_snaps_to_note_values(self):
+        beat = 0.5  # 120 BPM
+        cases = {
+            0.12: (0.25, "十六分音符"),
+            0.26: (0.5, "八分音符"),
+            0.38: (0.75, "附點八分音符"),
+            0.52: (1.0, "四分音符"),
+            0.78: (1.5, "附點四分音符"),
+            1.03: (2.0, "二分音符"),
+            2.1: (4.0, "全音符"),
+        }
+        for seconds, expected in cases.items():
+            self.assertEqual(quantize_beats(seconds, beat), expected, f"{seconds}s")
+
+    def test_compared_in_log_space_so_short_notes_are_not_swallowed(self):
+        # 0.3 beats is nearer 0.25 than 0.5 proportionally, even though the
+        # linear distance to each is the same.
+        self.assertEqual(quantize_beats(0.15, 0.5)[0], 0.25)
+
+    def test_no_beat_means_no_note_value(self):
+        self.assertEqual(quantize_beats(0.5, None), (None, ""))
+        self.assertEqual(quantize_beats(None, 0.5), (None, ""))
+        self.assertEqual(quantize_beats(0.0, 0.5), (None, ""))
+
+
+class IntonationScoreTests(unittest.TestCase):
+    def test_on_the_grid_scores_full_marks(self):
+        score = score_intonation([(0.0, 0.5)] * 8)
+        self.assertEqual(score.score, 100.0)
+        self.assertEqual(score.in_tune_ratio, 1.0)
+        self.assertEqual(score.off_pitch_count, 0)
+        self.assertEqual(score.counted, 8)
+
+    def test_score_falls_to_zero_between_two_semitones(self):
+        self.assertAlmostEqual(score_intonation([(50.0, 0.5)]).score, 0.0)
+        self.assertAlmostEqual(score_intonation([(25.0, 0.5)]).score, 50.0)
+        self.assertAlmostEqual(score_intonation([(-25.0, 0.5)]).score, 50.0)
+
+    def test_held_notes_weigh_more_than_passing_ones(self):
+        # One sour note held for two seconds against eight clean tenth-second
+        # ones: the score must follow what is actually heard.
+        held = score_intonation([(45.0, 2.0)] + [(0.0, 0.1)] * 8)
+        passing = score_intonation([(45.0, 0.1)] + [(0.0, 2.0)] * 8)
+        # 2 s at quality 0.1 against 0.8 s at quality 1.0 → 36; flip the
+        # durations and the same two pitches score 99.
+        self.assertLess(held.score, 40.0)
+        self.assertGreater(passing.score, 95.0)
+        self.assertGreater(passing.score - held.score, 55.0)
+
+    def test_counts_the_notes_worth_looking_at(self):
+        score = score_intonation([(5.0, 0.5), (30.0, 0.5), (44.0, 0.5), (-40.0, 0.5)])
+        self.assertEqual(score.off_pitch_count, 2)
+        self.assertAlmostEqual(score.in_tune_ratio, 0.25)
+        self.assertAlmostEqual(score.median_abs_cents, 35.0)
+
+    def test_nothing_measurable(self):
+        empty = score_intonation([(None, 0.5), (float("nan"), 0.5)])
+        self.assertIsNone(empty.score)
+        self.assertEqual(empty.counted, 0)
+        self.assertIsNone(score_intonation([]).score)
+
+    def test_zero_durations_fall_back_to_counting_notes(self):
+        score = score_intonation([(0.0, 0.0), (50.0, 0.0)])
+        self.assertAlmostEqual(score.score, 50.0)
+
+    def test_tuning_labels(self):
+        self.assertEqual(tuning_label(0.0), "準")
+        self.assertEqual(tuning_label(-20.0), "準")
+        self.assertEqual(tuning_label(30.0), "略偏")
+        self.assertEqual(tuning_label(-45.0), "走音")
+        self.assertEqual(tuning_label(None), "")
 
 
 if __name__ == "__main__":

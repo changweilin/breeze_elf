@@ -4,7 +4,7 @@ import json
 import re
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -91,7 +91,7 @@ def load_transcript(storage_dir: str | Path, doc_id: str) -> TranscriptRecord | 
     if not title:
         title = _first_line(text) or doc_id
     if not created_at:
-        created_at = _created_at(datetime.fromtimestamp(mtime, timezone.utc)).isoformat(
+        created_at = _created_at(datetime.fromtimestamp(mtime, UTC)).isoformat(
             timespec="seconds"
         )
 
@@ -194,9 +194,9 @@ def save_transcript(
 
 
 def _created_at(now: datetime | None) -> datetime:
-    created_at = now or datetime.now(timezone.utc).astimezone()
+    created_at = now or datetime.now(UTC).astimezone()
     if created_at.tzinfo is None:
-        return created_at.replace(tzinfo=timezone.utc)
+        return created_at.replace(tzinfo=UTC)
     return created_at
 
 

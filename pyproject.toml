@@ -3,7 +3,9 @@ name = "breeze-elf"
 version = "0.1.0"
 description = "Phone microphone streaming over Tailscale to local ASR."
 readme = "README.md"
-requires-python = ">=3.10"
+# onnxruntime — a core faster-whisper dependency — stopped publishing cp310
+# wheels at 1.24, so a 3.10 lock cannot be installed at all.
+requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.34.0",
@@ -58,8 +60,15 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 extend-exclude = [".venv", ".uv-cache", ".hf-cache"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+# voice.py embeds a PowerShell script (the Windows WinRT TTS path) as a string
+# literal. Its long lines are PowerShell, not Python, and wrapping them means
+# editing a Windows-only code path CI cannot run — not worth it for a line
+# length. Every E501 in this file is inside that script.
+"breeze_elf/voice.py" = ["E501"]

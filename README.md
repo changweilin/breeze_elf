@@ -79,6 +79,95 @@ Click any finalized sentence to expand a detail panel listing each character's t
 frequency (or the slide's start→end), scale tuning error in cents, and intensity trend
 (漸強 / 漸弱 / 持平). This works in both plain and pitch modes.
 
+### 主音 (tonic) and key detection
+
+`1` in the 簡譜 is the **key's root**, not the melody's average pitch — a tune usually sits
+around its third or fifth, so writing 簡譜 against the median pitch transposes every degree
+(小星星 reads as `5̣ 5̣ 2 2 …` instead of `1 1 5 5 …`), and once that median lands between two
+scale tones, as it does on real singing, roughly a third to a half of the notes also come out
+with a spurious accidental. The tonic is therefore estimated by key detection:
+each note is binned into a duration-weighted pitch-class histogram (after correcting the
+recording's own tuning, so a performance sung a quarter-tone sharp still resolves to one
+key) and matched against the Krumhansl-Schmuckler key profiles, with extra weight on the
+final note because melodies resolve onto their tonic. A minor key is reported as its
+**relative major**, which is how 簡譜 writes it — `1` stays the relative major's root and
+the melody centres on `6`.
+
+When the evidence is thin (a short utterance, a sustained tone, or anything that fits no
+key — speech, for instance) it falls back to the melody's median pitch, and the degrees are
+then relative rather than the real key. `校準音準` re-estimates the tonic once over the whole
+recording, which is where the estimate is reliable; the live pass can only see one utterance
+at a time. `POST /api/analyze` reports `tonicHz` plus `tonicConfidence` (the share of sung
+time landing on the chosen key's seven degrees, `null` when it fell back), and the 後處理
+toast shows both.
+
+### 音準 (intonation scoring)
+
+`校準音準` also scores how close the singing sits to its own tuning grid. Each note's distance
+from the nearest scale degree is weighted by how long it is held — a sustained note sung flat
+is heard, a passing one is not — and falls linearly from full marks at the grid to zero at 50
+cents, the midpoint between two semitones. The score reads as *the share of sung time that
+landed on pitch*: it appears in the 後處理 toast, per line as a `走音 N 字` chip on any line
+with notes beyond ±35 cents, and per character as 準 / 略偏 / 走音 in the detail panel.
+
+Three things it deliberately does not measure:
+
+- **Whether the right note was sung.** With no reference melody, a fifth sung perfectly in
+  tune scores full marks.
+- **Absolute pitch.** The 主音 carries the recording's own tuning, so a performance sung
+  uniformly a quarter-tone sharp still scores 100 — with no reference there is nothing for it
+  to be sharp *of*. What is scored is note-to-note consistency, which is what an unaccompanied
+  singer can be judged on at all.
+- **Glides.** A 滑音 sweeps between two degrees on purpose, so its median pitch sits between
+  them; it is excluded from both the score and the per-character label rather than counted as
+  the worst kind of 走音.
+
+Note also that a note a whole semitone off is *not* flagged: it lands squarely on the next
+degree, in tune. The band this catches is the sour, stuck-between-two-notes one.
+
+### 節奏 (tempo and note values)
+
+A 簡譜 number on its own is one beat, so the numbers only become a score once there is a
+beat to count them against. `校準音準` estimates one for the whole recording from its onset
+pattern — a spectral-flux envelope, autocorrelated, with the candidate tempos weighted by a
+log-Gaussian prior centred on 120 BPM — and each character's sounding length is then snapped
+to the nearest note value (十六分音符 through 全音符, including the dotted ones), shown in the
+per-character detail panel. The BPM appears in the 後處理 toast next to the 主音.
+
+Two things follow from how tempo estimation works, and both are deliberate:
+
+- **A fast song may be reported at half tempo**, with every note value doubling to match.
+  A pulse and twice that pulse are exactly as periodic, so nothing in the audio distinguishes
+  them; the prior picks the one nearer 120 BPM, and 90 BPM with quavers notates the same music
+  as 180 BPM with crotchets.
+- **Free-tempo material gets no note values at all.** Rubato singing and speech have no pulse
+  to find, and quantising against an invented one would be worse than leaving it out — on this
+  repo's own speech recordings the periodicity score is 0.21–0.25 against 0.85+ for steady
+  singing, which is where the cutoff sits.
+
+## 歌詞對齊 (Lyrics Alignment)
+
+For a song the words are already known — what is missing is *when* each one is sung. Tap
+`歌詞對齊` in the transcript toolbar, paste the lyrics one sung line per text line, and the
+recognised transcript is replaced by the real words on the timeline that was measured from
+the audio: misheard characters are corrected in place, the credits and filler a speech model
+hallucinates over instrumental stretches are dropped, and a line the recogniser lost entirely
+is spread across the gap it left. Blank lines and section markers (`[Verse]`, `【副歌】`) are
+ignored.
+
+This is the cheap half of singing recognition. Recognition has to guess the words, which on
+singing it does badly; alignment only has to place words it was given, so run `後處理`
+afterwards and the 基頻/簡譜 are measured against the *correct* characters. No model runs and
+nothing is downloaded — it is one local request (`POST /api/transcript/lyrics`).
+
+The response reports two rates, and they mean different things. **吻合** (`matchedRatio`) is
+how much of the lyrics the recogniser independently agreed with — the evidence that these
+lyrics belong to this audio. Below 30% the app refuses the first `對齊` and asks again, since
+pasting the wrong song would otherwise silently overwrite the transcript: aligning *always*
+produces a timeline (substituting every character is cheaper than dropping and re-inserting
+them), so a high anchored rate on its own proves nothing. **推估** counts lines whose timings
+were interpolated rather than measured — usable for display, but not ground truth.
+
 ## Loading Audio Files
 
 Tap `載入音檔` to analyze a recording instead of the live microphone. Loaded files request
