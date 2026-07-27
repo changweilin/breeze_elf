@@ -72,6 +72,31 @@ class DoctorTests(unittest.TestCase):
         self.assertTrue(output)
         output.encode("ascii")  # raises if any non-ASCII char leaked into the report
 
+    def test_deployed_preset_with_cjk_label_stays_ascii(self):
+        # A deployed preset can carry a CJK label ("Breeze ASR 台語強化 v2") + note.
+        # It must not break the ASCII contract — and this must hold independent of a
+        # real models/presets.json, which CI lacks (so the end-to-end test above is a
+        # trivial pass there and would not catch this regression).
+        from breeze_elf.model_registry import RegisteredModel
+
+        cjk = [
+            RegisteredModel(
+                id="breeze-nan-v2",
+                label="Breeze ASR 台語強化 v2",
+                model="models/breeze-asr-25-nan-v2-ct2",
+                kind="whisper",
+                note="音準",
+            )
+        ]
+        settings = _settings()
+        with patch("breeze_elf.model_registry.load_registry", lambda *a, **k: cjk):
+            lines = [
+                doctor._format_line(check, color=False)
+                for check in doctor.check_models(settings)
+            ]
+        "\n".join(lines).encode("ascii")  # raises if the CJK label leaked verbatim
+        self.assertTrue(any("breeze-nan-v2" in line for line in lines))
+
 
 if __name__ == "__main__":
     unittest.main()
