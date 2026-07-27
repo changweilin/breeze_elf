@@ -676,6 +676,18 @@
       }
 
       /* 語者分離:匿名說話者色票(白字配彩底,顏色由 --speaker-color 逐段設定)。 */
+      .off-pitch-chip {
+        display: inline-flex;
+        align-items: center;
+        padding: 1px 8px;
+        border-radius: 999px;
+        border: 1px solid var(--warn);
+        color: var(--warn);
+        font-size: 0.72rem;
+        font-weight: 760;
+        white-space: nowrap;
+      }
+
       .speaker-chip {
         display: inline-flex;
         align-items: center;
@@ -3046,7 +3058,7 @@
       </form>
     </dialog>
 
-    <script src="./app.js?v=43" type="module"></script>
+    <script src="./app.js?v=44" type="module"></script>
     <script src="./voice.js?v=29" type="module"></script>
   </body>
 </html>

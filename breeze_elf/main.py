@@ -34,6 +34,7 @@ from .audio import (
     AudioUtteranceBuffer,
     AudioWindow,
     AudioWindowBuffer,
+    IntonationScore,
     PitchSummary,
     SegmentAnalysis,
     analyze_segment,
@@ -50,7 +51,9 @@ from .audio import (
     pitch_cents_off,
     prepare_asr_audio,
     quantize_beats,
+    score_intonation,
     summarize_pitch,
+    tuning_label,
 )
 from .config import get_settings
 from .diarize import OnlineSpeakerClusterer, build_clusterer, build_diarizer
@@ -155,6 +158,7 @@ class TranscriptCharacter(BaseModel):
     # recording). Kept on the model so they survive a save/restore round trip.
     beats: float | None = None
     noteValue: str | None = None
+    tuning: str | None = None
 
 
 class TranscriptBlock(BaseModel):
@@ -163,6 +167,7 @@ class TranscriptBlock(BaseModel):
     endSeconds: float | None = None
     segmentKind: str | None = None
     pitch: dict[str, Any] | None = None
+    intonation: dict[str, Any] | None = None
     characters: list[TranscriptCharacter] = Field(default_factory=list)
     # Optional post-recognition annotations: the translated line (#4) and the
     # anonymous per-session speaker index (#3, 0-based; UI shows index + 1).
@@ -2030,6 +2035,7 @@ def _analyzed_character_payload(
     glide = jianpu_glide(start_hz, end_hz, tonic) if (start_hz and end_hz) else single
     is_glide = glide != single and (_JIANPU_GLIDE_UP in glide or _JIANPU_GLIDE_DOWN in glide)
     beats, note_value = quantize_beats(max(0.0, end - start), beat_seconds)
+    cents_off = _round_cents(pitch_cents_off(median, tonic))
     return {
         "char": char,
         "startSeconds": round(start, 3),
@@ -2045,12 +2051,15 @@ def _analyzed_character_payload(
         "jianpuEnd": hz_to_jianpu(end_hz, tonic),
         "isGlide": is_glide,
         "glideMid": round(seg.glide_position, 3) if (is_glide and seg.glide_position) else None,
-        "centsOff": _round_cents(pitch_cents_off(median, tonic)),
+        "centsOff": cents_off,
         "intensity": _round_intensity(seg.intensity),
         "intensityStart": _round_intensity(seg.intensity_start),
         "intensityEnd": _round_intensity(seg.intensity_end),
         "beats": beats,
         "noteValue": note_value or None,
+        # 音準 is meaningless on a 滑音: it sweeps between two degrees by design,
+        # so its median pitch sits between them and would read as 走音.
+        "tuning": None if is_glide else (tuning_label(cents_off) or None),
     }
 
 
@@ -2166,6 +2175,7 @@ def _analyze_blocks_pitch(
         out_blocks.append(
             {
                 "text": block.get("text") or "",
+                "intonation": _intonation_payload(score_intonation(_intonation_notes(characters))),
                 "startSeconds": block.get("startSeconds"),
                 "endSeconds": block.get("endSeconds"),
                 "segmentKind": block.get("segmentKind") or "",
@@ -2184,9 +2194,35 @@ def _analyze_blocks_pitch(
         "tonicConfidence": (
             round(tonic_estimate.confidence, 2) if tonic_estimate.source == "key" else None
         ),
+        "intonation": _intonation_payload(
+            score_intonation(
+                [note for block in out_blocks for note in _intonation_notes(block["characters"])]
+            )
+        ),
         "tempoBpm": round(tempo.bpm, 1) if tempo.bpm else None,
         "tempoConfidence": round(tempo.confidence, 2) if tempo.bpm else None,
         "characterCount": len(all_medians),
+    }
+
+
+def _intonation_notes(characters: list[dict[str, Any]]) -> list[tuple[float | None, float]]:
+    """The ``(cents, duration)`` pairs 音準 is scored from — glides excluded."""
+    return [
+        (char.get("centsOff"), char.get("durationSeconds") or 0.0)
+        for char in characters
+        if not char.get("isGlide")
+    ]
+
+
+def _intonation_payload(score: IntonationScore) -> dict[str, Any] | None:
+    if score.score is None:
+        return None
+    return {
+        "score": round(score.score, 1),
+        "medianAbsCents": round(score.median_abs_cents, 1),
+        "inTuneRatio": round(score.in_tune_ratio, 3),
+        "offPitchCount": score.off_pitch_count,
+        "counted": score.counted,
     }
 
 

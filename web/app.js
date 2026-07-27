@@ -1000,6 +1000,10 @@ function renderTranscriptEntry(block, index) {
   if (Number.isInteger(block.speaker)) {
     meta.append(createSpeakerChip(block.speaker));
   }
+  const offPitch = createOffPitchChip(block.intonation);
+  if (offPitch) {
+    meta.append(offPitch);
+  }
   // 段落播放 of the original recording — available in 文字/簡譜/基頻 views alike.
   const playButton = createSegmentPlayButton(block, index);
   if (playButton) {
@@ -1071,6 +1075,19 @@ function renderTranscriptEntry(block, index) {
 // Distinct chip colours per anonymous speaker (cycled; white text sits legibly on
 // all of them). The server label is 0-based, so the UI shows `speaker + 1`.
 const SPEAKER_COLORS = ["#2f80ed", "#27ae60", "#eb5757", "#9b51e0", "#f2994a", "#0aa2c0"];
+
+// 這一句有幾個字卡在兩個半音之間。只在後處理算過音準、且真的有走音時出現。
+function createOffPitchChip(intonation) {
+  const count = Number(intonation?.offPitchCount) || 0;
+  if (!count) {
+    return null;
+  }
+  const chip = document.createElement("span");
+  chip.className = "off-pitch-chip";
+  chip.textContent = `走音 ${count} 字`;
+  chip.title = `這句有 ${count} 個字偏離音階超過 35 音分`;
+  return chip;
+}
 
 function createSpeakerChip(speaker) {
   const chip = document.createElement("span");
@@ -1421,7 +1438,8 @@ function renderScaleCell(character) {
     cents.className = "scale-cents";
     const sign = character.centsOff > 0 ? "+" : "";
     cents.textContent = `${sign}${Math.round(character.centsOff)}¢`;
-    if (Math.abs(character.centsOff) > 35) {
+    // 走音與否由後處理判定(滑音不算),前端只負責上色,免得兩邊門檻各走各的。
+    if (character.tuning === "走音") {
       cents.classList.add("off");
     }
     nodes.push(cents);
@@ -1716,6 +1734,20 @@ function normalizePitch(pitch) {
   };
 }
 
+function normalizeIntonation(intonation) {
+  const score = finiteNumber(intonation?.score);
+  if (score === null) {
+    return null;
+  }
+  return {
+    score,
+    medianAbsCents: finiteNumber(intonation?.medianAbsCents),
+    inTuneRatio: finiteNumber(intonation?.inTuneRatio),
+    offPitchCount: Number.isFinite(intonation?.offPitchCount) ? intonation.offPitchCount : 0,
+    counted: Number.isFinite(intonation?.counted) ? intonation.counted : 0,
+  };
+}
+
 function normalizeCharacters(characters) {
   if (!Array.isArray(characters)) {
     return [];
@@ -1742,6 +1774,7 @@ function normalizeCharacters(characters) {
       intensityEnd: finiteNumber(character?.intensityEnd),
       beats: finiteNumber(character?.beats),
       noteValue: typeof character?.noteValue === "string" ? character.noteValue : "",
+      tuning: typeof character?.tuning === "string" ? character.tuning : "",
     }))
     .filter((character) => character.char);
 }
@@ -1966,6 +1999,7 @@ function normalizeTranscriptBlockForRestore(block) {
     windowIndex: Number.isInteger(block.windowIndex) ? block.windowIndex : null,
     pitch: normalizePitch(block.pitch),
     characters: normalizeCharacters(block.characters),
+    intonation: normalizeIntonation(block.intonation),
     translation: typeof block.translation === "string" ? block.translation : null,
     speaker: Number.isInteger(block.speaker) ? block.speaker : null,
   };
@@ -3831,6 +3865,7 @@ function serializeBlocksForSave() {
     segmentKind: block.segmentKind || "",
     pitch: block.pitch || null,
     characters: Array.isArray(block.characters) ? block.characters : [],
+    intonation: block.intonation || null,
     translation: block.translation || null,
     speaker: Number.isInteger(block.speaker) ? block.speaker : null,
   }));
@@ -4071,7 +4106,10 @@ async function analyzePitch() {
       : "";
     // 拍子只有錄音真的有穩定節奏時才量得到;量不到就不顯示,也不會有音符時值。
     const tempo = Number.isFinite(result.tempoBpm) ? `,${Math.round(result.tempoBpm)} BPM` : "";
-    flashStats(`後處理完成(${result.characterCount || 0} 字${tonic}${tempo})`);
+    const intonation = Number.isFinite(result.intonation?.score)
+      ? `,音準 ${Math.round(result.intonation.score)} 分`
+      : "";
+    flashStats(`後處理完成(${result.characterCount || 0} 字${tonic}${tempo}${intonation})`);
   } catch (error) {
     flashStats(error.message || "後處理失敗");
   } finally {
@@ -4123,6 +4161,7 @@ function applyAnalyzedBlocks(blocks) {
     }
     target.pitch = normalizePitch(refined.pitch);
     target.characters = normalizeCharacters(refined.characters);
+    target.intonation = normalizeIntonation(refined.intonation);
     // Spectrogram stays out of transcriptBlocks so it is never persisted/saved.
     state.analysisSpectra[index] = refined.spectrogram || null;
   });

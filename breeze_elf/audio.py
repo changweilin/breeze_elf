@@ -945,6 +945,87 @@ _NOTE_VALUES = (
 #: Three-frame Hann, applied to the onset envelope — see :func:`_onset_envelope`.
 _ONSET_SMOOTHING = np.array([0.25, 0.5, 0.25])
 
+#: 音準 bands, in cents from the nearest scale degree. 50 cents is the midpoint
+#: between two semitones — the furthest a note can be from the grid, and the
+#: point where it stops being a note in tune and becomes the note next door.
+_IN_TUNE_CENTS = 20.0
+_OFF_PITCH_CENTS = 35.0
+_WORST_CENTS = 50.0
+
+
+@dataclass(frozen=True)
+class IntonationScore:
+    """How close the singing sits to its own tuning grid."""
+
+    #: 0–100: the duration-weighted share of sung time on pitch, with a note
+    #: exactly between two semitones scoring zero. ``None`` when nothing was
+    #: measurable.
+    score: float | None
+    median_abs_cents: float | None
+    #: Share of sung *time* within ±20 cents.
+    in_tune_ratio: float
+    #: Notes beyond ±35 cents — the ones worth looking at. A note a whole
+    #: semitone off is *not* one of them: it lands on the next degree, in tune.
+    #: This band is the sour, stuck-between-two-notes case.
+    off_pitch_count: int
+    #: Notes that were scored. Glides are the caller's job to exclude.
+    counted: int
+
+
+def tuning_label(cents: float | None) -> str:
+    """``準`` / ``略偏`` / ``走音`` for one note's distance from the grid."""
+    if cents is None:
+        return ""
+    distance = abs(cents)
+    if distance <= _IN_TUNE_CENTS:
+        return "準"
+    return "略偏" if distance <= _OFF_PITCH_CENTS else "走音"
+
+
+def score_intonation(notes: Sequence[tuple[float | None, float]]) -> IntonationScore:
+    """Score ``(cents_off, duration_seconds)`` notes for 音準.
+
+    Weighted by how long each note is held, because a sustained note sung flat
+    is heard and a passing one is not. The per-note quality falls linearly from
+    1 at the grid to 0 at 50 cents, so the score reads as "the share of sung
+    time that landed on pitch".
+
+Three things it deliberately does not measure:
+
+    * **Whether the right note was sung.** With no reference melody, a fifth
+      sung perfectly in tune scores full marks.
+    * **Absolute pitch.** The 主音 carries the recording's own tuning, so a
+      performance sung uniformly a quarter-tone sharp scores 100 — with no
+      reference there is nothing for it to be sharp *of*. What is scored is
+      note-to-note consistency, which is what an unaccompanied singer can be
+      judged on at all.
+    * **Glides**, which the caller must exclude: a 滑音 sweeps between two
+      degrees on purpose, so its median pitch sits between them and would read
+      as the worst kind of 走音.
+    """
+    valid = [
+        (abs(float(cents)), max(0.0, float(duration)))
+        for cents, duration in notes
+        if cents is not None and np.isfinite(cents)
+    ]
+    if not valid:
+        return IntonationScore(None, None, 0.0, 0, 0)
+
+    distances = np.array([cents for cents, _ in valid], dtype=np.float64)
+    weights = np.array([duration for _, duration in valid], dtype=np.float64)
+    if not np.any(weights > 0):
+        weights = np.ones_like(distances)
+
+    quality = np.clip(1.0 - distances / _WORST_CENTS, 0.0, 1.0)
+    total = float(weights.sum())
+    return IntonationScore(
+        score=float(100.0 * (quality * weights).sum() / total),
+        median_abs_cents=float(np.median(distances)),
+        in_tune_ratio=float(weights[distances <= _IN_TUNE_CENTS].sum() / total),
+        off_pitch_count=int(np.count_nonzero(distances > _OFF_PITCH_CENTS)),
+        counted=len(valid),
+    )
+
 
 @dataclass(frozen=True)
 class TempoEstimate:

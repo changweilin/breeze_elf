@@ -20,7 +20,9 @@ from breeze_elf.audio import (
     pitch_cents_off,
     prepare_asr_audio,
     quantize_beats,
+    score_intonation,
     summarize_pitch,
+    tuning_label,
 )
 
 
@@ -740,6 +742,54 @@ class QuantizeBeatsTests(unittest.TestCase):
         self.assertEqual(quantize_beats(0.5, None), (None, ""))
         self.assertEqual(quantize_beats(None, 0.5), (None, ""))
         self.assertEqual(quantize_beats(0.0, 0.5), (None, ""))
+
+
+class IntonationScoreTests(unittest.TestCase):
+    def test_on_the_grid_scores_full_marks(self):
+        score = score_intonation([(0.0, 0.5)] * 8)
+        self.assertEqual(score.score, 100.0)
+        self.assertEqual(score.in_tune_ratio, 1.0)
+        self.assertEqual(score.off_pitch_count, 0)
+        self.assertEqual(score.counted, 8)
+
+    def test_score_falls_to_zero_between_two_semitones(self):
+        self.assertAlmostEqual(score_intonation([(50.0, 0.5)]).score, 0.0)
+        self.assertAlmostEqual(score_intonation([(25.0, 0.5)]).score, 50.0)
+        self.assertAlmostEqual(score_intonation([(-25.0, 0.5)]).score, 50.0)
+
+    def test_held_notes_weigh_more_than_passing_ones(self):
+        # One sour note held for two seconds against eight clean tenth-second
+        # ones: the score must follow what is actually heard.
+        held = score_intonation([(45.0, 2.0)] + [(0.0, 0.1)] * 8)
+        passing = score_intonation([(45.0, 0.1)] + [(0.0, 2.0)] * 8)
+        # 2 s at quality 0.1 against 0.8 s at quality 1.0 → 36; flip the
+        # durations and the same two pitches score 99.
+        self.assertLess(held.score, 40.0)
+        self.assertGreater(passing.score, 95.0)
+        self.assertGreater(passing.score - held.score, 55.0)
+
+    def test_counts_the_notes_worth_looking_at(self):
+        score = score_intonation([(5.0, 0.5), (30.0, 0.5), (44.0, 0.5), (-40.0, 0.5)])
+        self.assertEqual(score.off_pitch_count, 2)
+        self.assertAlmostEqual(score.in_tune_ratio, 0.25)
+        self.assertAlmostEqual(score.median_abs_cents, 35.0)
+
+    def test_nothing_measurable(self):
+        empty = score_intonation([(None, 0.5), (float("nan"), 0.5)])
+        self.assertIsNone(empty.score)
+        self.assertEqual(empty.counted, 0)
+        self.assertIsNone(score_intonation([]).score)
+
+    def test_zero_durations_fall_back_to_counting_notes(self):
+        score = score_intonation([(0.0, 0.0), (50.0, 0.0)])
+        self.assertAlmostEqual(score.score, 50.0)
+
+    def test_tuning_labels(self):
+        self.assertEqual(tuning_label(0.0), "準")
+        self.assertEqual(tuning_label(-20.0), "準")
+        self.assertEqual(tuning_label(30.0), "略偏")
+        self.assertEqual(tuning_label(-45.0), "走音")
+        self.assertEqual(tuning_label(None), "")
 
 
 if __name__ == "__main__":

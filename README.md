@@ -101,6 +101,30 @@ at a time. `POST /api/analyze` reports `tonicHz` plus `tonicConfidence` (the sha
 time landing on the chosen key's seven degrees, `null` when it fell back), and the 後處理
 toast shows both.
 
+### 音準 (intonation scoring)
+
+`校準音準` also scores how close the singing sits to its own tuning grid. Each note's distance
+from the nearest scale degree is weighted by how long it is held — a sustained note sung flat
+is heard, a passing one is not — and falls linearly from full marks at the grid to zero at 50
+cents, the midpoint between two semitones. The score reads as *the share of sung time that
+landed on pitch*: it appears in the 後處理 toast, per line as a `走音 N 字` chip on any line
+with notes beyond ±35 cents, and per character as 準 / 略偏 / 走音 in the detail panel.
+
+Three things it deliberately does not measure:
+
+- **Whether the right note was sung.** With no reference melody, a fifth sung perfectly in
+  tune scores full marks.
+- **Absolute pitch.** The 主音 carries the recording's own tuning, so a performance sung
+  uniformly a quarter-tone sharp still scores 100 — with no reference there is nothing for it
+  to be sharp *of*. What is scored is note-to-note consistency, which is what an unaccompanied
+  singer can be judged on at all.
+- **Glides.** A 滑音 sweeps between two degrees on purpose, so its median pitch sits between
+  them; it is excluded from both the score and the per-character label rather than counted as
+  the worst kind of 走音.
+
+Note also that a note a whole semitone off is *not* flagged: it lands squarely on the next
+degree, in tune. The band this catches is the sour, stuck-between-two-notes one.
+
 ### 節奏 (tempo and note values)
 
 A 簡譜 number on its own is one beat, so the numbers only become a score once there is a
