@@ -705,14 +705,26 @@ def _extend_attack_release(
         # attack: hold the onset pitch backward through the rising edge
         onset = f0[i]
         count, k = 0, i - 1
-        while k >= 0 and f0[k] is None and out[k] is None and count < max_bins and intensity[k] >= gate:
+        while (
+            k >= 0
+            and f0[k] is None
+            and out[k] is None
+            and count < max_bins
+            and intensity[k] >= gate
+        ):
             out[k] = onset
             k -= 1
             count += 1
         # release: hold the offset pitch forward through the decaying tail
         offset = f0[j - 1]
         count, k = 0, j
-        while k < n and f0[k] is None and out[k] is None and count < max_bins and intensity[k] >= gate:
+        while (
+            k < n
+            and f0[k] is None
+            and out[k] is None
+            and count < max_bins
+            and intensity[k] >= gate
+        ):
             out[k] = offset
             k += 1
             count += 1

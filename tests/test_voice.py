@@ -222,7 +222,6 @@ class MockEngineTests(unittest.TestCase):
         # retune levels the Chinese tone instead of letting it inflate the 高低落差.
         rate = 22_050
         count = int(rate * 0.4)
-        axis = np.arange(count) / rate
         f0 = np.linspace(260.0, 150.0, count)
         syllable = (0.5 * np.sin(2 * np.pi * np.cumsum(f0) / rate)).astype(np.float32)
         source = _estimate_median_hz(syllable, rate)
@@ -254,7 +253,9 @@ class MockEngineTests(unittest.TestCase):
     def test_resolve_song_notes_builds_contour_kind_and_breath(self):
         # A 簡譜 glide is a hold → slide → hold portamento: it starts on the first
         # degree, holds, then settles on the second.
-        glide = _resolve_song_notes([{"char": "啦", "jianpu": "1↗5", "durationSeconds": 0.5}], 220.0, False)
+        glide = _resolve_song_notes(
+            [{"char": "啦", "jianpu": "1↗5", "durationSeconds": 0.5}], 220.0, False
+        )
         self.assertEqual(glide[0]["kind"], "voiced")
         self.assertGreater(len(glide[0]["contour"]), 3)
         self.assertAlmostEqual(glide[0]["contour"][0], 220.0, delta=2.0)
@@ -277,16 +278,22 @@ class MockEngineTests(unittest.TestCase):
         )
         self.assertEqual(measured[0]["contour"], [200.0, 260.0, 320.0])
 
-        breath = _resolve_song_notes([{"kind": "breath", "intensity": 0.2, "durationSeconds": 0.2}], 0.0, True)
+        breath = _resolve_song_notes(
+            [{"kind": "breath", "intensity": 0.2, "durationSeconds": 0.2}], 0.0, True
+        )
         self.assertEqual(breath[0]["kind"], "breath")
-        rest = _resolve_song_notes([{"char": "-", "jianpu": "0", "durationSeconds": 0.2}], 220.0, False)
+        rest = _resolve_song_notes(
+            [{"char": "-", "jianpu": "0", "durationSeconds": 0.2}], 220.0, False
+        )
         self.assertEqual(rest[0]["kind"], "rest")
 
     def test_synthesize_song_follows_rising_contour(self):
         # A rising measured contour must actually rise in pitch (抑揚頓挫), not sit
         # flat like a single-pitch 簡譜 note.
         embedding = self.engine.extract_embedding(_tone(200.0), 16_000)
-        notes = [{"char": "啦", "kind": "voiced", "contour": [180, 240, 320], "durationSeconds": 0.9}]
+        notes = [
+            {"char": "啦", "kind": "voiced", "contour": [180, 240, 320], "durationSeconds": 0.9}
+        ]
         result = self.engine.synthesize_song(notes, 0.0, embedding, True)
         samples = result.samples
         third = samples.size // 3

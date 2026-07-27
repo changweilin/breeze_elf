@@ -1719,7 +1719,7 @@ async def _process_windows(
     while True:
         try:
             window = await asyncio.wait_for(state.queue.get(), timeout=0.25)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             if state.stop_event.is_set() and state.queue.empty():
                 return
             continue
@@ -1913,7 +1913,7 @@ async def _stop_state(state: StreamState, drain_timeout: float = 2.0) -> None:
         return
     try:
         await asyncio.wait_for(state.processor_task, timeout=drain_timeout)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         state.processor_task.cancel()
     except asyncio.CancelledError:
         pass

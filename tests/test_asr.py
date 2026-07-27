@@ -230,7 +230,12 @@ class BatchedFileASRTests(unittest.TestCase):
 
 class BuildASRFromEnvTests(unittest.TestCase):
     def setUp(self):
-        self.settings = get_settings()
+        # These cases are about how the *breeze* preset resolves to a model, so the
+        # provider has to be pinned: CI exports BREEZE_ASR_PROVIDER=mock, and
+        # get_settings() reads the live environment every call, which would
+        # otherwise hand every case a MockASR before the resolver is reached. The
+        # mock path has its own case below.
+        self.settings = replace(get_settings(), asr_provider="faster-whisper")
 
     def test_default_asr_model_is_breeze(self):
         self.assertEqual(self.settings.asr_model, "breeze")
