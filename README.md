@@ -101,6 +101,26 @@ at a time. `POST /api/analyze` reports `tonicHz` plus `tonicConfidence` (the sha
 time landing on the chosen key's seven degrees, `null` when it fell back), and the 後處理
 toast shows both.
 
+### 節奏 (tempo and note values)
+
+A 簡譜 number on its own is one beat, so the numbers only become a score once there is a
+beat to count them against. `校準音準` estimates one for the whole recording from its onset
+pattern — a spectral-flux envelope, autocorrelated, with the candidate tempos weighted by a
+log-Gaussian prior centred on 120 BPM — and each character's sounding length is then snapped
+to the nearest note value (十六分音符 through 全音符, including the dotted ones), shown in the
+per-character detail panel. The BPM appears in the 後處理 toast next to the 主音.
+
+Two things follow from how tempo estimation works, and both are deliberate:
+
+- **A fast song may be reported at half tempo**, with every note value doubling to match.
+  A pulse and twice that pulse are exactly as periodic, so nothing in the audio distinguishes
+  them; the prior picks the one nearer 120 BPM, and 90 BPM with quavers notates the same music
+  as 180 BPM with crotchets.
+- **Free-tempo material gets no note values at all.** Rubato singing and speech have no pulse
+  to find, and quantising against an invented one would be worse than leaving it out — on this
+  repo's own speech recordings the periodicity score is 0.21–0.25 against 0.85+ for steady
+  singing, which is where the cutoff sits.
+
 ## 歌詞對齊 (Lyrics Alignment)
 
 For a song the words are already known — what is missing is *when* each one is sung. Tap

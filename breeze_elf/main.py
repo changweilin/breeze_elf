@@ -39,6 +39,7 @@ from .audio import (
     analyze_segment,
     compute_spectrogram,
     estimate_noise_floor,
+    estimate_tempo,
     estimate_tonic,
     extend_voiced_span,
     hz_to_jianpu,
@@ -48,6 +49,7 @@ from .audio import (
     pcm16le_to_float32,
     pitch_cents_off,
     prepare_asr_audio,
+    quantize_beats,
     summarize_pitch,
 )
 from .config import get_settings
@@ -149,6 +151,10 @@ class TranscriptCharacter(BaseModel):
     intensity: float | None = None
     intensityStart: float | None = None
     intensityEnd: float | None = None
+    # Rhythm, from the offline pass only (the beat is measured over the whole
+    # recording). Kept on the model so they survive a save/restore round trip.
+    beats: float | None = None
+    noteValue: str | None = None
 
 
 class TranscriptBlock(BaseModel):
@@ -2009,15 +2015,21 @@ def _analyzed_character_payload(
     end: float,
     seg: SegmentAnalysis,
     tonic: float,
+    beat_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Per-character timing, pitch, slide, tuning, and intensity, against a
-    given 主音 (``tonic``). Shared by the live window pass and the offline pass."""
+    given 主音 (``tonic``). Shared by the live window pass and the offline pass.
+
+    ``beat_seconds`` adds the note value (八分音符 / 四分音符 …). Only the offline
+    pass has it: the beat is measured over the whole recording, which one live
+    utterance cannot see."""
     median = seg.median_hz
     start_hz = seg.start_hz or median
     end_hz = seg.end_hz or median
     single = hz_to_jianpu(median, tonic)
     glide = jianpu_glide(start_hz, end_hz, tonic) if (start_hz and end_hz) else single
     is_glide = glide != single and (_JIANPU_GLIDE_UP in glide or _JIANPU_GLIDE_DOWN in glide)
+    beats, note_value = quantize_beats(max(0.0, end - start), beat_seconds)
     return {
         "char": char,
         "startSeconds": round(start, 3),
@@ -2037,6 +2049,8 @@ def _analyzed_character_payload(
         "intensity": _round_intensity(seg.intensity),
         "intensityStart": _round_intensity(seg.intensity_start),
         "intensityEnd": _round_intensity(seg.intensity_end),
+        "beats": beats,
+        "noteValue": note_value or None,
     }
 
 
@@ -2137,13 +2151,16 @@ def _analyze_blocks_pitch(
     # every degree. Thin / tuneless material falls back to the median.
     tonic_estimate = estimate_tonic(notes)
     tonic = tonic_estimate.hz or 0.0
+    # One pulse for the whole piece, from the recording's onset pattern. Free
+    # tempo / speech reports no beat at all, and the note values stay off.
+    tempo = estimate_tempo(samples, sample_rate)
 
     # Pass 2 (0.5–1.0): rebuild 簡譜 vs the global 主音 + per-block 基頻分析.
     block_total = len(blocks) or 1
     out_blocks: list[dict[str, Any]] = []
     for block_index, (block, block_measured) in enumerate(zip(blocks, measured)):
         characters = [
-            _analyzed_character_payload(char, start, end, seg, tonic)
+            _analyzed_character_payload(char, start, end, seg, tonic, tempo.beat_seconds)
             for char, start, end, seg in block_measured
         ]
         out_blocks.append(
@@ -2167,6 +2184,8 @@ def _analyze_blocks_pitch(
         "tonicConfidence": (
             round(tonic_estimate.confidence, 2) if tonic_estimate.source == "key" else None
         ),
+        "tempoBpm": round(tempo.bpm, 1) if tempo.bpm else None,
+        "tempoConfidence": round(tempo.confidence, 2) if tempo.bpm else None,
         "characterCount": len(all_medians),
     }
 

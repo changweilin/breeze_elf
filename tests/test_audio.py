@@ -9,6 +9,7 @@ from breeze_elf.audio import (
     calculate_rms,
     clean_f0_track,
     estimate_noise_floor,
+    estimate_tempo,
     estimate_tonic,
     _extend_attack_release,
     extend_voiced_span,
@@ -18,6 +19,7 @@ from breeze_elf.audio import (
     pcm16le_to_float32,
     pitch_cents_off,
     prepare_asr_audio,
+    quantize_beats,
     summarize_pitch,
 )
 
@@ -650,6 +652,94 @@ class TonicEstimateTests(unittest.TestCase):
         # keeps plain degrees instead of a pile of octave dots.
         self._assert_tonic(_melody(130.81, _TWINKLE), 130.81)
         self._assert_tonic(_melody(523.25, _TWINKLE), 523.25)
+
+
+def _sung_notes(bpm, degrees, sample_rate=16_000, tonic_hz=261.63):
+    """A steady tune: one note per beat, each with an attack and a release so the
+    onset detector has something to find (no percussion, like real singing)."""
+    beat = 60.0 / bpm
+    out = []
+    for semitones in degrees:
+        count = int(sample_rate * beat)
+        axis = np.arange(count) / sample_rate
+        envelope = np.minimum(1.0, np.arange(count) / (0.02 * sample_rate)) * np.minimum(
+            1.0, (count - np.arange(count)) / (0.05 * sample_rate)
+        )
+        hz = tonic_hz * 2 ** (semitones / 12.0)
+        out.append((0.4 * np.sin(2 * np.pi * hz * axis) * envelope).astype(np.float32))
+    return np.concatenate(out)
+
+
+class TempoEstimateTests(unittest.TestCase):
+    def test_recovers_the_tempo_of_a_steady_tune(self):
+        for bpm in (75, 90, 120, 140):
+            estimate = estimate_tempo(_sung_notes(bpm, _TWINKLE * 3), 16_000)
+            self.assertIsNotNone(estimate.bpm, f"{bpm} BPM not detected")
+            self.assertAlmostEqual(estimate.bpm, bpm, delta=1.0)
+            self.assertAlmostEqual(estimate.beat_seconds, 60.0 / bpm, delta=0.01)
+            self.assertGreater(estimate.confidence, 0.8)
+
+    def test_a_tempo_whose_period_falls_between_frames(self):
+        # 160 BPM is 37.5 frames at a 10 ms hop. Rounding that to a whole frame
+        # is what makes an estimator report the song at half speed.
+        estimate = estimate_tempo(_sung_notes(160, _TWINKLE * 3), 16_000)
+        self.assertAlmostEqual(estimate.bpm, 160.0, delta=3.0)
+
+    def test_free_tempo_audio_reports_no_beat(self):
+        # Random syllable lengths — speech, or rubato singing. Quantising note
+        # values against an invented pulse is worse than showing none.
+        rng = np.random.default_rng(7)
+        sample_rate = 16_000
+        parts = []
+        for _ in range(40):
+            count = int(rng.uniform(0.15, 0.5) * sample_rate)
+            axis = np.arange(count) / sample_rate
+            parts.append(
+                (0.3 * np.sin(2 * np.pi * rng.uniform(120, 240) * axis) * np.hanning(count)).astype(
+                    np.float32
+                )
+            )
+            parts.append(np.zeros(int(rng.uniform(0.05, 0.5) * sample_rate), dtype=np.float32))
+        estimate = estimate_tempo(np.concatenate(parts), sample_rate)
+        self.assertIsNone(estimate.bpm)
+        self.assertIsNone(estimate.beat_seconds)
+
+    def test_silence_and_tiny_input(self):
+        self.assertIsNone(estimate_tempo(np.zeros(16_000, dtype=np.float32), 16_000).bpm)
+        self.assertIsNone(estimate_tempo(np.zeros(64, dtype=np.float32), 16_000).bpm)
+
+    def test_phase_points_at_a_note_onset(self):
+        estimate = estimate_tempo(_sung_notes(120, _TWINKLE * 3), 16_000)
+        # Notes start every 0.5 s from 0, so the downbeat must land on a
+        # multiple of the beat (within a couple of frames).
+        offset = estimate.phase_seconds % estimate.beat_seconds
+        self.assertLess(min(offset, estimate.beat_seconds - offset), 0.05)
+
+
+class QuantizeBeatsTests(unittest.TestCase):
+    def test_snaps_to_note_values(self):
+        beat = 0.5  # 120 BPM
+        cases = {
+            0.12: (0.25, "十六分音符"),
+            0.26: (0.5, "八分音符"),
+            0.38: (0.75, "附點八分音符"),
+            0.52: (1.0, "四分音符"),
+            0.78: (1.5, "附點四分音符"),
+            1.03: (2.0, "二分音符"),
+            2.1: (4.0, "全音符"),
+        }
+        for seconds, expected in cases.items():
+            self.assertEqual(quantize_beats(seconds, beat), expected, f"{seconds}s")
+
+    def test_compared_in_log_space_so_short_notes_are_not_swallowed(self):
+        # 0.3 beats is nearer 0.25 than 0.5 proportionally, even though the
+        # linear distance to each is the same.
+        self.assertEqual(quantize_beats(0.15, 0.5)[0], 0.25)
+
+    def test_no_beat_means_no_note_value(self):
+        self.assertEqual(quantize_beats(0.5, None), (None, ""))
+        self.assertEqual(quantize_beats(None, 0.5), (None, ""))
+        self.assertEqual(quantize_beats(0.0, 0.5), (None, ""))
 
 
 if __name__ == "__main__":

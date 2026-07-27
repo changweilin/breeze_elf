@@ -926,6 +926,185 @@ def estimate_tonic(
     return TonicEstimate(_place_octave(tonic_hz, float(np.median(hz_values))), confidence, "key")
 
 
+#: Note values as multiples of a beat, with their 簡譜/樂理 names. A 簡譜 number
+#: on its own is one beat; shorter notes take underlines, longer ones trailing
+#: dashes, and the dotted values add half again.
+_NOTE_VALUES = (
+    (4.0, "全音符"),
+    (3.0, "附點二分音符"),
+    (2.0, "二分音符"),
+    (1.5, "附點四分音符"),
+    (1.0, "四分音符"),
+    (0.75, "附點八分音符"),
+    (0.5, "八分音符"),
+    (0.375, "附點十六分音符"),
+    (0.25, "十六分音符"),
+)
+
+
+#: Three-frame Hann, applied to the onset envelope — see :func:`_onset_envelope`.
+_ONSET_SMOOTHING = np.array([0.25, 0.5, 0.25])
+
+
+@dataclass(frozen=True)
+class TempoEstimate:
+    """The pulse a 簡譜's note values are counted against."""
+
+    bpm: float | None
+    beat_seconds: float | None
+    #: Where the first beat falls, in seconds from the start of the audio.
+    phase_seconds: float
+    #: Normalised autocorrelation at the chosen period. Free-tempo singing and
+    #: speech score near zero — there is no pulse to find — so the caller should
+    #: leave note values off rather than quantise against a guess.
+    confidence: float
+
+
+def estimate_tempo(
+    samples: np.ndarray,
+    sample_rate: int,
+    *,
+    min_bpm: float = 60.0,
+    max_bpm: float = 200.0,
+    frame_ms: float = 10.0,
+    min_confidence: float = 0.4,
+) -> TempoEstimate:
+    """Estimate the beat from the audio's onset pattern.
+
+    A spectral-flux onset envelope is autocorrelated, and the period with the
+    strongest periodicity becomes the beat. Candidates are weighted by a
+    log-Gaussian prior centred on 120 BPM, which is what stops a tune being
+    reported at half or double speed — both are exactly as periodic, so the
+    autocorrelation alone cannot separate them. A consequence worth knowing: a
+    fast song may come back at half tempo with the note values doubled, which
+    notates the same music and is what the prior is choosing on purpose.
+
+    Returns ``bpm=None`` when nothing periodic is there. Measured on this repo's
+    own recordings, speech scores 0.21–0.25 against 0.85+ for steady singing,
+    which is where ``min_confidence`` sits — quantising a rubato performance
+    against an invented pulse is worse than showing no note values at all.
+    """
+    hop = max(1, round(sample_rate * frame_ms / 1000.0))
+    envelope = _onset_envelope(samples, hop)
+    if envelope is None:
+        return TempoEstimate(None, None, 0.0, 0.0)
+
+    frame_rate = sample_rate / hop
+    signal = envelope - envelope.mean()
+    size = signal.size
+    if size < 8 or not np.any(signal):
+        return TempoEstimate(None, None, 0.0, 0.0)
+
+    spectrum = np.fft.rfft(signal, 2 * size)
+    correlation = np.fft.irfft(spectrum * np.conj(spectrum), 2 * size)[:size]
+    if correlation[0] <= 0:
+        return TempoEstimate(None, None, 0.0, 0.0)
+    correlation = correlation / correlation[0]
+
+    # Search tempo directly rather than integer lags: a period of 37.5 frames is
+    # a real tempo (160 BPM at 10 ms frames), and rounding it to a frame is what
+    # makes an estimator report such a song at half speed.
+    tempos = np.arange(min_bpm, max_bpm + 1e-6, 0.5)
+    lags = frame_rate * 60.0 / tempos
+    usable = (lags >= 1.0) & (lags <= size - 1)
+    if not np.any(usable):
+        return TempoEstimate(None, None, 0.0, 0.0)
+    tempos, lags = tempos[usable], lags[usable]
+
+    scores = np.interp(lags, np.arange(size), correlation)
+    prior = np.exp(-0.5 * (np.log2(tempos / 120.0) / 0.9) ** 2)
+    best = int(np.argmax(scores * prior))
+    confidence = float(max(0.0, scores[best]))
+    if confidence < min_confidence:
+        return TempoEstimate(None, None, 0.0, confidence)
+
+    beat_seconds = float(lags[best]) / frame_rate
+    return TempoEstimate(
+        bpm=float(tempos[best]),
+        beat_seconds=beat_seconds,
+        phase_seconds=_beat_phase(envelope, max(1, round(lags[best]))) / frame_rate,
+        confidence=confidence,
+    )
+
+
+def quantize_beats(seconds: float | None, beat_seconds: float | None) -> tuple[float | None, str]:
+    """Snap a sounding duration to the nearest note value: ``(beats, name)``.
+
+    Compared in log space, so being 10% out weighs the same on a semiquaver as
+    on a semibreve. The character's own sounding length is used rather than the
+    gap to the next onset: a syllable held into a rest is a note plus a rest,
+    not a longer note.
+    """
+    if not seconds or not beat_seconds or seconds <= 0 or beat_seconds <= 0:
+        return None, ""
+    ratio = seconds / beat_seconds
+    return min(_NOTE_VALUES, key=lambda value: abs(math.log(ratio / value[0])))
+
+
+def _onset_envelope(
+    samples: np.ndarray, hop: int, *, n_fft: int = 512, chunk: int = 1024
+) -> np.ndarray | None:
+    """Spectral flux: how much energy *appeared* between adjacent frames.
+
+    Log-compressed first so the envelope follows perceived accents instead of
+    the loudest band, and computed in chunks because a whole recording's STFT
+    magnitudes would otherwise be held in memory all at once.
+
+    Smoothed at the end over three frames. The envelope's real time resolution
+    is the analysis window (32 ms), not the hop (10 ms), so a one-frame spike
+    over-sharpens it: an onset falling between frames alternates which frame it
+    lands on, and the autocorrelation then prefers *twice* the true period,
+    where the alternation cancels out.
+    """
+    if samples.size < n_fft + hop:
+        return None
+    count = 1 + (samples.size - n_fft) // hop
+    if count < 8:
+        return None
+
+    window = np.hanning(n_fft)
+    frames = np.lib.stride_tricks.sliding_window_view(samples.astype(np.float64), n_fft)
+    envelope = np.zeros(count - 1, dtype=np.float64)
+    previous: np.ndarray | None = None
+    for begin in range(0, count, chunk):
+        stop = min(count, begin + chunk)
+        magnitudes = np.log1p(
+            np.abs(np.fft.rfft(frames[np.arange(begin, stop) * hop] * window, axis=1))
+        )
+        if previous is not None:
+            envelope[begin - 1] = np.maximum(magnitudes[0] - previous, 0.0).sum()
+        if stop - begin > 1:
+            envelope[begin : stop - 1] = np.maximum(np.diff(magnitudes, axis=0), 0.0).sum(axis=1)
+        previous = magnitudes[-1]
+    return np.convolve(envelope, _ONSET_SMOOTHING, mode="same")
+
+
+def _refine_lag(correlation: np.ndarray, lag: int) -> float:
+    """Sub-frame period by fitting a parabola through the autocorrelation peak.
+
+    At a 10 ms frame a whole frame of error is ~2 BPM at 120 — enough to drift
+    a beat over a verse — and the peak's neighbours carry the missing fraction.
+    """
+    if lag <= 0 or lag + 1 >= correlation.size:
+        return float(lag)
+    left, centre, right = correlation[lag - 1], correlation[lag], correlation[lag + 1]
+    denominator = left - 2.0 * centre + right
+    if denominator == 0:
+        return float(lag)
+    shift = 0.5 * (left - right) / denominator
+    return float(lag) + float(np.clip(shift, -0.5, 0.5))
+
+
+def _beat_phase(envelope: np.ndarray, period: int) -> int:
+    """The offset within one period where the onsets pile up — the downbeat."""
+    if period <= 0 or envelope.size < period:
+        return 0
+    usable = envelope[: envelope.size - envelope.size % period]
+    if usable.size == 0:
+        return 0
+    return int(np.argmax(usable.reshape(-1, period).sum(axis=0)))
+
+
 def _tuning_offset_cents(cents: np.ndarray, weights: np.ndarray) -> float:
     """The recording's own tuning, as a ±50 cent shift of the semitone grid.
 

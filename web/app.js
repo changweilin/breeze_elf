@@ -1395,7 +1395,9 @@ function formatCharTime(character) {
   const ms = Number.isFinite(character.durationSeconds)
     ? Math.round(character.durationSeconds * 1000)
     : Math.round((character.endSeconds - character.startSeconds) * 1000);
-  return `${formatClockTime(character.startSeconds)}–${formatClockTime(character.endSeconds)} · ${ms}ms`;
+  const base = `${formatClockTime(character.startSeconds)}–${formatClockTime(character.endSeconds)} · ${ms}ms`;
+  // 音符時值只有後處理量到拍子時才有(自由節奏的錄音不會有)。
+  return character.noteValue ? `${base} · ${character.noteValue}` : base;
 }
 
 function formatCharFrequency(character) {
@@ -1738,6 +1740,8 @@ function normalizeCharacters(characters) {
       intensity: finiteNumber(character?.intensity),
       intensityStart: finiteNumber(character?.intensityStart),
       intensityEnd: finiteNumber(character?.intensityEnd),
+      beats: finiteNumber(character?.beats),
+      noteValue: typeof character?.noteValue === "string" ? character.noteValue : "",
     }))
     .filter((character) => character.char);
 }
@@ -4065,7 +4069,9 @@ async function analyzePitch() {
     const tonic = Number.isFinite(result.tonicHz)
       ? `,主音 ${Math.round(result.tonicHz)} Hz${confidence}`
       : "";
-    flashStats(`後處理完成(${result.characterCount || 0} 字${tonic})`);
+    // 拍子只有錄音真的有穩定節奏時才量得到;量不到就不顯示,也不會有音符時值。
+    const tempo = Number.isFinite(result.tempoBpm) ? `,${Math.round(result.tempoBpm)} BPM` : "";
+    flashStats(`後處理完成(${result.characterCount || 0} 字${tonic}${tempo})`);
   } catch (error) {
     flashStats(error.message || "後處理失敗");
   } finally {
