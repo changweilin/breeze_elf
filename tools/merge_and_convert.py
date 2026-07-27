@@ -76,7 +76,8 @@ def main() -> int:
     print(f"[ct2] {' '.join(cmd)}", flush=True)
     r = subprocess.run(cmd)
     if r.returncode != 0:
-        print("[ct2] converter failed"); return r.returncode
+        print("[ct2] converter failed")
+        return r.returncode
 
     # faster-whisper needs tokenizer.json + preprocessor_config.json + vocabulary.json
     # next to model.bin. LoRA never touches the tokenizer/preprocessor, so any file the

@@ -85,7 +85,8 @@ def main() -> int:
     sizes = [r["n"] for r in packed]
     print(f"nan clips in      : {len(nan)}  ({sum(dur.get(r['id'],0) for r in nan)/3600:.2f} h)")
     print(f"packed windows    : {len(packed)}  ({pack_dur/3600:.2f} h)  "
-          f"mean {pack_dur/max(1,len(packed)):.1f}s  clips/window {sum(sizes)/max(1,len(sizes)):.1f}")
+          f"mean {pack_dur/max(1,len(packed)):.1f}s  "
+          f"clips/window {sum(sizes)/max(1,len(sizes)):.1f}")
     print(f"unpacked kept     : {len(unpacked)}  ({args.unpacked_frac:.0%})")
     print(f"other (mir/jam)   : {len(other)}")
     print(f"TOTAL records     : {len(out_rows)}  (was {len(rows)}) "

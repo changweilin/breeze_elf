@@ -194,7 +194,9 @@ def _pick(rows, source):
     return [r for r in rows if r["id"].startswith(_PREFIX[source])]
 
 
-def build_train_rows(sources, ratio, nan_cap, mir_cap, jam_cap, seed, manifest="train") -> list[dict]:
+def build_train_rows(
+    sources, ratio, nan_cap, mir_cap, jam_cap, seed, manifest="train"
+) -> list[dict]:
     """P1: sources=[nan,mir1k] → all nan + MIR oversampled to nan:mir==ratio:1.
     P2: sources=[jamendo] → all jamendo, no oversampling."""
     rows = read_manifest(manifest)
@@ -363,7 +365,8 @@ def main() -> int:
         report_to=[],
         seed=args.seed,
     )
-    print(f"[train] ~{steps_per_epoch} optim steps/epoch, effective batch {args.batch*args.grad_accum}", flush=True)
+    eff_batch = args.batch * args.grad_accum
+    print(f"[train] ~{steps_per_epoch} optim steps/epoch, effective batch {eff_batch}", flush=True)
 
     trainer = Seq2SeqTrainer(
         model=model,
