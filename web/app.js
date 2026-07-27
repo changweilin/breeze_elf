@@ -3949,7 +3949,15 @@ async function analyzePitch() {
     state.openBlocks.clear();
     renderTranscriptView({ scrollToEnd: false });
     scheduleSessionPersist();
-    const tonic = Number.isFinite(result.tonicHz) ? `,主音 ${Math.round(result.tonicHz)} Hz` : "";
+    // 主音 comes from key detection; when it falls back to the melody's median
+    // (too few notes, or nothing that fits a key) there is no confidence to
+    // show, and the 簡譜 degrees are relative rather than the real key.
+    const confidence = Number.isFinite(result.tonicConfidence)
+      ? `,調性信心 ${Math.round(result.tonicConfidence * 100)}%`
+      : "";
+    const tonic = Number.isFinite(result.tonicHz)
+      ? `,主音 ${Math.round(result.tonicHz)} Hz${confidence}`
+      : "";
     flashStats(`後處理完成(${result.characterCount || 0} 字${tonic})`);
   } catch (error) {
     flashStats(error.message || "後處理失敗");

@@ -39,6 +39,7 @@ from .audio import (
     analyze_segment,
     compute_spectrogram,
     estimate_noise_floor,
+    estimate_tonic,
     extend_voiced_span,
     hz_to_jianpu,
     jianpu_glide,
@@ -1921,8 +1922,12 @@ def _character_payloads(
         (char, start, end, _segment_pitch(window.samples, sample_rate, start, end))
         for char, start, end in segments
     ]
-    voiced = [seg.median_hz for *_, seg in analyzed if seg.median_hz]
-    tonic = float(np.median(voiced)) if voiced else (summary.median_hz or 0.0)
+    # 主音 from key detection over this utterance's notes, weighted by how long
+    # each is held; falls back to the median pitch when one utterance is too
+    # short to show a key. The offline 校準音準 pass re-estimates it once over
+    # the whole piece, which is where the estimate is actually reliable.
+    notes = [(seg.median_hz, end - start) for _, start, end, seg in analyzed]
+    tonic = estimate_tonic(notes).hz or (summary.median_hz or 0.0)
 
     return [
         _character_payload(window, char, start, end, seg, tonic)
@@ -2051,6 +2056,7 @@ def _analyze_blocks_pitch(
     done = 0
     measured: list[list[tuple[str, float, float, SegmentAnalysis]]] = []
     all_medians: list[float] = []
+    notes: list[tuple[float, float]] = []
     # Room-tone floor for the content-aware boundary growth (task: cover the
     # sub-threshold-but-字詞 audio the live RMS VAD clipped).
     noise_floor = estimate_noise_floor(samples, sample_rate)
@@ -2066,11 +2072,16 @@ def _analyze_blocks_pitch(
             block_measured.append((char, start, end, seg))
             if seg.median_hz:
                 all_medians.append(seg.median_hz)
+                notes.append((seg.median_hz, end - start))
             if done % 8 == 0 or done == total:
                 progress(0.02 + 0.48 * min(1.0, done / total), f"分析音高 {done}/{total}")
         measured.append(block_measured)
 
-    tonic = float(np.median(all_medians)) if all_medians else 0.0
+    # One global 主音 for the whole piece, from key detection over every note in
+    # it — the median pitch is not the tonic, so writing 簡譜 against it shifts
+    # every degree. Thin / tuneless material falls back to the median.
+    tonic_estimate = estimate_tonic(notes)
+    tonic = tonic_estimate.hz or 0.0
 
     # Pass 2 (0.5–1.0): rebuild 簡譜 vs the global 主音 + per-block 基頻分析.
     block_total = len(blocks) or 1
@@ -2098,6 +2109,9 @@ def _analyze_blocks_pitch(
     return {
         "blocks": out_blocks,
         "tonicHz": round(tonic, 1) if tonic else None,
+        "tonicConfidence": (
+            round(tonic_estimate.confidence, 2) if tonic_estimate.source == "key" else None
+        ),
         "characterCount": len(all_medians),
     }
 

@@ -79,6 +79,28 @@ Click any finalized sentence to expand a detail panel listing each character's t
 frequency (or the slide's start→end), scale tuning error in cents, and intensity trend
 (漸強 / 漸弱 / 持平). This works in both plain and pitch modes.
 
+### 主音 (tonic) and key detection
+
+`1` in the 簡譜 is the **key's root**, not the melody's average pitch — a tune usually sits
+around its third or fifth, so writing 簡譜 against the median pitch transposes every degree
+(小星星 reads as `5̣ 5̣ 2 2 …` instead of `1 1 5 5 …`), and once that median lands between two
+scale tones, as it does on real singing, roughly a third to a half of the notes also come out
+with a spurious accidental. The tonic is therefore estimated by key detection:
+each note is binned into a duration-weighted pitch-class histogram (after correcting the
+recording's own tuning, so a performance sung a quarter-tone sharp still resolves to one
+key) and matched against the Krumhansl-Schmuckler key profiles, with extra weight on the
+final note because melodies resolve onto their tonic. A minor key is reported as its
+**relative major**, which is how 簡譜 writes it — `1` stays the relative major's root and
+the melody centres on `6`.
+
+When the evidence is thin (a short utterance, a sustained tone, or anything that fits no
+key — speech, for instance) it falls back to the melody's median pitch, and the degrees are
+then relative rather than the real key. `校準音準` re-estimates the tonic once over the whole
+recording, which is where the estimate is reliable; the live pass can only see one utterance
+at a time. `POST /api/analyze` reports `tonicHz` plus `tonicConfidence` (the share of sung
+time landing on the chosen key's seven degrees, `null` when it fell back), and the 後處理
+toast shows both.
+
 ## Loading Audio Files
 
 Tap `載入音檔` to analyze a recording instead of the live microphone. Loaded files request

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import logging
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -810,6 +811,153 @@ def pitch_cents_off(hz: float | None, tonic_hz: float | None) -> float | None:
         return None
     semitones = 12.0 * math.log2(hz / tonic_hz)
     return (semitones - round(semitones)) * 100.0
+
+
+# Krumhansl-Schmuckler key profiles: how stable each scale degree is perceived
+# to be in a major / minor key. Correlating a duration-weighted pitch-class
+# histogram against all 12 rotations picks the key. A plain "how many notes are
+# diatonic" score cannot do this alone — it is identical for all seven modes of
+# one scale — so the profile is what resolves the *root* within the scale.
+_KS_MAJOR = (6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88)
+_KS_MINOR = (6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17)
+# Semitones above the tonic that carry a plain (accidental-free) 簡譜 digit.
+_MAJOR_SCALE = (0, 2, 4, 5, 7, 9, 11)
+# Arbitrary anchor for the cents axis; only pitch *classes* are read off it, and
+# the octave is placed against the melody afterwards, so the value is immaterial.
+_TONIC_REF_HZ = 440.0
+
+
+@dataclass(frozen=True)
+class TonicEstimate:
+    """The 主音 a 簡譜 is written against.
+
+    ``source`` is ``key`` when the estimate came from key detection, ``median``
+    when the evidence was too thin and the melody's median pitch was used
+    instead, and ``empty`` when there was nothing to measure. ``confidence`` is
+    the share of sung time landing on the chosen key's seven degrees, and is
+    ``0`` for anything but a ``key`` estimate.
+    """
+
+    hz: float | None
+    confidence: float
+    source: str
+
+
+def estimate_tonic(
+    notes: Sequence[tuple[float | None, float]],
+    *,
+    min_notes: int = 8,
+    min_confidence: float = 0.75,
+    final_note_weight: float = 3.0,
+) -> TonicEstimate:
+    """Estimate the 主音 (the pitch that 簡譜 writes as ``1``) from sung notes.
+
+    ``notes`` is ``(hz, duration_seconds)`` per note, **in time order**. The
+    melody's *median* pitch is **not** the tonic — a tune usually sits around
+    its third or fifth, so writing 簡譜 against the median transposes every
+    degree, and once the median lands between two scale tones (which real,
+    imperfectly-tuned singing always does) a third to a half of the notes also
+    pick up a spurious accidental. Instead the notes are binned into a
+    duration-weighted pitch-class histogram (after correcting the recording's
+    own tuning) and matched against the key profiles.
+
+    A minor key is returned as its **relative major**, which is how 簡譜 writes
+    it: ``1`` stays the relative major's root and the melody centres on ``6``.
+
+    Falls back to the median when there are too few notes or the best key still
+    leaves too much of the melody off-scale — speech, or a tuneless recording,
+    should not be forced onto a key. A keyless (chromatic) melody scores around
+    ``0.6`` on that share and a real tune around ``0.95``, which is where
+    ``min_confidence`` sits between them.
+    """
+    valid = [(float(hz), float(weight)) for hz, weight in notes if hz and hz > 0]
+    if not valid:
+        return TonicEstimate(None, 0.0, "empty")
+
+    hz_values = np.array([hz for hz, _ in valid], dtype=np.float64)
+    fallback = TonicEstimate(float(np.median(hz_values)), 0.0, "median")
+    if len(valid) < min_notes:
+        return fallback
+
+    weights = np.array([weight for _, weight in valid], dtype=np.float64)
+    weights = np.where(np.isfinite(weights) & (weights > 0), weights, 0.0)
+    if not np.any(weights > 0):
+        weights = np.ones_like(hz_values)
+    # Cadence prior: a melody resolves onto its tonic, and the pitch-class
+    # histogram alone cannot separate a key from its dominant when the tune
+    # dwells on the fifth (this is what mis-reads 小蜜蜂 as G major). The boost
+    # scales the final note's own duration, so a stray short trailing note —
+    # a breath, a hallucinated character — cannot hijack the key.
+    weights = weights.copy()
+    weights[-1] *= max(1.0, final_note_weight)
+
+    cents = 1200.0 * np.log2(hz_values / _TONIC_REF_HZ)
+    offset = _tuning_offset_cents(cents, weights)
+    classes = np.mod(np.rint((cents - offset) / 100.0), 12).astype(int)
+    histogram = np.zeros(12, dtype=np.float64)
+    np.add.at(histogram, classes, weights)
+    total = float(histogram.sum())
+    if total <= 0:
+        return fallback
+    # A key needs a scale to be visible. One sustained tone, or a two-note
+    # chant, has no key to find and would otherwise "fit" any scale containing
+    # it perfectly — so require a tetrachord's worth of distinct pitch classes
+    # (ignoring slivers) before trusting the estimate over the median.
+    if int(np.count_nonzero(histogram >= total * 0.02)) < 4:
+        return fallback
+
+    best_score, best_root, best_mode = -2.0, 0, "major"
+    for mode, profile in (("major", _KS_MAJOR), ("minor", _KS_MINOR)):
+        template = np.asarray(profile, dtype=np.float64)
+        for root in range(12):
+            score = _correlation(np.roll(histogram, -root), template)
+            if score > best_score:
+                best_score, best_root, best_mode = score, root, mode
+    if best_score <= -1.5:  # every note in one pitch class → no key to find
+        return fallback
+
+    root = (best_root + 3) % 12 if best_mode == "minor" else best_root
+    diatonic = {(root + step) % 12 for step in _MAJOR_SCALE}
+    confidence = float(sum(histogram[pitch_class] for pitch_class in diatonic) / total)
+    if confidence < min_confidence:
+        return fallback
+
+    tonic_hz = _TONIC_REF_HZ * 2.0 ** ((offset + 100.0 * root) / 1200.0)
+    return TonicEstimate(_place_octave(tonic_hz, float(np.median(hz_values))), confidence, "key")
+
+
+def _tuning_offset_cents(cents: np.ndarray, weights: np.ndarray) -> float:
+    """The recording's own tuning, as a ±50 cent shift of the semitone grid.
+
+    Singing (and anything not cut to A440) sits off the nominal grid as a whole;
+    binning against the unshifted grid would smear one note across two pitch
+    classes. Averaged on the circle because the residual wraps at 100 cents.
+    """
+    angles = 2.0 * np.pi * (np.mod(cents, 100.0) / 100.0)
+    x = float(np.sum(weights * np.cos(angles)))
+    y = float(np.sum(weights * np.sin(angles)))
+    if x == 0.0 and y == 0.0:
+        return 0.0
+    return math.atan2(y, x) / (2.0 * math.pi) * 100.0
+
+
+def _correlation(values: np.ndarray, template: np.ndarray) -> float:
+    """Pearson correlation; ``-2`` (never a winner) when either side is flat."""
+    a = values - values.mean()
+    b = template - template.mean()
+    denom = float(np.sqrt(float(a @ a) * float(b @ b)))
+    if denom <= 0:
+        return -2.0
+    return float(a @ b) / denom
+
+
+def _place_octave(tonic_hz: float, reference_hz: float) -> float:
+    """Drop the tonic into the octave the melody sits in, so most notes keep the
+    plain degrees 1-7 instead of a pile of octave dots. This is the one thing
+    median-as-tonic got right, and it is preserved."""
+    if tonic_hz <= 0 or reference_hz <= 0:
+        return tonic_hz
+    return tonic_hz * 2.0 ** math.floor(math.log2(reference_hz / tonic_hz))
 
 
 def _glide_edges(

@@ -9,6 +9,7 @@ from breeze_elf.audio import (
     calculate_rms,
     clean_f0_track,
     estimate_noise_floor,
+    estimate_tonic,
     _extend_attack_release,
     extend_voiced_span,
     hz_to_jianpu,
@@ -541,6 +542,114 @@ class JianpuParseTests(unittest.TestCase):
     def test_rests_and_garbage_return_none(self):
         for token in ("", "0", "-", None, "x"):
             self.assertIsNone(jianpu_to_semitones(token))
+
+
+def _melody(tonic_hz, degrees, duration=0.4, detune_cents=0.0):
+    """(hz, seconds) notes at the given semitone offsets above ``tonic_hz``."""
+    return [
+        (tonic_hz * 2 ** ((semitones + detune_cents / 100.0) / 12.0), duration)
+        for semitones in degrees
+    ]
+
+
+# Real tunes, as semitones above their tonic. Each one's *median* pitch sits
+# well away from its tonic — writing 簡譜 against the median is the bug these
+# tests exist to catch. 小蜜蜂 dwells on the third and fifth and only touches
+# the tonic at the cadence; 五聲音階 is the pentatonic case Chinese songs hit.
+_TWINKLE = (0, 0, 7, 7, 9, 9, 7, 5, 5, 4, 4, 2, 2, 0)
+_LITTLE_BEE = (4, 2, 0, 2, 4, 4, 4, 2, 2, 2, 4, 7, 7, 4, 2, 0)
+_PENTATONIC = (0, 2, 4, 7, 9, 12, 9, 7, 4, 2, 0, 4, 7, 4, 2, 0)
+# A natural-minor tune resolving on its own root (semitones above that root).
+_MINOR_TUNE = (0, 3, 7, 3, 0, -2, 0, 3, 5, 7, 5, 3, 0, -2, 0)
+
+
+class TonicEstimateTests(unittest.TestCase):
+    def _assert_tonic(self, notes, expected_hz, *, delta_semitones=0.1):
+        estimate = estimate_tonic(notes)
+        self.assertEqual(estimate.source, "key")
+        self.assertAlmostEqual(12 * np.log2(estimate.hz / expected_hz), 0.0, delta=delta_semitones)
+        return estimate
+
+    def test_finds_the_root_not_the_median_pitch(self):
+        notes = _melody(261.63, _TWINKLE)
+        estimate = self._assert_tonic(notes, 261.63)
+        self.assertGreater(estimate.confidence, 0.95)
+        # The median pitch is 4.5 semitones above the tonic — the old 主音.
+        median = float(np.median([hz for hz, _ in notes]))
+        self.assertGreater(abs(12 * np.log2(median / estimate.hz)), 3.0)
+
+    def test_resolves_a_tune_that_dwells_on_the_fifth(self):
+        # Histogram alone reads this as G major; the cadence on the tonic is
+        # what makes it C.
+        self._assert_tonic(_melody(261.63, _LITTLE_BEE), 261.63)
+
+    def test_pentatonic_tune(self):
+        self._assert_tonic(_melody(261.63, _PENTATONIC), 261.63)
+
+    def test_every_note_lands_on_a_plain_degree(self):
+        notes = _melody(261.63, _TWINKLE)
+        estimate = estimate_tonic(notes)
+        for hz, _ in notes:
+            self.assertNotIn("#", hz_to_jianpu(hz, estimate.hz))
+
+    def test_minor_key_is_written_in_its_relative_major(self):
+        # A minor → 簡譜 convention writes 1 = C (three semitones up), so the
+        # melody centres on 6 rather than 1.
+        estimate = self._assert_tonic(_melody(220.0, _MINOR_TUNE), 220.0 * 2 ** (3 / 12.0))
+        self.assertEqual(hz_to_jianpu(220.0, estimate.hz), "6" + "̣")
+
+    def test_tracks_a_recording_tuned_off_the_grid(self):
+        # A whole performance sung 30 cents sharp still resolves to one key,
+        # shifted by that same 30 cents rather than smeared across two.
+        estimate = estimate_tonic(_melody(261.63, _TWINKLE, detune_cents=30.0))
+        self.assertEqual(estimate.source, "key")
+        self.assertAlmostEqual(12 * np.log2(estimate.hz / 261.63), 0.3, delta=0.1)
+
+    def test_long_notes_outweigh_passing_ones(self):
+        # Sustained scale tones plus fleeting chromatic passing notes: the key
+        # must come from the held pitches, not from a raw note count.
+        notes = _melody(261.63, _TWINKLE, duration=0.8)
+        notes[-1:] = _melody(261.63, (1, 3, 6, 8, 10, 1, 6, 8, 0), duration=0.02)
+        self._assert_tonic(notes, 261.63)
+
+    def test_falls_back_to_median_on_thin_evidence(self):
+        notes = _melody(261.63, (0, 4, 7))
+        estimate = estimate_tonic(notes)
+        self.assertEqual(estimate.source, "median")
+        self.assertEqual(estimate.confidence, 0.0)
+        self.assertAlmostEqual(estimate.hz, float(np.median([hz for hz, _ in notes])), places=3)
+
+    def test_falls_back_when_nothing_fits_a_key(self):
+        # A chromatic run is in no key; forcing one onto it would be worse than
+        # the median, so the estimator declines.
+        estimate = estimate_tonic(_melody(261.63, tuple(range(12)) * 2))
+        self.assertEqual(estimate.source, "median")
+
+    def test_survives_realistic_pitch_jitter(self):
+        # Real singing (and YIN's own error) never lands dead on the grid.
+        rng = np.random.default_rng(7)
+        notes = [
+            (hz * 2 ** (rng.uniform(-0.35, 0.35) / 12.0), duration + rng.uniform(-0.1, 0.1))
+            for hz, duration in _melody(261.63, _TWINKLE + _LITTLE_BEE)
+        ]
+        self._assert_tonic(notes, 261.63, delta_semitones=0.3)
+
+    def test_a_sustained_tone_has_no_key(self):
+        # One pitch class fits every scale containing it, so it would score a
+        # perfect confidence; without a scale in evidence, keep the median.
+        estimate = estimate_tonic(_melody(220.0, (0,) * 12))
+        self.assertEqual(estimate.source, "median")
+        self.assertAlmostEqual(estimate.hz, 220.0, places=3)
+
+    def test_no_notes(self):
+        self.assertEqual(estimate_tonic([]).source, "empty")
+        self.assertIsNone(estimate_tonic([(None, 0.4), (0.0, 0.4)]).hz)
+
+    def test_tonic_sits_in_the_melody_octave(self):
+        # Same key an octave apart: the tonic follows the melody so the 簡譜
+        # keeps plain degrees instead of a pile of octave dots.
+        self._assert_tonic(_melody(130.81, _TWINKLE), 130.81)
+        self._assert_tonic(_melody(523.25, _TWINKLE), 523.25)
 
 
 if __name__ == "__main__":
