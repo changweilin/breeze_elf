@@ -2101,9 +2101,15 @@ function renderSearchResults(results) {
 }
 
 function buildSearchResult(item) {
-  const entry = document.createElement("button");
-  entry.type = "button";
+  // A row wrapper (div, not button) so it can hold two actions: open the transcript,
+  // or summarise it directly. .search-result keeps the class the flex-shrink:0 list
+  // rule targets; the interactive floor now comes from the inner .search-result-open.
+  const entry = document.createElement("div");
   entry.className = "search-result";
+
+  const open = document.createElement("button");
+  open.type = "button";
+  open.className = "search-result-open";
 
   const title = document.createElement("span");
   title.className = "search-result-title";
@@ -2114,7 +2120,7 @@ function buildSearchResult(item) {
   const badges = [item.hasAudio ? "🔊" : "", item.hasJianpu ? "🎵" : ""].filter(Boolean).join(" ");
   meta.textContent = badges ? `${formatSearchDate(item.createdAt)} · ${badges}` : formatSearchDate(item.createdAt);
 
-  entry.append(title, meta);
+  open.append(title, meta);
   if (item.snippet) {
     const snippet = document.createElement("span");
     snippet.className = "search-result-snippet";
@@ -2122,12 +2128,21 @@ function buildSearchResult(item) {
     inner.className = "marquee-inner";
     inner.textContent = item.snippet;
     snippet.append(inner);
-    entry.append(snippet);
+    open.append(snippet);
     // Measure after layout: only run the marquee when the content actually
     // overflows its block, so short snippets stay still.
     requestAnimationFrame(() => setupSnippetMarquee(snippet, inner));
   }
-  entry.addEventListener("click", () => void openSearchResult(item.id));
+  open.addEventListener("click", () => void openSearchResult(item.id));
+
+  const summarize = document.createElement("button");
+  summarize.type = "button";
+  summarize.className = "search-result-summary";
+  summarize.textContent = "摘要";
+  summarize.title = "直接摘要這份逐字稿(不覆蓋目前畫面)";
+  summarize.addEventListener("click", () => void summarizeSearchResult(item.id));
+
+  entry.append(open, summarize);
   return entry;
 }
 
@@ -2177,6 +2192,28 @@ async function openSearchResult(id) {
     els.searchDialog?.close();
   } catch (error) {
     console.error("open transcript failed", error);
+    flashStats("讀取逐字稿失敗");
+  }
+}
+
+// Summarise a stored transcript straight from the search results — fetch its text and
+// hand it to the summary dialog, leaving the live/edited page on screen untouched.
+async function summarizeSearchResult(id) {
+  try {
+    const response = await fetch(`/api/transcripts/${encodeURIComponent(id)}`);
+    if (!response.ok) {
+      flashStats("讀取逐字稿失敗");
+      return;
+    }
+    const record = await response.json();
+    const text = (record.text || "").trim();
+    if (!text) {
+      flashStats("這份逐字稿沒有內容可摘要");
+      return;
+    }
+    void openSummary(text);
+  } catch (error) {
+    console.error("summarize search result failed", error);
     flashStats("讀取逐字稿失敗");
   }
 }
@@ -2290,12 +2327,14 @@ async function applyLyrics() {
 
 // --- 會後摘要 ---------------------------------------------------------------
 
-async function openSummary() {
+async function openSummary(overrideText) {
   if (DEMO_MODE) {
     flashStats("示意模式無法摘要");
     return;
   }
-  const text = state.transcript.trim();
+  // overrideText lets a searched transcript be summarised directly, without loading
+  // it over the live page; no arg falls back to the current on-screen transcript.
+  const text = (typeof overrideText === "string" ? overrideText : state.transcript).trim();
   if (!text) {
     flashStats("沒有可摘要的逐字稿");
     return;
