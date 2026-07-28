@@ -104,6 +104,8 @@ ROOT_STATIC_MEDIA_TYPES = {
     "icon-512.png": "image/png",
 }
 
+# Credit-hallucination / silence-gate detection lives in ``breeze_elf.hallucination``
+# so the offline eval metric (tools/eval_asr.py) scores the exact same decision.
 _JIANPU_GLIDE_UP = "↗"
 _JIANPU_GLIDE_DOWN = "↘"
 # How many leading characters of a *disjoint* VAD utterance may be trimmed as a
@@ -1935,13 +1937,10 @@ def _build_segmenter(sample_rate: int) -> AudioWindowBuffer | AudioUtteranceBuff
 
 
 def _should_drop_asr_result(window: AudioWindow, result: ASRResult) -> bool:
-    """Bind the live window's energy and the current thresholds to the shared gate
-    (:mod:`breeze_elf.hallucination`). The rules live there so ``tools/eval_asr.py``
-    can measure this exact decision rather than a copy of it."""
     return should_drop_text(
         result.text,
-        rms=window.rms,
-        no_speech_prob=result.no_speech_prob,
+        result.no_speech_prob,
+        window.rms,
         no_speech_threshold=settings.asr_no_speech_prob_threshold,
         rms_threshold=settings.asr_hallucination_rms_threshold,
     )
