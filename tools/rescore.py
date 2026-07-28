@@ -2,9 +2,7 @@
 
 The dumps in dataset/eval_reports/<tag>_preds/<source>.jsonl hold raw ref/hyp
 text, so a scoring-rule change (e.g. stripping the 台羅 gloss from references)
-can be applied retroactively to every model already evaluated. Only the
-text-distance metrics: 幻覺率, 對齊誤差 and RTF depend on audio and timing the dump
-does not carry, so those come from a fresh tools/eval_asr.py run.
+can be applied retroactively to every model already evaluated.
 
   .venv/Scripts/python.exe tools/rescore.py --tags breeze_baseline,breeze_lora
 """
@@ -19,18 +17,20 @@ from pathlib import Path
 import jiwer
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from eval_asr import REPORTS, SOURCE_CFG, normalize, strip_reference_gloss  # noqa: E402
+from eval_asr import (  # noqa: E402
+    REPORTS,
+    SOURCE_CFG,
+    char_cer_mer,
+    normalize,
+    strip_reference_gloss,
+)
 
 
 def score(tag: str, raw_refs: bool) -> dict:
     out: dict[str, dict] = {}
-    for source, (_lang, metric, _cc) in SOURCE_CFG.items():
-        # 幻覺率 is not a text-distance metric: its dump has empty references and
-        # scoring it as CER would report a meaningless 0. It also cannot be
-        # recomputed from text alone — the gate reads the clip's RMS and the
-        # model's no_speech_prob — so re-run tools/eval_asr.py to change it.
-        if metric == "hallucination":
-            continue
+    for source, (_lang, metric, _cc, kind) in SOURCE_CFG.items():
+        if kind != "asr":
+            continue  # negative sources have no ref/hyp CER to recompute
         path = REPORTS / f"{tag}_preds" / f"{source}.jsonl"
         if not path.exists():
             continue
@@ -48,8 +48,7 @@ def score(tag: str, raw_refs: bool) -> dict:
             hyps.append(normalize(rec["hyp"], cjk=cjk))
         res = {"n": len(refs)}
         if metric == "cer":
-            res["cer"] = round(jiwer.cer(refs, hyps), 5)
-            res["mer"] = round(jiwer.mer(refs, hyps), 5)
+            res["cer"], res["mer"] = char_cer_mer(refs, hyps)
         else:
             res["wer"] = round(jiwer.wer(refs, hyps), 5)
         out[source] = res

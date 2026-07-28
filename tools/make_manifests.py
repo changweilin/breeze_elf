@@ -9,13 +9,7 @@ Split rules (TRAINING_PLAN.md §切分規則):
 
 Text target is metadata's `transcription` column verbatim (教育部漢字 for nan,
 zh-TW lyrics for MIR-1K, lowercased en for Jamendo). Output: dataset/manifests/
-{train,dev,test}.jsonl with {id, audio, text, lang, source, split, layer}.
-
-`layer` is `lyric` or `negative`. Negatives are the empty-transcription chunks the
-dataset builder cuts from instrumental gaps (C 層, TRAINING_PLAN.md §3.3) — they
-are the training signal for "say nothing over an interlude" and the evaluation set
-for 幻覺率, so they are kept, not dropped. An empty `cv_` row is a different thing
-entirely (a hole in Common Voice's metadata, over read speech) and is still dropped.
+{train,dev,test}.jsonl with {id, audio, text, lang, source, split}.
 
 Run: .venv/Scripts/python.exe tools/make_manifests.py   (NOT `uv run` — see
 memory training-toolchain; irrelevant here but keep the habit consistent.)
@@ -46,6 +40,21 @@ MIR_TEST = "yifen"
 # Non-test nan speakers sorted by clip count (desc); these ranks become the
 # early-stopping dev set. Mid-sized so the big voices stay in training.
 NAN_DEV_SPEAKER_RANKS = slice(9, 12)
+
+# C-layer negative samples (TRAINING_PLAN.md §1.1/§3.3): clips whose target text is
+# empty on purpose — pure 間奏/前奏/伴奏/噪音 — the anti-hallucination signal. Marked
+# by a ``neg_`` id prefix. The first NEG_TEST (sorted by stem) are frozen as the
+# hallucination eval set and never enter training; the next NEG_DEV go to dev; the
+# rest become the 5–10% training replay. Empty text is the label here, so — unlike
+# every other source — an empty ``transcription`` must be kept, not dropped.
+NEG_TEST = 30
+NEG_DEV = 10
+
+
+def negative_split(rank: int) -> str:
+    """Split for the ``rank``-th negative (sorted by stem): frozen eval slice first,
+    then dev, the rest as training replay."""
+    return "test" if rank < NEG_TEST else "dev" if rank < NEG_TEST + NEG_DEV else "train"
 
 
 def read_tsv_stems(path: Path) -> set[str]:
@@ -101,27 +110,27 @@ def main() -> int:
     splits: dict[str, list[dict]] = defaultdict(list)
     counts: Counter = Counter()
     dropped: Counter = Counter()
-    negatives: Counter = Counter()
     mir_singer_split: dict[str, str] = {}
+    neg_rows: list[dict] = []
 
     for row in _rows():
         fn = row["file_name"]  # chunks/<id>.wav
         stem = Path(fn).stem
         text = (row["transcription"] or "").strip()
-        negative = not text
         rec = {
             "id": stem,
             "audio": f"dataset/{fn}",
             "text": text,
             "lang": row["language"],
             "source": row["source_dataset_or_song_id"],
-            "layer": "negative" if negative else "lyric",
         }
-        # An empty nan label is missing metadata over read speech, not an
-        # instrumental gap — there is nothing musical for the model to learn to
-        # stay silent through, so it stays dropped.
-        if negative and stem.startswith("cv_"):
-            dropped["empty_text"] += 1
+        if not text:
+            if stem.startswith("neg_"):
+                # Empty target is the label, not a defect — this is a C-layer negative.
+                rec["negative"] = True
+                neg_rows.append(rec)
+            else:
+                dropped["empty_text"] += 1
             continue
 
         if stem.startswith("cv_"):
@@ -157,13 +166,24 @@ def main() -> int:
             song = row["source_dataset_or_song_id"]
             split = "test" if song in jam_test else "dev" if song in jam_dev else "train"
             counts[("jamendo", split)] += 1
+        elif stem.startswith("speech_"):
+            # 說話回歸集(會議錄音):凍結的純說話評測,全進 test、永不訓練
+            # (TRAINING_PLAN §1.2.5,防災難性遺忘)。eval_asr 以 speech_ 前綴讀取。
+            split = "test"
+            counts[("speech", split)] += 1
         else:
             dropped["unknown_prefix"] += 1
             continue
 
         rec["split"] = split
-        if negative:
-            negatives[split] += 1
+        splits[split].append(rec)
+
+    # Split negatives deterministically by stem: the frozen eval slice first, then the
+    # dev slice, the rest as training replay. No speaker to keep disjoint here.
+    for rank, rec in enumerate(sorted(neg_rows, key=lambda r: r["id"])):
+        split = negative_split(rank)
+        rec["split"] = split
+        counts[("negatives", split)] += 1
         splits[split].append(rec)
 
     OUT.mkdir(parents=True, exist_ok=True)
@@ -175,22 +195,12 @@ def main() -> int:
 
     # --- report ---
     print("=== manifest counts (source x split) ===")
-    for src in ("nan", "mir1k", "jamendo"):
+    for src in ("nan", "mir1k", "jamendo", "speech", "negatives"):
         line = "  ".join(f"{sp}={counts[(src, sp)]:>6}" for sp in ("train", "dev", "test"))
         print(f"  {src:8} {line}")
     print("=== split totals ===")
     for split in ("train", "dev", "test"):
         print(f"  {split:6} {len(splits[split]):>6}")
-    print("=== C 層負樣本 (empty target; TRAINING_PLAN §3.3 wants 5–10% of train) ===")
-    for split in ("train", "dev", "test"):
-        total = len(splits[split])
-        share = negatives[split] / total if total else 0.0
-        flag = ""
-        if split == "train":
-            flag = "  <-- 目標 5–10%" if not 0.05 <= share <= 0.10 else ""
-        print(f"  {split:6} {negatives[split]:>6}  ({share:.1%}){flag}")
-    if not sum(negatives.values()):
-        print("  none — rebuild mixed songs with --negative_ratio to create them")
     spk_in = lambda sp: len({r["speaker"] for r in splits[sp] if r.get("speaker")})  # noqa: E731
     print("=== nan speakers (disjoint) ===")
     print(f"  train={spk_in('train')}  dev={spk_in('dev')}  test={spk_in('test')}")
