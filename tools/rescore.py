@@ -2,7 +2,9 @@
 
 The dumps in dataset/eval_reports/<tag>_preds/<source>.jsonl hold raw ref/hyp
 text, so a scoring-rule change (e.g. stripping the 台羅 gloss from references)
-can be applied retroactively to every model already evaluated.
+can be applied retroactively to every model already evaluated. Only the
+text-distance metrics: 幻覺率, 對齊誤差 and RTF depend on audio and timing the dump
+does not carry, so those come from a fresh tools/eval_asr.py run.
 
   .venv/Scripts/python.exe tools/rescore.py --tags breeze_baseline,breeze_lora
 """
@@ -23,6 +25,12 @@ from eval_asr import REPORTS, SOURCE_CFG, normalize, strip_reference_gloss  # no
 def score(tag: str, raw_refs: bool) -> dict:
     out: dict[str, dict] = {}
     for source, (_lang, metric, _cc) in SOURCE_CFG.items():
+        # 幻覺率 is not a text-distance metric: its dump has empty references and
+        # scoring it as CER would report a meaningless 0. It also cannot be
+        # recomputed from text alone — the gate reads the clip's RMS and the
+        # model's no_speech_prob — so re-run tools/eval_asr.py to change it.
+        if metric == "hallucination":
+            continue
         path = REPORTS / f"{tag}_preds" / f"{source}.jsonl"
         if not path.exists():
             continue

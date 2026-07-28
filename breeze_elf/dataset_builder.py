@@ -18,6 +18,12 @@ Pipeline per song: (optional) Demucs vocal separation -> per-language text
 normalization -> timestamps (LRC / dataset annotations, else MMS forced
 alignment) -> line merging into 1-20 s chunks -> quality filter -> export.
 
+Mixed recordings additionally export **C 層負樣本** (TRAINING_PLAN.md §3.3): the
+stretches *between* lyric lines — intro, interlude, outro — with an empty
+transcription. They are the only thing in the dataset that teaches the model to
+say nothing over instrumental music, which is where singing recognition
+hallucinates worst. See :func:`instrumental_chunks`.
+
 Dependencies: the ``enhance`` extra (CUDA torch + demucs, already installed in
 .venv) plus the ``dataset`` extra. Install the latter with ``uv pip install``,
 not ``uv sync``, so the manually-installed CUDA torch wheel is not replaced.
@@ -47,6 +53,7 @@ from __future__ import annotations
 import argparse
 import csv
 import logging
+import math
 import re
 import shutil
 import subprocess
@@ -99,6 +106,15 @@ class PipelineConfig:
     lowercase: bool = False
     nan_mapping: Path | None = None
     limit: int | None = None
+    #: Share of each mixed song's exported chunks that may be C 層負樣本 (empty
+    #: transcription over instrumental audio). TRAINING_PLAN.md §3.3 puts the
+    #: useful band at 5–10%: below it the model never learns to stay silent,
+    #: above it the empty target starts competing with the lyrics. 0 disables.
+    negative_ratio: float = 0.08
+    #: Shortest instrumental stretch worth exporting. Under a few seconds a gap
+    #: is a breath between lines, not an interlude, and the surrounding vocal
+    #: tails leak into it.
+    min_negative: float = 3.0
 
 
 # ---------------------------------------------------------------------------
@@ -270,11 +286,56 @@ def merge_lines_to_chunks(
     return chunks
 
 
-def passes_quality(samples: np.ndarray, sr: int, text: str, cfg: PipelineConfig) -> bool:
+def instrumental_chunks(
+    chunks: list[Chunk],
+    duration: float,
+    *,
+    min_dur: float,
+    max_dur: float,
+    pad: float,
+) -> list[Chunk]:
+    """The gaps around the sung chunks — intro, interludes, outro — as C 層負樣本.
+
+    Each gap is shrunk by ``pad`` at both ends, which is the same padding the
+    lyric chunks grow by: without it a negative would start on the reverb tail of
+    the line before it and teach the model to ignore a word that *was* sung.
+
+    A gap longer than ``max_dur`` is cut into equal pieces rather than truncated,
+    so a two-minute instrumental outro contributes several usable windows instead
+    of one and a discarded remainder. Pieces shorter than ``min_dur`` are dropped:
+    the caller still has to check that what is left is audible (a silent gap is
+    already handled by the RMS gate at inference and teaches nothing about music).
+    """
+    if max_dur <= 0 or min_dur <= 0:
+        return []
+    edges = [(0.0, chunks[0].start if chunks else duration)]
+    for current, following in zip(chunks, chunks[1:]):
+        edges.append((current.end, following.start))
+    if chunks:
+        edges.append((chunks[-1].end, duration))
+
+    gaps: list[Chunk] = []
+    for raw_start, raw_end in edges:
+        start, end = raw_start + pad, min(raw_end, duration) - pad
+        span = end - start
+        if span < min_dur:
+            continue
+        pieces = max(1, math.ceil(span / max_dur))
+        step = span / pieces
+        if step < min_dur:
+            continue
+        for index in range(pieces):
+            gaps.append(Chunk(start + index * step, start + (index + 1) * step, ""))
+    return gaps
+
+
+def passes_quality(
+    samples: np.ndarray, sr: int, text: str, cfg: PipelineConfig, *, allow_empty: bool = False
+) -> bool:
     duration = len(samples) / sr
     if duration < cfg.hard_min or duration > cfg.hard_max:
         return False
-    if not text.strip():
+    if not text.strip() and not allow_empty:
         return False
     from breeze_elf.audio import calculate_rms
 
@@ -599,7 +660,65 @@ def process_song(
             continue
         if writer.add_chunk(piece, out_sr, chunk.text, lang, source_id, index):
             written += 1
-    logger.info("%s: %d/%d chunks kept", source_id, written, len(chunks))
+
+    negatives = 0
+    if is_mix:
+        negatives = _write_negatives(
+            writer, out, out_sr, chunks, duration, lang=lang, source_id=source_id, cfg=cfg
+        )
+    logger.info(
+        "%s: %d/%d chunks kept (+%d 負樣本)", source_id, written, len(chunks), negatives
+    )
+    return written + negatives
+
+
+def _write_negatives(
+    writer: DatasetWriter,
+    out: np.ndarray,
+    out_sr: int,
+    chunks: list[Chunk],
+    duration: float,
+    *,
+    lang: str,
+    source_id: str,
+    cfg: PipelineConfig,
+) -> int:
+    """Export instrumental gaps as empty-target chunks, capped at ``negative_ratio``.
+
+    Only mixed recordings get here: a gap in a clean-vocal or read-speech clip is
+    silence, and silence is already covered by the RMS gate at inference. What is
+    missing from the training distribution is *loud* non-speech — the interlude a
+    model happily captions with a subtitle credit.
+
+    The cap counts against the chunks already exported for this song, so the ratio
+    is per-song rather than per-corpus: one long instrumental track cannot flood
+    the whole dataset with empty targets.
+    """
+    if cfg.negative_ratio <= 0 or not chunks:
+        return 0
+    budget = round(len(chunks) * cfg.negative_ratio / max(1e-6, 1.0 - cfg.negative_ratio))
+    if budget < 1:
+        return 0
+
+    gaps = instrumental_chunks(
+        chunks,
+        duration,
+        min_dur=max(cfg.min_negative, cfg.hard_min),
+        max_dur=cfg.max_chunk,
+        pad=cfg.pad,
+    )
+    # Longest first: the most unambiguously instrumental stretches, and stable
+    # across re-runs (ties broken by position) so a rebuild reproduces the set.
+    gaps.sort(key=lambda gap: (-(gap.end - gap.start), gap.start))
+    written = 0
+    for offset, gap in enumerate(gaps):
+        if written >= budget:
+            break
+        piece = out[int(gap.start * out_sr) : int(gap.end * out_sr)]
+        if not passes_quality(piece, out_sr, "", cfg, allow_empty=True):
+            continue
+        if writer.add_chunk(piece, out_sr, "", lang, source_id, len(chunks) + offset):
+            written += 1
     return written
 
 
@@ -951,6 +1070,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min_chunk", type=float, default=1.0)
     parser.add_argument("--max_chunk", type=float, default=20.0)
     parser.add_argument("--min_rms", type=float, default=5e-4)
+    parser.add_argument(
+        "--negative_ratio",
+        type=float,
+        default=0.08,
+        help="share of a mixed song's chunks exported as empty-target 間奏 negatives "
+        "(TRAINING_PLAN §3.3 wants 5–10%%; 0 disables)",
+    )
+    parser.add_argument(
+        "--min_negative", type=float, default=3.0, help="shortest 間奏 worth exporting (s)"
+    )
     parser.add_argument("--nan_mapping", help="from,to CSV for MOE hanzi normalization")
     parser.add_argument("--lowercase", action="store_true", help="lower-case English text")
     parser.add_argument("--limit", type=int, help="max songs/clips to process")
@@ -973,6 +1102,8 @@ def main(argv: list[str] | None = None) -> int:
         min_rms=args.min_rms,
         lowercase=args.lowercase,
         limit=args.limit,
+        negative_ratio=args.negative_ratio,
+        min_negative=args.min_negative,
     )
     nan_mapping = load_nan_mapping(Path(args.nan_mapping)) if args.nan_mapping else None
     writer = DatasetWriter(cfg.output_dir)

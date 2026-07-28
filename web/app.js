@@ -1503,28 +1503,104 @@ function renderPitchSummaryDetail(pitch) {
   return wrap;
 }
 
+// 簡譜的時值寫法,鍵是後處理量到的拍數(breeze_elf/audio.py:_NOTE_VALUES 的同一組值)。
+// 一個數字本身就是一拍(四分音符);更短的加底線,更長的用延長線,附點再加半拍。
+// 拍數是量出來的浮點數,所以用最接近的鍵去查,不做等值比較。
+const JIANPU_NOTE_SHAPES = [
+  { beats: 0.25, beams: 2, dot: false, dashes: 0, name: "十六分音符" },
+  { beats: 0.375, beams: 2, dot: true, dashes: 0, name: "附點十六分音符" },
+  { beats: 0.5, beams: 1, dot: false, dashes: 0, name: "八分音符" },
+  { beats: 0.75, beams: 1, dot: true, dashes: 0, name: "附點八分音符" },
+  { beats: 1, beams: 0, dot: false, dashes: 0, name: "四分音符" },
+  { beats: 1.5, beams: 0, dot: true, dashes: 0, name: "附點四分音符" },
+  { beats: 2, beams: 0, dot: false, dashes: 1, name: "二分音符" },
+  { beats: 3, beams: 0, dot: false, dashes: 2, name: "附點二分音符" },
+  { beats: 4, beams: 0, dot: false, dashes: 3, name: "全音符" },
+];
+
+function jianpuNoteShape(beats) {
+  if (!Number.isFinite(beats) || beats <= 0) {
+    return null;
+  }
+  // 同 quantize_beats:在 log 空間比較,不然 10% 的誤差在全音符上會被放大成整格。
+  let best = JIANPU_NOTE_SHAPES[0];
+  let bestDistance = Infinity;
+  JIANPU_NOTE_SHAPES.forEach((shape) => {
+    const distance = Math.abs(Math.log(beats / shape.beats));
+    if (distance < bestDistance) {
+      best = shape;
+      bestDistance = distance;
+    }
+  });
+  return best;
+}
+
 function renderJianpuLine(characters) {
   const line = document.createElement("div");
   line.className = "jianpu-line";
   characters.forEach((character) => {
     const cell = document.createElement("span");
     cell.className = character.jianpu ? "jianpu-char" : "jianpu-char rest";
+    // 只有後處理量到拍子時才有時值(自由節奏的錄音不會有),沒有就退回純數字。
+    const shape = character.jianpu ? jianpuNoteShape(character.beats) : null;
 
     const jp = document.createElement("span");
     jp.className = "jp";
-    jp.textContent = character.jianpu || "·";
+    const digit = document.createElement("span");
+    digit.className = "jp-digit";
+    digit.textContent = character.jianpu || "·";
+    if (shape && shape.beams > 0) {
+      // 減時線畫在數字底下(八分一條、十六分兩條)。掛在數字自己身上而不是整格,
+      // 附點才不會被底線穿過去 —— 簡譜的底線只管音符本體。
+      digit.dataset.beams = String(shape.beams);
+    }
+    jp.append(digit);
+    if (shape && shape.dot) {
+      const augmentation = document.createElement("span");
+      augmentation.className = "jp-dot";
+      augmentation.textContent = "·";
+      jp.append(augmentation);
+    }
 
     const ch = document.createElement("span");
     ch.className = "ch";
     ch.textContent = character.char;
 
     cell.append(jp, ch);
-    if (Number.isFinite(character.hz)) {
-      cell.title = `${character.char} · ${Math.round(character.hz)} Hz`;
-    }
+    cell.title = jianpuCellTitle(character, shape);
     line.append(cell);
+
+    // 延長線各占一格,跟真正的簡譜一樣(「1 - -」是三拍),所以歌詞那一列在
+    // 延長線底下是空的 —— 那個空白就是「這個字還在唱」的視覺訊息。
+    for (let index = 0; shape && index < shape.dashes; index += 1) {
+      const dash = document.createElement("span");
+      dash.className = "jianpu-char dash";
+      dash.setAttribute("aria-hidden", "true");
+      const mark = document.createElement("span");
+      mark.className = "jp";
+      const stroke = document.createElement("span");
+      stroke.className = "jp-digit";
+      stroke.textContent = "–";
+      mark.append(stroke);
+      const filler = document.createElement("span");
+      filler.className = "ch";
+      filler.textContent = "";
+      dash.append(mark, filler);
+      line.append(dash);
+    }
   });
   return line;
+}
+
+function jianpuCellTitle(character, shape) {
+  const parts = [character.char];
+  if (Number.isFinite(character.hz)) {
+    parts.push(`${Math.round(character.hz)} Hz`);
+  }
+  if (shape) {
+    parts.push(shape.name);
+  }
+  return parts.join(" · ");
 }
 
 function renderPitchSpark(pitch) {

@@ -96,9 +96,21 @@ cross-attention DTW 的產物，所以先做「把已知歌詞對到既有時間
 
 ### 1.3 落地
 
-- `training/eval/manifest.jsonl`：`{audio, text, lang, layer, singer_gender, tempo, has_accompaniment}`。
-- `training/run_eval.py`：吃 manifest + preset 名稱，輸出上述 5 個數字成 CSV，可重複執行。
-- 驗收：`uv run python -m training.run_eval --preset breeze --preset large-v3` 產出 baseline 表。
+原規劃另開 `training/` 目錄，實作時併回既有的 `tools/`——manifest 與報告格式都已經在那裡，
+再開一套只會讓兩邊的正規化規則各走各的（這正是 §P0.3 的教訓）。
+
+- `dataset/manifests/{train,dev,test}.jsonl`：`{id, audio, text, lang, source, split, layer}`。
+  `layer` 是 `lyric` / `negative`；人工標好時間軸的 clip 再加一個 `words`
+  （`[{word, start, end}]`），對齊誤差就會把那些 clip 算進去。
+- `tools/eval_asr.py`：吃 manifest + 模型路徑，**一次輸出五個數字**成
+  `dataset/eval_reports/<tag>.json`，並列出這一輪沒量到的指標與原因。
+  純函式在 `tools/eval_metrics.py`（不需要 GPU / 模型即可單元測試）。
+- 幻覺率量的是 `breeze_elf/hallucination.py` 這個**產品實際在跑的閘門**（`main.py`
+  只是把 window 能量與 settings 綁上去），不是評測工具自己複寫的一份。
+- ✅ 已完成（2026-07-28）：五個指標的量測程式與 C 層負樣本管線。**實際數字還沒跑**——
+  需要 GPU 機器、`dataset/`、以及 `speech_` 前綴的 20 段會議錄音。
+- 驗收：`.venv/Scripts/python.exe tools/eval_asr.py --model models/breeze-asr-25-ct2
+  --sources nan,mir1k,negative,speech --tag breeze_baseline` 產出 baseline 表。
 
 ---
 
@@ -161,6 +173,13 @@ cross-attention DTW 的產物，所以先做「把已知歌詞對到既有時間
 - 對清唱資料：混入伴奏（SNR −5/0/+5/+10 dB）→ 再過 Demucs → 得到「有 artifact 的人聲」。
 - pitch shift ±2 半音、time stretch ±10%、輕度 reverb；**不要**做會破壞 word timing 的增強。
 - **負樣本佔比 5–10%**：純伴奏/間奏 → 目標文字為空。這是直接對著現行幻覺痛點訓練。
+  ✅ 已實作（2026-07-28）：`dataset_builder.instrumental_chunks` 把歌詞句之間的空檔
+  （前奏／間奏／尾奏）切出來、以空字串匯出，比例由 `--negative_ratio`（預設 0.08）控制，
+  只在**有伴奏**的錄音上做——清唱與朗讀的空檔是靜音，而靜音早就被 RMS 閘門擋掉了，
+  訓練分佈缺的是**大聲的非語音**。太短的空檔（`--min_negative`，預設 3 秒）是換氣不是間奏，
+  會被丟掉；靜音的空檔也會被 RMS 門檻擋下。
+  `tools/make_manifests.py` 不再把空文字當 `dropped["empty_text"]`，而是標成
+  `layer=negative` 收進 manifest，並在報告裡印出每個 split 的負樣本比例。
 
 ---
 

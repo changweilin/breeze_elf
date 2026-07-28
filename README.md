@@ -131,8 +131,14 @@ A 簡譜 number on its own is one beat, so the numbers only become a score once 
 beat to count them against. `校準音準` estimates one for the whole recording from its onset
 pattern — a spectral-flux envelope, autocorrelated, with the candidate tempos weighted by a
 log-Gaussian prior centred on 120 BPM — and each character's sounding length is then snapped
-to the nearest note value (十六分音符 through 全音符, including the dotted ones), shown in the
-per-character detail panel. The BPM appears in the 後處理 toast next to the 主音.
+to the nearest note value (十六分音符 through 全音符, including the dotted ones). The BPM appears
+in the 後處理 toast next to the 主音.
+
+The 簡譜 view writes those note values the way a score does, rather than only naming them in
+the per-character detail panel: a 減時線 under the digit for each halving (one for 八分音符,
+two for 十六分音符), an 附點 to its right for the dotted values, and 延長線 (`1 - -`) in their
+own columns for anything longer than a beat — which is why the lyric row is blank under them.
+A digit with no marks is one beat, and a recording with no measurable pulse keeps bare digits.
 
 Two things follow from how tempo estimation works, and both are deliberate:
 
