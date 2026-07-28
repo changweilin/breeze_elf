@@ -104,7 +104,8 @@ cross-attention DTW 的產物，所以先做「把已知歌詞對到既有時間
   （`[{word, start, end}]`），對齊誤差就會把那些 clip 算進去。
 - `tools/eval_asr.py`：吃 manifest + 模型路徑，**一次輸出五個數字**成
   `dataset/eval_reports/<tag>.json`，並列出這一輪沒量到的指標與原因。
-  純函式在 `tools/eval_metrics.py`（不需要 GPU / 模型即可單元測試）。
+  純函式（CER/MER、對齊誤差、幻覺率、RTF）就在 `tools/eval_asr.py` 內，
+  不需要 GPU / 模型即可單元測試（`tests/test_eval_asr.py`）。
 - 幻覺率量的是 `breeze_elf/hallucination.py` 這個**產品實際在跑的閘門**（`main.py`
   只是把 window 能量與 settings 綁上去），不是評測工具自己複寫的一份。
 - ✅ 已完成（2026-07-28）：五個指標的量測程式與 C 層負樣本管線。**實際數字還沒跑**——
