@@ -929,6 +929,15 @@
         opacity: 0.75;
       }
 
+      /* 小節線:分隔小節的細直線,拉滿一列高度對齊音符與歌詞兩欄。 */
+      .jianpu-barline {
+        align-self: stretch;
+        width: 0;
+        margin: 0 2px;
+        border-left: 2px solid var(--muted);
+        opacity: 0.5;
+      }
+
       .pitch-spark {
         grid-column: 1 / -1;
         height: 28px;
@@ -3123,7 +3132,7 @@
       </form>
     </dialog>
 
-    <script src="./app.js?v=46" type="module"></script>
+    <script src="./app.js?v=47" type="module"></script>
     <script src="./voice.js?v=29" type="module"></script>
   </body>
 </html>

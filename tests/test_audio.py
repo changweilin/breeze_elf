@@ -6,9 +6,12 @@ from breeze_elf.audio import (
     AudioUtteranceBuffer,
     AudioWindowBuffer,
     _extend_attack_release,
+    _meter_from_accents,
     analyze_segment,
+    bar_before_flags,
     calculate_rms,
     clean_f0_track,
+    estimate_meter,
     estimate_noise_floor,
     estimate_tempo,
     estimate_tonic,
@@ -790,6 +793,71 @@ class IntonationScoreTests(unittest.TestCase):
         self.assertEqual(tuning_label(30.0), "略偏")
         self.assertEqual(tuning_label(-45.0), "走音")
         self.assertEqual(tuning_label(None), "")
+
+
+class MeterTests(unittest.TestCase):
+    def test_quadruple_accent_reads_as_common_time(self):
+        accents = np.tile([1.0, 0.2, 0.2, 0.2], 8)
+        meter = _meter_from_accents(accents)
+        self.assertEqual(meter.beats_per_measure, 4)
+        self.assertEqual(meter.downbeat_offset, 0)
+        self.assertGreater(meter.confidence, 0.12)
+
+    def test_triple_accent_reads_as_waltz(self):
+        accents = np.tile([1.0, 0.2, 0.2], 10)
+        meter = _meter_from_accents(accents)
+        self.assertEqual(meter.beats_per_measure, 3)
+        self.assertGreater(meter.confidence, 0.12)
+
+    def test_duple_accent_prefers_two_over_four(self):
+        # A strong beat every 2 correlates at 4 too; the tighter fold must win.
+        accents = np.tile([1.0, 0.2], 12)
+        meter = _meter_from_accents(accents)
+        self.assertEqual(meter.beats_per_measure, 2)
+
+    def test_downbeat_offset_tracks_the_loud_beat(self):
+        accents = np.tile([0.2, 0.2, 1.0, 0.2], 8)
+        meter = _meter_from_accents(accents)
+        self.assertEqual(meter.beats_per_measure, 4)
+        self.assertEqual(meter.downbeat_offset, 2)
+
+    def test_flat_accents_assume_common_time_without_confidence(self):
+        meter = _meter_from_accents(np.full(16, 0.5))
+        self.assertEqual(meter.beats_per_measure, 4)
+        self.assertEqual(meter.confidence, 0.0)
+
+    def test_too_few_beats_default_and_empty_gives_none(self):
+        short = _meter_from_accents(np.array([1.0, 0.2, 0.2, 0.2]))
+        self.assertEqual(short.beats_per_measure, 4)
+        self.assertEqual(short.confidence, 0.0)
+        self.assertIsNone(_meter_from_accents(np.zeros(0)).beats_per_measure)
+
+    def test_estimate_meter_without_a_beat_returns_none(self):
+        silence = np.zeros(1_000, dtype=np.float32)
+        meter = estimate_meter(silence, 16_000, estimate_tempo(silence, 16_000))
+        self.assertIsNone(meter.beats_per_measure)
+
+
+class BarLineTests(unittest.TestCase):
+    def test_marks_the_first_note_of_each_new_measure(self):
+        starts = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5]
+        flags = bar_before_flags(starts, measure_seconds=2.0, origin_seconds=0.0)
+        self.assertEqual(flags, [False, False, False, False, True, False])
+
+    def test_first_note_never_carries_a_bar_line(self):
+        flags = bar_before_flags([2.0, 4.0], measure_seconds=2.0, origin_seconds=0.0)
+        self.assertEqual(flags, [False, True])
+
+    def test_origin_shifts_the_measure_boundaries(self):
+        starts = [0.4, 0.6, 2.4, 2.6]
+        flags = bar_before_flags(starts, measure_seconds=2.0, origin_seconds=0.5)
+        self.assertEqual(flags, [False, True, False, True])
+
+    def test_no_metre_means_no_bar_lines(self):
+        self.assertEqual(
+            bar_before_flags([0.0, 1.0], measure_seconds=None, origin_seconds=0.0),
+            [False, False],
+        )
 
 
 if __name__ == "__main__":

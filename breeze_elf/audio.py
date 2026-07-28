@@ -1053,6 +1053,21 @@ class TempoEstimate:
     confidence: float
 
 
+@dataclass(frozen=True)
+class MeterEstimate:
+    """How many beats group into one 小節 (measure), and where the downbeat sits."""
+
+    #: 2 / 3 / 4. ``None`` only when there is no beat at all. Falls back to 4
+    #: (common time) whenever the accent pattern is too weak to tell metres apart.
+    beats_per_measure: int | None
+    #: Contrast between the downbeat's accent and the rest, in [0, 1]. Low values
+    #: mean "assumed 4/4", not "measured 4/4".
+    confidence: float
+    #: Which beat of the pulse the downbeat lands on, counted from ``phase_seconds``
+    #: (0 = the beat grid's own origin is already the downbeat).
+    downbeat_offset: int
+
+
 def estimate_tempo(
     samples: np.ndarray,
     sample_rate: int,
@@ -1118,6 +1133,105 @@ def estimate_tempo(
         phase_seconds=_beat_phase(envelope, max(1, round(lags[best]))) / frame_rate,
         confidence=confidence,
     )
+
+
+#: Metres tried, in preference order — a tie keeps the earlier (simpler-to-read)
+#: one, and 4 beating 2 on a strict margin is why duple songs still read as 4/4.
+_METER_CHOICES = (4, 3, 2)
+
+
+def estimate_meter(
+    samples: np.ndarray,
+    sample_rate: int,
+    tempo: TempoEstimate,
+    *,
+    frame_ms: float = 10.0,
+    min_confidence: float = 0.12,
+) -> MeterEstimate:
+    """Group the beat into a 小節 from where the loud beats recur.
+
+    Needs a beat first (``tempo`` with a pulse); free-tempo material returns no
+    metre. The onset energy is summed per beat, then folded at 2 / 3 / 4 beats:
+    the fold whose one strong position stands out most is the metre. When nothing
+    stands out the result is 4/4 with a low ``confidence`` — an assumption the
+    caller can flag rather than a measurement.
+    """
+    if not tempo.bpm or not tempo.beat_seconds:
+        return MeterEstimate(None, 0.0, 0)
+    hop = max(1, round(sample_rate * frame_ms / 1000.0))
+    envelope = _onset_envelope(samples, hop)
+    if envelope is None:
+        return MeterEstimate(4, 0.0, 0)
+    frame_rate = sample_rate / hop
+    accents = _beat_accents(
+        envelope, tempo.beat_seconds * frame_rate, tempo.phase_seconds * frame_rate
+    )
+    return _meter_from_accents(accents, min_confidence=min_confidence)
+
+
+def _beat_accents(
+    envelope: np.ndarray, beat_frames: float, phase_frames: float
+) -> np.ndarray:
+    """Onset energy summed within each beat cell of the pulse grid."""
+    if beat_frames <= 0:
+        return np.zeros(0)
+    out: list[float] = []
+    k = 0
+    while True:
+        lo = phase_frames + k * beat_frames
+        a, b = int(round(lo)), int(round(lo + beat_frames))
+        a, b = max(0, a), min(envelope.size, b)
+        if int(round(lo)) >= envelope.size:
+            break
+        out.append(float(envelope[a:b].sum()) if b > a else 0.0)
+        k += 1
+    return np.asarray(out)
+
+
+def _meter_from_accents(accents: np.ndarray, *, min_confidence: float = 0.12) -> MeterEstimate:
+    """Fold the per-beat accents at 2/3/4 and pick the clearest downbeat."""
+    if accents.size < 8 or accents.sum() <= 0:  # fewer than a couple of measures
+        return MeterEstimate(4 if accents.size else None, 0.0, 0)
+    scored: dict[int, tuple[float, int]] = {}
+    for m in _METER_CHOICES:
+        if accents.size < 2 * m:
+            continue
+        folded = accents[: accents.size - accents.size % m].reshape(-1, m)
+        means = folded.mean(axis=0)
+        pos = int(means.argmax())
+        down = float(means[pos])
+        others = float((means.sum() - down) / (m - 1))
+        scored[m] = (((down - others) / (down + others)) if down + others > 0 else 0.0, pos)
+    best_m, best_score, best_pos = 4, -1.0, 0
+    for m in _METER_CHOICES:  # 4 first, so a tie keeps common time
+        if m in scored and scored[m][0] > best_score:
+            best_score, best_pos = scored[m]
+            best_m = m
+    if best_score < min_confidence:
+        fallback_score, fallback_pos = scored.get(4, (max(0.0, best_score), 0))
+        return MeterEstimate(4, round(max(0.0, fallback_score), 3), fallback_pos)
+    return MeterEstimate(best_m, round(best_score, 3), best_pos)
+
+
+def bar_before_flags(
+    starts: Sequence[float], *, measure_seconds: float | None, origin_seconds: float
+) -> list[bool]:
+    """One flag per onset: True where a new 小節 opens on that note.
+
+    A bar line is drawn *before* a note that falls in a later measure than its
+    predecessor; the first note of a line never carries one. All-False when there
+    is no metre to count against."""
+    n = len(starts)
+    if not measure_seconds or measure_seconds <= 0:
+        return [False] * n
+    flags = [False] * n
+    previous: int | None = None
+    for i, start in enumerate(starts):
+        index = math.floor((start - origin_seconds) / measure_seconds)
+        if previous is not None and index > previous:
+            flags[i] = True
+        previous = index
+    return flags
 
 
 def quantize_beats(seconds: float | None, beat_seconds: float | None) -> tuple[float | None, str]:
