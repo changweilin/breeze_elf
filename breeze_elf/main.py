@@ -1111,6 +1111,7 @@ async def transcribe_file_endpoint(payload: FileTranscribeRequest) -> JSONRespon
                     languages=languages,
                     prompt_terms=prompt_terms,
                     batch_size=batch_size,
+                    beam_size=settings.asr_file_beam,
                 ),
             )
     except Exception as exc:

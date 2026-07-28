@@ -65,6 +65,15 @@ class ConfigTests(unittest.TestCase):
         with patch.dict(os.environ, {"BREEZE_ASR_CONTEXT_CHARS": "99999"}):
             self.assertEqual(get_settings().asr_context_chars, 2000)
 
+    def test_asr_file_beam_defaults_to_five_and_floors_at_one(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("BREEZE_ASR_FILE_BEAM", None)
+            self.assertEqual(get_settings().asr_file_beam, 5)
+        with patch.dict(os.environ, {"BREEZE_ASR_FILE_BEAM": "1"}):
+            self.assertEqual(get_settings().asr_file_beam, 1)
+        with patch.dict(os.environ, {"BREEZE_ASR_FILE_BEAM": "0"}):
+            self.assertEqual(get_settings().asr_file_beam, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

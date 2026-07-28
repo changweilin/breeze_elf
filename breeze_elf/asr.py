@@ -131,8 +131,9 @@ class MockASR:
         prompt_terms: Sequence[str] | None = None,
         context: str | None = None,
         batch_size: int = 16,
+        beam_size: int = 5,
     ) -> FileTranscription:
-        del languages, prompt_terms, context, batch_size
+        del languages, prompt_terms, context, batch_size, beam_size
         seconds = samples.size / sample_rate if sample_rate else 0
         text = f"批次測試 ({seconds:.1f}s)"
         segment = FileSegment(
@@ -283,6 +284,7 @@ class FasterWhisperASR:
         prompt_terms: Sequence[str] | None = None,
         context: str | None = None,
         batch_size: int = 16,
+        beam_size: int = 5,
     ) -> FileTranscription:
         """Transcribe a whole recording in one batched pass (3-4x throughput on long
         files). ``BatchedInferencePipeline`` runs its own internal VAD and batches the
@@ -309,6 +311,7 @@ class FasterWhisperASR:
         segments, info = self._ensure_batched().transcribe(
             audio,
             batch_size=max(1, batch_size),
+            beam_size=max(1, beam_size),
             language=whisper_language,
             task="transcribe",
             word_timestamps=True,
