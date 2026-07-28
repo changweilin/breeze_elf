@@ -9,7 +9,13 @@ Split rules (TRAINING_PLAN.md §切分規則):
 
 Text target is metadata's `transcription` column verbatim (教育部漢字 for nan,
 zh-TW lyrics for MIR-1K, lowercased en for Jamendo). Output: dataset/manifests/
-{train,dev,test}.jsonl with {id, audio, text, lang, source, split}.
+{train,dev,test}.jsonl with {id, audio, text, lang, source, split, layer}.
+
+`layer` is `lyric` or `negative`. Negatives are the empty-transcription chunks the
+dataset builder cuts from instrumental gaps (C 層, TRAINING_PLAN.md §3.3) — they
+are the training signal for "say nothing over an interlude" and the evaluation set
+for 幻覺率, so they are kept, not dropped. An empty `cv_` row is a different thing
+entirely (a hole in Common Voice's metadata, over read speech) and is still dropped.
 
 Run: .venv/Scripts/python.exe tools/make_manifests.py   (NOT `uv run` — see
 memory training-toolchain; irrelevant here but keep the habit consistent.)
@@ -95,20 +101,26 @@ def main() -> int:
     splits: dict[str, list[dict]] = defaultdict(list)
     counts: Counter = Counter()
     dropped: Counter = Counter()
+    negatives: Counter = Counter()
     mir_singer_split: dict[str, str] = {}
 
     for row in _rows():
         fn = row["file_name"]  # chunks/<id>.wav
         stem = Path(fn).stem
         text = (row["transcription"] or "").strip()
+        negative = not text
         rec = {
             "id": stem,
             "audio": f"dataset/{fn}",
             "text": text,
             "lang": row["language"],
             "source": row["source_dataset_or_song_id"],
+            "layer": "negative" if negative else "lyric",
         }
-        if not text:
+        # An empty nan label is missing metadata over read speech, not an
+        # instrumental gap — there is nothing musical for the model to learn to
+        # stay silent through, so it stays dropped.
+        if negative and stem.startswith("cv_"):
             dropped["empty_text"] += 1
             continue
 
@@ -150,6 +162,8 @@ def main() -> int:
             continue
 
         rec["split"] = split
+        if negative:
+            negatives[split] += 1
         splits[split].append(rec)
 
     OUT.mkdir(parents=True, exist_ok=True)
@@ -167,6 +181,16 @@ def main() -> int:
     print("=== split totals ===")
     for split in ("train", "dev", "test"):
         print(f"  {split:6} {len(splits[split]):>6}")
+    print("=== C 層負樣本 (empty target; TRAINING_PLAN §3.3 wants 5–10% of train) ===")
+    for split in ("train", "dev", "test"):
+        total = len(splits[split])
+        share = negatives[split] / total if total else 0.0
+        flag = ""
+        if split == "train":
+            flag = "  <-- 目標 5–10%" if not 0.05 <= share <= 0.10 else ""
+        print(f"  {split:6} {negatives[split]:>6}  ({share:.1%}){flag}")
+    if not sum(negatives.values()):
+        print("  none — rebuild mixed songs with --negative_ratio to create them")
     spk_in = lambda sp: len({r["speaker"] for r in splits[sp] if r.get("speaker")})  # noqa: E731
     print("=== nan speakers (disjoint) ===")
     print(f"  train={spk_in('train')}  dev={spk_in('dev')}  test={spk_in('test')}")

@@ -877,14 +877,54 @@
 
       .jianpu-char .ch {
         font-size: 1.18rem;
+        /* 延長線那一格的歌詞欄是空的;沒有這個高度它會塌掉,整格被 flex-end 拉到
+           底,延長線就掉到歌詞那一列去了。 */
+        min-height: 1.4rem;
       }
 
       .jianpu-char .jp {
+        display: flex;
+        align-items: baseline;
+        justify-content: center;
         min-height: 1.2em;
+        /* 讓減時線跟歌詞那一列之間留白。 */
+        margin-bottom: 3px;
         color: var(--warn);
         font-size: 0.92rem;
         font-weight: 760;
         font-variant-numeric: tabular-nums;
+      }
+
+      /* 每個數字都留出兩條減時線的空間,不管自己有沒有 —— 不然有底線的音符會被
+         padding 頂高,整行數字就參差不齊了。 */
+      .jianpu-char .jp-digit {
+        padding-bottom: 8px;
+      }
+
+      /* 減時線:八分音符一條、十六分兩條。畫成背景漸層而不是 border/box-shadow,
+         兩條線才能各自定位,而且畫在上面那塊 padding 裡不會被裁掉。 */
+      .jianpu-char .jp-digit[data-beams] {
+        background-repeat: no-repeat;
+        background-image: linear-gradient(currentColor, currentColor);
+        background-size: 100% 1.5px;
+        background-position: 0 calc(100% - 5px);
+      }
+
+      .jianpu-char .jp-digit[data-beams="2"] {
+        background-image: linear-gradient(currentColor, currentColor),
+          linear-gradient(currentColor, currentColor);
+        background-size: 100% 1.5px, 100% 1.5px;
+        background-position: 0 calc(100% - 5px), 0 calc(100% - 2px);
+      }
+
+      /* 附點加半拍,寫在數字右邊(延長線則另占一格)。減時線不穿過它。 */
+      .jp-dot {
+        margin-left: 1px;
+        font-weight: 900;
+      }
+
+      .jianpu-char.dash .jp-digit {
+        letter-spacing: -0.05em;
       }
 
       .jianpu-char.rest .jp {
