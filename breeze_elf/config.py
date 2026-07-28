@@ -121,6 +121,11 @@ class Settings:
     # POST /api/transcribe/file batched endpoint and is the batch_size. Live mic
     # streaming is never affected. Bounded to keep GPU memory sane.
     asr_file_batch_size: int = 0
+    # Beam width for the batched whole-file endpoint. 5 (default) — the §2 sweep showed
+    # beam 5 beats greedy on sung audio (mir1k CER -16%, jamendo WER lower) at ~2-3x the
+    # decode cost, which file mode can spend since it is offline. Live streaming stays at
+    # beam 1 (hardcoded in ASREngine.transcribe) so latency is untouched.
+    asr_file_beam: int = 5
     # Upper bound (decoded bytes) on a base64 PCM upload to the whole-file endpoints
     # (/api/transcribe/file, /api/enhance/separate), checked before decoding so an
     # oversized body can't OOM the host. Default ~256 MB ≈ 2.2 h of 16 kHz mono;
@@ -236,6 +241,7 @@ def get_settings() -> Settings:
         asr_hallucination_rms_threshold=_float_env("BREEZE_ASR_HALLUCINATION_RMS_THRESHOLD", 0.02),
         asr_context_chars=min(2000, max(0, _int_env("BREEZE_ASR_CONTEXT_CHARS", 0))),
         asr_file_batch_size=min(32, max(0, _int_env("BREEZE_ASR_FILE_BATCH_SIZE", 0))),
+        asr_file_beam=max(1, _int_env("BREEZE_ASR_FILE_BEAM", 5)),
         max_audio_upload_bytes=max(0, _int_env("BREEZE_MAX_AUDIO_UPLOAD_BYTES", 256_000_000)),
         stop_drain_timeout_seconds=max(0.1, _float_env("BREEZE_STOP_DRAIN_TIMEOUT_SECONDS", 60.0)),
         remote_storage_dir=os.getenv("BREEZE_REMOTE_STORAGE_DIR", "remote_transcripts"),

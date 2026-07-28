@@ -1554,6 +1554,14 @@ function renderJianpuLine(characters) {
     const hasPitch = Boolean(character.jianpu);
     const dur = hasPitch ? jianpuDuration(character.beats) : JIANPU_NO_DURATION;
 
+    // 小節線:落在新小節第一個音之前(整曲拍號分析標的 barBefore)。行首不畫。
+    if (character.barBefore && line.childElementCount > 0) {
+      const bar = document.createElement("span");
+      bar.className = "jianpu-barline";
+      bar.setAttribute("aria-hidden", "true");
+      line.append(bar);
+    }
+
     const cell = document.createElement("span");
     cell.className = hasPitch ? "jianpu-char" : "jianpu-char rest";
 
@@ -1850,6 +1858,7 @@ function normalizeCharacters(characters) {
       intensityEnd: finiteNumber(character?.intensityEnd),
       beats: finiteNumber(character?.beats),
       noteValue: typeof character?.noteValue === "string" ? character.noteValue : "",
+      barBefore: Boolean(character?.barBefore),
       tuning: typeof character?.tuning === "string" ? character.tuning : "",
     }))
     .filter((character) => character.char);
@@ -4221,10 +4230,15 @@ async function analyzePitch() {
       : "";
     // 拍子只有錄音真的有穩定節奏時才量得到;量不到就不顯示,也不會有音符時值。
     const tempo = Number.isFinite(result.tempoBpm) ? `,${Math.round(result.tempoBpm)} BPM` : "";
+    // 拍號跟著拍子走;信心低時是「假設 4/4」,標個問號提示不是量出來的。
+    const meter =
+      Number.isFinite(result.tempoBpm) && Number.isFinite(result.beatsPerMeasure)
+        ? `,${result.beatsPerMeasure}/4${(result.meterConfidence ?? 0) < 0.12 ? "?" : ""}`
+        : "";
     const intonation = Number.isFinite(result.intonation?.score)
       ? `,音準 ${Math.round(result.intonation.score)} 分`
       : "";
-    flashStats(`後處理完成(${result.characterCount || 0} 字${tonic}${tempo}${intonation})`);
+    flashStats(`後處理完成(${result.characterCount || 0} 字${tonic}${tempo}${meter}${intonation})`);
   } catch (error) {
     flashStats(error.message || "後處理失敗");
   } finally {

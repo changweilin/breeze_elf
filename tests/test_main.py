@@ -499,9 +499,10 @@ class _BatchEngine:
 
     def transcribe_file(
         self, samples, sample_rate, language, *, languages=None, prompt_terms=None,
-        context=None, batch_size=16,
+        context=None, batch_size=16, beam_size=5,
     ):
         del samples, sample_rate, language, languages, prompt_terms, context, batch_size
+        self.last_beam = beam_size
         from breeze_elf.asr import FileSegment, FileTranscription, WordTiming
 
         segment = FileSegment(
@@ -521,11 +522,14 @@ class BatchedFileEndpointTests(unittest.IsolatedAsyncioTestCase):
             sampleRate=16000,
             glossary=[{"from": "機器學習", "to": "Mike 學習"}],
         )
-        with patch.object(main, "asr_engine", _BatchEngine()), patch.object(
-            main, "settings", replace(main.settings, asr_file_batch_size=8)
+        engine = _BatchEngine()
+        with patch.object(main, "asr_engine", engine), patch.object(
+            main, "settings", replace(main.settings, asr_file_batch_size=8, asr_file_beam=5)
         ):
             response = await main.transcribe_file_endpoint(payload)
 
+        # The configured file-mode beam reaches the engine (live path is unaffected).
+        self.assertEqual(engine.last_beam, 5)
         data = json.loads(response.body)
         self.assertTrue(data["ok"])
         self.assertEqual(len(data["blocks"]), 1)

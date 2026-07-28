@@ -37,7 +37,9 @@ from .audio import (
     PitchSummary,
     SegmentAnalysis,
     analyze_segment,
+    bar_before_flags,
     compute_spectrogram,
+    estimate_meter,
     estimate_noise_floor,
     estimate_tempo,
     estimate_tonic,
@@ -1109,6 +1111,7 @@ async def transcribe_file_endpoint(payload: FileTranscribeRequest) -> JSONRespon
                     languages=languages,
                     prompt_terms=prompt_terms,
                     batch_size=batch_size,
+                    beam_size=settings.asr_file_beam,
                 ),
             )
     except Exception as exc:
@@ -2030,6 +2033,8 @@ def _analyzed_character_payload(
         "intensityEnd": _round_intensity(seg.intensity_end),
         "beats": beats,
         "noteValue": note_value or None,
+        # 小節線:offline 的整曲拍號分析才有,per-window 的 live pass 一律 False。
+        "barBefore": False,
         # 音準 is meaningless on a 滑音: it sweeps between two degrees by design,
         # so its median pitch sits between them and would read as 走音.
         "tuning": None if is_glide else (tuning_label(cents_off) or None),
@@ -2136,6 +2141,14 @@ def _analyze_blocks_pitch(
     # One pulse for the whole piece, from the recording's onset pattern. Free
     # tempo / speech reports no beat at all, and the note values stay off.
     tempo = estimate_tempo(samples, sample_rate)
+    # 拍號:把拍子折成小節。沒有拍子就沒有小節線;拍子在但拍號測不出就假設 4/4。
+    meter = estimate_meter(samples, sample_rate, tempo)
+    measure_seconds = (
+        tempo.beat_seconds * meter.beats_per_measure
+        if (tempo.beat_seconds and meter.beats_per_measure)
+        else None
+    )
+    measure_origin = tempo.phase_seconds + meter.downbeat_offset * (tempo.beat_seconds or 0.0)
 
     # Pass 2 (0.5–1.0): rebuild 簡譜 vs the global 主音 + per-block 基頻分析.
     block_total = len(blocks) or 1
@@ -2145,6 +2158,15 @@ def _analyze_blocks_pitch(
             _analyzed_character_payload(char, start, end, seg, tonic, tempo.beat_seconds)
             for char, start, end, seg in block_measured
         ]
+        for character, bar in zip(
+            characters,
+            bar_before_flags(
+                [c["startSeconds"] for c in characters],
+                measure_seconds=measure_seconds,
+                origin_seconds=measure_origin,
+            ),
+        ):
+            character["barBefore"] = bar
         out_blocks.append(
             {
                 "text": block.get("text") or "",
@@ -2174,6 +2196,9 @@ def _analyze_blocks_pitch(
         ),
         "tempoBpm": round(tempo.bpm, 1) if tempo.bpm else None,
         "tempoConfidence": round(tempo.confidence, 2) if tempo.bpm else None,
+        "tempoPhaseSeconds": round(tempo.phase_seconds, 3) if tempo.bpm else None,
+        "beatsPerMeasure": meter.beats_per_measure if tempo.bpm else None,
+        "meterConfidence": round(meter.confidence, 2) if tempo.bpm else None,
         "characterCount": len(all_medians),
     }
 

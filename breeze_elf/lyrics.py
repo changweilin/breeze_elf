@@ -220,9 +220,9 @@ def _align_indices(source: Sequence[str], target: Sequence[str]) -> tuple[list[i
     return mapping, dropped + row
 
 
-#: Public name for the optimal alignment above. `tools/eval_metrics.py` matches
-#: hand-annotated word timings against measured ones with the very same routine,
-#: so 對齊誤差 is not inflated by a second, worse matcher.
+#: Public name for the optimal alignment above — the 簡譜 lyric timeline uses this
+#: DP matcher. The 對齊誤差 metric in `tools/eval_asr.py` deliberately uses a lighter
+#: greedy matcher over gold word timings; it is a diagnostic, not this product path.
 align_indices = _align_indices
 
 
