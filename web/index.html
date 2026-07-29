@@ -259,9 +259,18 @@
       }
 
       .controls .iconbtn {
-        width: 40px;
-        min-width: 40px;
-        min-height: 42px;
+        width: 44px;
+        min-width: 44px;
+        min-height: 48px;
+      }
+
+      /* 開始/停止是最高頻的主要操作:做成吃掉整列剩餘寬度的大按鍵(圖示+文字),
+         載入/清除維持小圖示鍵——尺寸對應操作頻率。 */
+      .controls #toggle {
+        flex: 1.6 1 auto;
+        min-width: 6.5rem;
+        min-height: 48px;
+        font-size: 0.95rem;
       }
 
       /* An enabled toggle (翻譯) gets the live accent so its on/off state is obvious.
@@ -469,7 +478,8 @@
       .transcript {
         min-height: 0;
         border: 1px solid var(--line);
-        border-radius: 8px;
+        /* 與變聲頁 .voice-card 的圓角一致。 */
+        border-radius: 10px;
         background: var(--panel);
         display: grid;
         grid-template-rows: auto auto minmax(0, 1fr) auto;
@@ -524,34 +534,36 @@
         background: var(--warn);
       }
 
-      /* 逐字稿顯示頁籤(圖示分段控制):文字 / 文字+簡譜 / 基頻分析 */
+      /* 逐字稿顯示頁籤(圖示+小字分段控制):文字 / 簡譜 / 基頻。
+         與變聲頁 .subtabs 共用同一套外觀(容器/選取態/字級都一致)。 */
       .view-tabs {
-        display: flex;
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
         flex: 1 1 auto;
         min-width: 0;
-        gap: 2px;
-        padding: 3px;
+        gap: 4px;
+        padding: 4px;
         border: 1px solid var(--line);
-        border-radius: 9px;
+        border-radius: 10px;
         background: var(--panel-subtle);
       }
 
       .view-tab {
-        flex: 1 1 0;
+        min-height: 46px;
         min-width: 0;
-        min-height: 34px;
-        display: grid;
-        place-items: center;
-        padding: 0 6px;
+        padding: 4px 2px;
         border: 0;
-        border-radius: 7px;
+        border-radius: 8px;
         background: transparent;
         color: var(--muted);
         font: inherit;
-        font-weight: 700;
-        font-size: 0.8rem;
+        font-weight: 720;
         white-space: nowrap;
         cursor: pointer;
+        display: grid;
+        justify-items: center;
+        align-content: center;
+        gap: 3px;
       }
 
       .view-tab[aria-selected="true"] {
@@ -984,7 +996,7 @@
         gap: 8px;
         padding: 10px 12px;
         border: 1px solid var(--line);
-        border-radius: 8px;
+        border-radius: 10px;
         background: var(--panel);
         box-shadow: 0 1px 2px var(--shadow);
       }
@@ -1301,7 +1313,7 @@
         align-items: center;
         flex: 1 1 96px;
         min-width: 88px;
-        min-height: 42px;
+        min-height: 48px;
         border: 1px solid var(--line);
         border-radius: 8px;
         background: var(--panel);
@@ -1311,7 +1323,7 @@
       #scenario {
         width: 100%;
         min-width: 0;
-        min-height: 40px;
+        min-height: 46px;
         border: 0;
         border-radius: 8px;
         background: none;
@@ -1795,18 +1807,27 @@
 
       .voice-source {
         display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
+        /* 錄音新增是聲音庫的主要入口,佔比稍寬於上傳。 */
+        grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
         gap: 8px;
       }
-      /* 上傳 / 執行 / 清理 三顆等寬左右並排。 */
+      /* 上傳 / 執行 / 清理:執行鍵最寬(最高頻的主要操作)、上傳次之,
+         清理縮成固定寬度的小圖示鍵(低頻)——與逐字稿頁控制列同一套尺寸邏輯。 */
       .voice-source.three {
-        grid-template-columns: repeat(3, minmax(0, 1fr));
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr) 44px;
       }
 
-      /* 執行(念出來 / 唱出來)做成圖示鍵,與上傳鍵在同列右邊等寬並列。 */
+      /* 清理等低頻操作的小圖示鍵(填滿自己的窄欄)。 */
       .icon-run {
         display: grid;
         place-items: center;
+        width: 100%;
+        padding: 0;
+      }
+
+      /* 執行/上傳鍵的文字稍縮,窄螢幕三欄仍放得下。 */
+      .voice-source .btniconlabel {
+        font-size: 0.9rem;
       }
 
       /* the info "i" circle is smaller than a normal button — shrink its glyph to fit. */
@@ -2522,10 +2543,10 @@
           padding: max(12px, env(safe-area-inset-top)) 12px 8px;
         }
 
-        /* 收音鍵那列只剩 載入 / 開始 / 清除 + 情境 select(語言/翻譯/詞庫/搜尋已移入齒輪選單),
-           在手機端維持單排。 */
+        /* 控制列只剩 開始(大主鍵)/ 載入 / 情境 select / 清除(語言/翻譯/詞庫/搜尋已移入
+           齒輪選單),縮小間距讓手機端維持單排。 */
         .controls {
-          gap: 8px;
+          gap: 6px;
         }
 
         header {
@@ -2552,6 +2573,16 @@
 
         .bar-actions {
           gap: 6px;
+        }
+
+        /* 三欄操作列在窄幕縮小字級/間距並讓上傳欄多分一點寬,避免「上傳 .json」被迫折行。 */
+        .voice-source .btniconlabel {
+          font-size: 0.8rem;
+          gap: 5px;
+        }
+
+        .voice-source.three {
+          grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.4fr) 40px;
         }
 
         #lines {
@@ -2653,11 +2684,12 @@
         </div>
       </header>
 
+      <!-- 依操作頻率排尺寸:開始/停止(最高頻)是吃滿剩餘寬度的大主鍵,
+           載入與情境居中,清除(低頻、破壞性)是最右側的小圖示鍵。 -->
       <section class="controls" aria-label="controls">
         <input id="file" class="visually-hidden" type="file" accept="audio/*" />
+        <button id="toggle" class="primary btniconlabel" type="button" aria-pressed="false" aria-label="開始辨識" title="開始辨識"><svg class="ic" aria-hidden="true"><use href="#i-play"></use></svg><span class="btn-label">開始辨識</span></button>
         <button id="load" class="iconbtn" type="button" aria-label="載入音檔進行辨識" title="載入音檔進行辨識"><svg class="ic" aria-hidden="true"><use href="#i-load"></use></svg></button>
-        <button id="toggle" class="iconbtn primary" type="button" aria-pressed="false" aria-label="開始辨識" title="開始辨識"><svg class="ic" aria-hidden="true"><use href="#i-play"></use></svg></button>
-        <button id="clear" class="iconbtn" type="button" aria-label="清除逐字稿" title="清除逐字稿"><svg class="ic" aria-hidden="true"><use href="#i-trash"></use></svg></button>
         <label id="scenario-field" title="載入音檔的後製情境:音樂會先用 Demucs 分離人聲再辨識歌詞">
           <span class="visually-hidden">音檔後製情境</span>
           <select id="scenario" aria-label="音檔後製情境">
@@ -2665,14 +2697,15 @@
             <option value="music">🎵 音樂(分離人聲)</option>
           </select>
         </label>
+        <button id="clear" class="iconbtn" type="button" aria-label="清除逐字稿" title="清除逐字稿"><svg class="ic" aria-hidden="true"><use href="#i-trash"></use></svg></button>
       </section>
 
       <section class="transcript" aria-label="transcript">
         <div class="bar">
           <div class="view-tabs" role="tablist" aria-label="逐字稿顯示方式">
-            <button class="view-tab" type="button" data-view="text" role="tab" aria-selected="true" aria-label="文字" title="文字"><svg class="ic" aria-hidden="true"><use href="#i-text"></use></svg></button>
-            <button class="view-tab" type="button" data-view="jianpu" role="tab" aria-selected="false" aria-label="文字加簡譜" title="文字+簡譜"><svg class="ic" aria-hidden="true"><use href="#i-music"></use></svg></button>
-            <button class="view-tab" type="button" data-view="spectrum" role="tab" aria-selected="false" aria-label="基頻分析" title="基頻分析"><svg class="ic" aria-hidden="true"><use href="#i-wave"></use></svg></button>
+            <button class="view-tab" type="button" data-view="text" role="tab" aria-selected="true" aria-label="文字" title="文字"><svg class="ic" aria-hidden="true"><use href="#i-text"></use></svg><span class="subtab-label">文字</span></button>
+            <button class="view-tab" type="button" data-view="jianpu" role="tab" aria-selected="false" aria-label="文字加簡譜" title="文字+簡譜"><svg class="ic" aria-hidden="true"><use href="#i-music"></use></svg><span class="subtab-label">簡譜</span></button>
+            <button class="view-tab" type="button" data-view="spectrum" role="tab" aria-selected="false" aria-label="基頻分析" title="基頻分析"><svg class="ic" aria-hidden="true"><use href="#i-wave"></use></svg><span class="subtab-label">基頻</span></button>
           </div>
           <div class="bar-actions">
             <button id="analyze" class="mini iconbtn" type="button" disabled aria-label="後處理" title="後處理:用更精準的演算法重新計算每個字的音階與簡譜,並產生基頻分析(後續計算,有進度條)"><svg class="ic" aria-hidden="true"><use href="#i-wand"></use></svg></button>
@@ -2748,7 +2781,10 @@
           <img class="brand-mark" src="./favicon.svg" width="42" height="42" alt="" />
           <h1>聲音工作室</h1>
         </div>
-        <button class="theme-toggle" type="button" aria-label="切換深色模式" aria-pressed="false" title="切換深色模式">☾</button>
+        <!-- 與逐字稿頁相同的標題列結構(右側動作群)。 -->
+        <div class="header-actions">
+          <button class="theme-toggle" type="button" aria-label="切換深色模式" aria-pressed="false" title="切換深色模式">☾</button>
+        </div>
       </header>
 
       <section id="voice-progress" class="voice-progress" hidden aria-live="polite">
@@ -2792,8 +2828,8 @@
         </div>
         <p class="voice-hint voice-desc" hidden>錄一段或上傳你的聲音,系統會自動用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」重新詮釋。</p>
         <div class="voice-source three">
-          <button id="cv-upload" type="button" class="btniconlabel" title="上傳音檔並轉換" aria-label="上傳音檔並轉換 (.wav)"><svg class="ic" aria-hidden="true"><use href="#i-load"></use></svg><span class="btn-label">.wav</span></button>
-          <button id="cv-record" type="button" class="primary icon-run" data-idle-label="錄音並轉換" title="錄音並轉換" aria-label="錄音並轉換"><svg class="ic" aria-hidden="true"><use href="#i-mic"></use></svg></button>
+          <button id="cv-upload" type="button" class="btniconlabel" title="上傳音檔並轉換" aria-label="上傳音檔並轉換 (.wav)"><svg class="ic" aria-hidden="true"><use href="#i-load"></use></svg><span class="btn-label">上傳 .wav</span></button>
+          <button id="cv-record" type="button" class="primary btniconlabel" data-idle-label="錄音轉換"><svg class="ic" aria-hidden="true"><use href="#i-mic"></use></svg><span class="btn-label">錄音轉換</span></button>
           <button id="cv-clear" type="button" class="icon-run" title="清理" aria-label="清理"><svg class="ic" aria-hidden="true"><use href="#i-trash"></use></svg></button>
           <input id="cv-file" class="visually-hidden" type="file" accept="audio/*" />
         </div>
@@ -2832,8 +2868,8 @@
         </div>
         <p class="voice-hint voice-desc" hidden>輸入或上傳文字,用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」念出來。</p>
         <div class="voice-source three">
-          <button id="tts-upload" type="button" class="btniconlabel" title="上傳文字檔" aria-label="上傳文字檔 (.txt)"><svg class="ic" aria-hidden="true"><use href="#i-load"></use></svg><span class="btn-label">.txt</span></button>
-          <button id="tts-run" type="button" class="primary icon-run" title="用目標聲音念出來" aria-label="用目標聲音念出來" disabled><svg class="ic" aria-hidden="true"><use href="#i-play"></use></svg></button>
+          <button id="tts-upload" type="button" class="btniconlabel" title="上傳文字檔" aria-label="上傳文字檔 (.txt)"><svg class="ic" aria-hidden="true"><use href="#i-load"></use></svg><span class="btn-label">上傳 .txt</span></button>
+          <button id="tts-run" type="button" class="primary btniconlabel" title="用目標聲音念出來" aria-label="用目標聲音念出來" disabled><svg class="ic" aria-hidden="true"><use href="#i-play"></use></svg><span class="btn-label">念出來</span></button>
           <button id="tts-clear" type="button" class="icon-run" title="清理" aria-label="清理"><svg class="ic" aria-hidden="true"><use href="#i-trash"></use></svg></button>
         </div>
         <input id="tts-file" class="visually-hidden" type="file" accept=".txt,text/plain" />
@@ -2870,8 +2906,8 @@
           上傳逐字稿(含音高的 .json),或直接編輯下面的簡譜:<strong>一句一排</strong>,上排是<strong>簡譜</strong>(空格分隔,如 <code>1 1 5</code>;滑音用 <code>3↗5</code>;高八度加 <code>'</code>、低八度加 <code>,</code>),下排是<strong>文字</strong>(逐字),兩者可各自編輯,用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」唱出來。想依實測音高、抑揚頓挫演唱,請改用「基頻唱歌」。
         </p>
         <div class="voice-source three">
-          <button id="sing-upload" type="button" class="btniconlabel" title="上傳逐字稿 JSON" aria-label="上傳逐字稿 (.json)"><svg class="ic" aria-hidden="true"><use href="#i-load"></use></svg><span class="btn-label">.json</span></button>
-          <button id="sing-run" type="button" class="primary icon-run" title="用目標聲音唱出來" aria-label="用目標聲音唱出來" disabled><svg class="ic" aria-hidden="true"><use href="#i-play"></use></svg></button>
+          <button id="sing-upload" type="button" class="btniconlabel" title="上傳逐字稿 JSON" aria-label="上傳逐字稿 (.json)"><svg class="ic" aria-hidden="true"><use href="#i-load"></use></svg><span class="btn-label">上傳 .json</span></button>
+          <button id="sing-run" type="button" class="primary btniconlabel" title="用目標聲音唱出來" aria-label="用目標聲音唱出來" disabled><svg class="ic" aria-hidden="true"><use href="#i-play"></use></svg><span class="btn-label">唱出來</span></button>
           <button id="sing-clear" type="button" class="icon-run" title="清理" aria-label="清理"><svg class="ic" aria-hidden="true"><use href="#i-trash"></use></svg></button>
         </div>
         <input id="sing-file" class="visually-hidden" type="file" accept="application/json,.json" />
@@ -2909,8 +2945,8 @@
           載入「基頻分析(.csv)」後,下方會按段落完整呈現<strong>基頻</strong>(青色音高曲線)、<strong>強度</strong>(橘色填色)與<strong>文字</strong>(上方標記)的對應關係,再用目標聲音「<strong data-role="panel-target">尚未選擇</strong>」依實測音高、抑揚頓挫與氣音重新唱出來。CSV 由逐字稿頁「後處理」後匯出。
         </p>
         <div class="voice-source three">
-          <button id="pitch-analysis-upload" type="button" class="btniconlabel" title="載入基頻分析 CSV" aria-label="載入基頻分析 (.csv)"><svg class="ic" aria-hidden="true"><use href="#i-load"></use></svg><span class="btn-label">.csv</span></button>
-          <button id="pitch-run" type="button" class="primary icon-run" title="用目標聲音唱出來" aria-label="用目標聲音唱出來" disabled><svg class="ic" aria-hidden="true"><use href="#i-play"></use></svg></button>
+          <button id="pitch-analysis-upload" type="button" class="btniconlabel" title="載入基頻分析 CSV" aria-label="載入基頻分析 (.csv)"><svg class="ic" aria-hidden="true"><use href="#i-load"></use></svg><span class="btn-label">載入 .csv</span></button>
+          <button id="pitch-run" type="button" class="primary btniconlabel" title="用目標聲音唱出來" aria-label="用目標聲音唱出來" disabled><svg class="ic" aria-hidden="true"><use href="#i-play"></use></svg><span class="btn-label">唱出來</span></button>
           <button id="pitch-clear" type="button" class="icon-run" title="清理" aria-label="清理"><svg class="ic" aria-hidden="true"><use href="#i-trash"></use></svg></button>
         </div>
         <input id="pitch-analysis-file" class="visually-hidden" type="file" accept="text/csv,.csv" />
@@ -3132,7 +3168,7 @@
       </form>
     </dialog>
 
-    <script src="./app.js?v=47" type="module"></script>
+    <script src="./app.js?v=48" type="module"></script>
     <script src="./voice.js?v=29" type="module"></script>
   </body>
 </html>

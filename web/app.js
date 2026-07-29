@@ -58,7 +58,7 @@ const els = {
   asrSwitchStatus: document.querySelector("#asr-switch-status"),
 };
 
-// Buttons are icon-only; swap the sprite glyph instead of writing text (which would wipe the icon).
+// Sprite glyph markup for buttons whose innerHTML gets rewritten on state change.
 function iconSvg(id) {
   return `<svg class="ic" aria-hidden="true"><use href="#${id}"></use></svg>`;
 }
@@ -899,12 +899,13 @@ async function pollAsrSwitch() {
 
 function setRunning(isRunning) {
   state.running = isRunning;
+  const label = isRunning ? "停止辨識" : "開始辨識";
   els.toggle.disabled = false;
   els.toggle.classList.toggle("primary", !isRunning);
   els.toggle.classList.toggle("recording", isRunning);
-  els.toggle.innerHTML = iconSvg(isRunning ? "i-stop" : "i-play");
-  els.toggle.title = isRunning ? "停止辨識" : "開始辨識";
-  els.toggle.setAttribute("aria-label", isRunning ? "停止辨識" : "開始辨識");
+  els.toggle.innerHTML = `${iconSvg(isRunning ? "i-stop" : "i-play")}<span class="btn-label">${label}</span>`;
+  els.toggle.title = label;
+  els.toggle.setAttribute("aria-label", label);
   els.toggle.setAttribute("aria-pressed", String(isRunning));
   els.load.disabled = DEMO_MODE || isRunning;
   setAudioActions();
