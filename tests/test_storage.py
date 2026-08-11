@@ -4,7 +4,7 @@ import unittest
 from datetime import UTC, datetime
 from pathlib import Path
 
-from breeze_elf.storage import save_transcript
+from breeze_elf.storage import safe_transcript_id, save_transcript
 
 
 class StorageTests(unittest.TestCase):
@@ -108,6 +108,19 @@ class StorageTests(unittest.TestCase):
                 csv,
             )
 
+
+
+class SafeTranscriptIdTests(unittest.TestCase):
+    """The path-traversal guard behind ``GET /api/transcripts/{doc_id}``."""
+
+    def test_rejects_traversal(self):
+        for bad in ["../etc/passwd", "a/b", "x\y", "..", "", "  "]:
+            with self.assertRaises(ValueError):
+                safe_transcript_id(bad)
+
+    def test_accepts_stem(self):
+        stem = "breeze-elf-20260101-000000-hi"
+        self.assertEqual(safe_transcript_id(stem), stem)
 
 if __name__ == "__main__":
     unittest.main()

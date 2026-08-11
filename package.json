@@ -10,7 +10,9 @@
     "serve:status": "tailscale serve status",
     "models:list": "\".venv/Scripts/python.exe\" tools/deploy_model.py --list",
     "check:web": "node --check web/app.js && node --check web/voice.js && node --check web/audio-utils.js && node --check web/audio-worklet.js && node --check web/service-worker.js",
+    "check:bump": "uv run python tools/check_web_bump.py --base origin/main",
     "test": "uv run python -m unittest discover",
+    "verify": "uv sync --extra dev && uv lock --check && npm run check:web && uv run ruff check . && npm run test",
     "bench": "uv run python -m breeze_elf.benchmark",
     "bench:mock": "uv run python -m breeze_elf.benchmark --provider mock --transcribe"
   }

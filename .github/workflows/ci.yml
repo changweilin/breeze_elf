@@ -6,41 +6,42 @@ on:
     branches:
       - main
 
-jobs:
-  test:
-    runs-on: ubuntu-latest
+permissions:
+  contents: read
 
+# A newer push supersedes an in-flight run on the same branch; main is never cancelled.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  verify:
+    # pyproject declares requires-python >=3.11, so every supported version must pass.
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    uses: ./.github/workflows/verify.yml
+    with:
+      python-version: ${{ matrix.python-version }}
+      # One wheel build is enough; the packaging config does not vary by interpreter.
+      build: ${{ matrix.python-version == '3.11' }}
+
+  web-cache-bump:
+    # Hard rule: a changed web asset that keeps its old cache version makes installed
+    # PWAs load a fresh module against a stale dependency, which fails silently.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - name: Install dependencies
-        run: uv sync --extra dev
-
-      - name: Check web demo
-        run: npm run check:web
-
-      - name: Lint
-        run: uv run ruff check .
-
-      - name: Test
-        env:
-          BREEZE_ASR_PROVIDER: mock
-          BREEZE_ASR_LOAD_ON_STARTUP: "0"
-        run: uv run python -m unittest discover
-
-      - name: Build wheel
-        run: uv build --wheel
+      - name: Check cache versions were bumped
+        run: python tools/check_web_bump.py --base "origin/${{ github.base_ref }}"

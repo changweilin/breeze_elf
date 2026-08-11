@@ -1,61 +1,89 @@
-# CLAUDE.md — Breeze Elf 工作準則
+# CLAUDE.md — Breeze Elf working rules
 
-本機優先的即時語音轉錄與音樂分析工具（FastAPI + faster-whisper/CT2 後端、無框架前端），
-繁體中文為第一語言。本檔是跨對話的長期記憶：只放**不隨單一功能過期的原則與硬規則**。
+Local-first realtime speech transcription and music analysis (FastAPI + faster-whisper/CT2
+backend, frameless frontend). Traditional Chinese is the product's first language; **these
+agent-facing docs are English**. This file is long-term memory across conversations: it
+holds only principles and hard rules that do not expire with a single feature.
 
-## 文件地圖
+## Document map
 
-| 檔案 | 角色 |
+| File | Role |
 |---|---|
-| `CLAUDE.md`（本檔） | 原則與硬規則，開工前必讀 |
-| `計畫.md` | 現行待辦——下一個對話的起點，做完就更新 |
-| `TRAINING_PLAN.md` | 訓練計畫與執行紀錄（被程式碼註解引用，勿刪勿改編號） |
-| `README.md` | 使用者文件；新功能、新設定都要同步進去 |
+| `CLAUDE.md` (this file) | Principles and hard rules — read before starting |
+| `計畫.md` | Current open work — the starting point for the next conversation; update it when something lands |
+| `TRAINING_PLAN.md` | Training plan and execution log (referenced by code comments — do not delete, do not renumber sections) |
+| `README.md` | User documentation in Traditional Chinese; new features and settings must be mirrored there |
 
-（歷史：`ROADMAP.md`、`OPTIMIZATION_PLAN.md` 已全數完成並移除，經驗併入本檔；細節在 git 歷史。）
+(History: `ROADMAP.md` and `OPTIMIZATION_PLAN.md` were completed and removed; their lessons
+are folded in here, details in git history.)
 
-## 核心原則
+## Core principles
 
-1. **全本地、離線優先。** 不偷連網下載模型——模型一律指向本地目錄，缺目錄就明確報錯或
-   no-op，離線靠程式強制而非文件宣示。隱私敏感資料（音訊、聲紋、逐字稿）永不出機。
-2. **重功能一律 opt-in extra，缺依賴則 no-op。** 仿 `enhance.py` 模式：protocol + Null 實作 +
-   `build_*(settings)` 工廠，依賴或模型缺失時退回 Null，核心功能不受影響。
-3. **推論側 torch-free。** 只用 ctranslate2 + onnxruntime + numpy；訓練需要 torch 時開
-   **完全隔離的獨立環境**，絕不污染推論 venv（cuDNN/DLL 衝突踩過多次）。
-4. **授權是紅線。** NC（非商用）資料集與模型（NLLB、MIR-1K…）不預設啟用、README 明標；
-   商用線只用 Apache/CC-BY/自建資料。
-5. **沒有 baseline 不開訓、不優化。** 先量測、再改動、每項單獨量增益；免訓練的旋鈕掃描
-   順位永遠在微調之前——若旋鈕增益大於 LoRA，直接做成產品設定。結果不佳時先懷疑資料
-   而非超參（英文線 16 首歌過擬的教訓）。
-6. **單一事實來源。** 幻覺判定只在 `breeze_elf/hallucination.py`、文字正規化只在
-   `tools/text_norm.py`；評測量到的必須是產品在跑的同一份程式，不准在工具裡複寫副本。
-7. **量測程式與數字分離。** 純函式指標寫成免 GPU 可單測；評估正規化規則決定結論
-   （標點、台羅註解），改規則用 `tools/rescore.py` 回溯重算文字距離——但幻覺率、
-   對齊誤差、RTF 需要音檔與時間戳，一律重跑 `tools/eval_asr.py`。
+1. **Fully local, offline first.** Never sneak in a model download — models always point at
+   a local directory, and a missing directory must raise a clear error or no-op. Offline is
+   enforced by code, not declared in docs. Privacy-sensitive data (audio, voice prints,
+   transcripts) never leaves the machine.
+2. **Heavy features are opt-in extras that no-op when dependencies are missing.** Follow the
+   `enhance.py` pattern: protocol + Null implementation + `build_*(settings)` factory. When
+   a dependency or model is absent, fall back to Null; core functionality is unaffected.
+3. **The inference side stays torch-free** — ctranslate2 + onnxruntime + numpy only. When
+   training needs torch, use a **fully isolated environment**; never contaminate the
+   inference venv (cuDNN/DLL conflicts have bitten repeatedly).
+4. **Licensing is a red line.** NC (non-commercial) datasets and models (NLLB, MIR-1K, …)
+   are never enabled by default and are labelled in README; the commercial line uses only
+   Apache/CC-BY/self-built data.
+5. **No baseline, no training and no optimisation.** Measure first, then change, and measure
+   each change's gain separately. Training-free knob sweeps always outrank fine-tuning — if
+   a knob beats LoRA, ship the knob as a product setting. When results are poor, suspect the
+   data before the hyperparameters (the English line overfitting on 16 songs).
+6. **Single source of truth.** Hallucination decisions live only in
+   `breeze_elf/hallucination.py`; text normalisation only in `tools/text_norm.py`. What the
+   evaluation measures must be the same code the product runs — never write a second copy
+   inside a tool.
+7. **Separate measurement code from numbers.** Pure metric functions must be unit-testable
+   without a GPU. Evaluation normalisation rules determine the conclusions (punctuation,
+   Tâi-lô glosses); after changing a rule, recompute text distances from stored predictions
+   with `tools/rescore.py`. Hallucination rate, alignment error and RTF need audio and
+   timestamps, so those always require re-running `tools/eval_asr.py`.
 
-## 環境與指令
+## Environment and commands
 
-- Python **>=3.11**（onnxruntime 1.24 起無 cp310 wheel）。
-- 開發驗證照 CI 順序跑：`uv sync --extra dev` → `ruff check .` →
-  `BREEZE_ASR_PROVIDER=mock` + `unittest discover` → `uv build --wheel`。
-- **訓練／評估一律 `.venv/Scripts/python.exe` 直呼，禁止 `uv run`**——它會把
-  `tokenizers` sync 回 0.23.1 炸掉 transformers（訓練堆疊釘 0.22.2），也可能把手動裝的
-  CUDA torch 換成 CPU 版。
-- 新測試寫成 `unittest.TestCase`：CI 用 `unittest discover`，pytest 風格的 module-level
-  function 在 CI 是**沒有跑到的**。
+- Python **>=3.11** (onnxruntime ships no cp310 wheel from 1.24 on). CI runs the matrix
+  3.11 / 3.12 / 3.13.
+- **`npm run verify`** runs the same sequence CI does: `uv sync --extra dev` →
+  `uv lock --check` → `npm run check:web` → `ruff check .` → `unittest discover`.
+  `.github/workflows/verify.yml` is the single definition of that sequence; `ci.yml` and
+  `release.yml` both call it so release checks cannot drift from PR checks.
+- **Training and evaluation call `.venv/Scripts/python.exe` directly; never `uv run`** — it
+  syncs `tokenizers` back to 0.23.1 and breaks transformers (the training stack pins
+  0.22.2), and it can replace the manually installed CUDA torch with the CPU build.
+- Write new tests as `unittest.TestCase`. CI runs `unittest discover`, so pytest-style
+  module-level functions **never execute in CI**.
 
-## 硬性規則（違反必炸）
+## Hard rules (violating these breaks things)
 
-1. **永不覆蓋 `models/breeze-asr-25-ct2`**——原始與微調版都要留著才能 A/B。
-2. **preset 有兩條註冊路徑**：env-var 閘控的內建 preset 在 process 啟動時讀（要重啟）；
-   `tools/deploy_model.py` 寫進 `models/presets.json` 的動態註冊每 request 重讀（免重啟）。
-   要讓手機立刻看到就走後者。
-3. **改 `web/app.js` 必 bump `?v=` + service worker cache**，否則使用者拿到舊版。
-4. **transcript block 加新欄位要同步三處**：`serializeBlocksForSave`（白名單）、
-   `normalizeTranscriptBlockForRestore`、session persist——少一處就不會存／還原。
-5. **speaker／translation 等衍生資訊只掛 `final` 事件**，不掛低延遲的 `partial`。
-6. **模型轉檔（HF → CT2）後必跑 round-trip 一致性測試**——轉檔的靜默錯誤最難查
-   （NLLB flores 語碼 token 不在 sentencepiece 的教訓）。
-7. **共用的推論物件在 `asr_concurrency > 1` 下要有 inference lock**（仿 `DeepFilterEnhancer._lock`）。
-8. **微調不能弄壞 word timestamps**——簡譜、歌詞對齊、音準評分全掛在它上面；
-   Breeze 線每次訓練必跑說話回歸集，相對退步 ≥5% 就回滾。
+1. **Never overwrite `models/breeze-asr-25-ct2`** — the stock and fine-tuned models must
+   both exist for A/B.
+2. **Presets have two registration paths.** Env-var-gated builtin presets are read at
+   process start (restart required); dynamic entries written to `models/presets.json` by
+   `tools/deploy_model.py` are re-read on every request (no restart). Use the latter to make
+   something appear on the phone immediately.
+3. **Changing `web/app.js` requires bumping `?v=` and the service worker cache**, or users
+   get the stale version. If a shared module's *exports* change, bump the `?v=` on the
+   import specifier too. Enforced two ways: `tests/test_web_assets.py` checks the versions
+   agree across index.html / import specifiers / service-worker ASSETS, and the CI job
+   `web-cache-bump` (`tools/check_web_bump.py`) fails a PR that edits a cached asset
+   without moving `CACHE_NAME` and that file's `?v=`.
+4. **Adding a field to a transcript block means editing three places**:
+   `serializeBlocksForSave` (whitelist), `normalizeTranscriptBlockForRestore`, and session
+   persist. Miss one and it will not save or will not restore.
+5. **Derived data (speaker, translation, …) attaches to `final` events only**, never to the
+   low-latency `partial`.
+6. **Run a round-trip consistency test after any model conversion (HF → CT2)** — silent
+   conversion errors are the hardest to find (the NLLB flores language-code tokens missing
+   from sentencepiece).
+7. **Shared inference objects need an inference lock when `asr_concurrency > 1`**
+   (mirror `DeepFilterEnhancer._lock`).
+8. **Fine-tuning must not break word timestamps** — jianpu, lyric alignment and intonation
+   scoring all depend on them. Every Breeze training run must execute the speech regression
+   set; roll back on a relative regression of ≥5 %.
