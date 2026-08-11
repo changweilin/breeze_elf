@@ -1,17 +1,15 @@
 name: Web Demo
 
+# Publishes web/ to GitHub Pages as the no-backend demo. Syntax and cache-version checks
+# are not repeated here - CI already runs them on the pull request that produced this
+# commit, and a third copy would just be another place to forget to update.
+
 on:
-  pull_request:
-    paths:
-      - "web/**"
-      - "package.json"
-      - ".github/workflows/web-demo.yml"
   push:
     branches:
       - main
     paths:
       - "web/**"
-      - "package.json"
       - ".github/workflows/web-demo.yml"
   workflow_dispatch:
 
@@ -23,30 +21,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - name: Check static web files
-        run: npm run check:web
-
-      - name: Upload Pages artifact
-        if: github.event_name != 'pull_request'
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: web
-
   deploy:
-    if: github.event_name != 'pull_request'
-    needs: build
     runs-on: ubuntu-latest
 
     permissions:
@@ -58,6 +33,14 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4

@@ -67,6 +67,10 @@ packages = ["breeze_elf"]
 force-include = { "web" = "breeze_elf/web" }
 
 [tool.pytest.ini_options]
+# pytest is a local convenience only (`-k` filtering, nicer diffs) and runs the same
+# unittest.TestCase classes. CI is `unittest discover`, which collects NOTHING from
+# pytest-style module-level `def test_*` — a file written that way reports green while
+# testing nothing. tests/test_web_assets.py enforces this; do not import pytest in tests.
 testpaths = ["tests"]
 
 [tool.ruff]

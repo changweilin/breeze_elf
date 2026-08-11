@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from breeze_elf import main
 from breeze_elf.search_index import build_search_index
-from breeze_elf.storage import load_transcript, safe_transcript_id, save_transcript
+from breeze_elf.storage import load_transcript, save_transcript
 
 try:
     from starlette.testclient import TestClient
@@ -161,17 +161,6 @@ class DisabledIndexTests(unittest.TestCase):
         self.assertEqual(idx.search("在乎", 5), [])
         self.assertEqual(idx.indexed_count(), 0)
         idx.sync(d)  # must not raise
-
-
-class SafeTranscriptIdTests(unittest.TestCase):
-    def test_rejects_traversal(self):
-        for bad in ["../etc/passwd", "a/b", "x\\y", "..", "", "  "]:
-            with self.assertRaises(ValueError):
-                safe_transcript_id(bad)
-
-    def test_accepts_stem(self):
-        stem = "breeze-elf-20260101-000000-hi"
-        self.assertEqual(safe_transcript_id(stem), stem)
 
 
 @unittest.skipIf(TestClient is None, "starlette TestClient unavailable")

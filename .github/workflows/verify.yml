@@ -1,0 +1,68 @@
+name: Verify
+
+# The single definition of "is this repo green". CI and Release both call it, so the
+# checks a release runs can never drift from the checks a pull request runs.
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        description: Python version to verify against.
+        type: string
+        default: "3.11"
+      build:
+        description: Build the wheel as a smoke test of the packaging config.
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      # A drifted lock silently installs something other than what is committed.
+      - name: Check lockfile is current
+        run: uv lock --check
+
+      - name: Check web bundle syntax
+        run: npm run check:web
+
+      - name: Lint
+        run: uv run ruff check .
+
+      # BREEZE_ASR_PROVIDER=mock keeps the suite off Whisper: no model download, no GPU,
+      # no network. Every test that needs a real engine must skip itself.
+      - name: Test
+        env:
+          BREEZE_ASR_PROVIDER: mock
+          BREEZE_ASR_LOAD_ON_STARTUP: "0"
+        run: uv run python -m unittest discover --verbose
+
+      - name: Build wheel
+        if: ${{ inputs.build }}
+        run: uv build --wheel

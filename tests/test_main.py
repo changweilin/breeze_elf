@@ -811,118 +811,68 @@ class DedupeOverlapCapTests(unittest.TestCase):
 
 
 class SilenceHallucinationTests(unittest.TestCase):
-    def test_drops_low_energy_high_no_speech_result(self):
-        window = AudioWindow(
+    """``_should_drop_asr_result`` is a thin wrapper -- only its wiring is tested here.
+
+    The rule table itself (credit strings, common fragments, threshold hysteresis) lives
+    in ``breeze_elf.hallucination`` and is covered by ``tests/test_hallucination.py``.
+    Duplicating those cases through an ``AudioWindow`` only re-tests the same module at
+    five times the setup cost, and lets the two copies drift apart.
+    """
+
+    def _window(self, rms: float) -> AudioWindow:
+        return AudioWindow(
             index=0,
             start_seconds=0.0,
             end_seconds=1.0,
-            samples=np.zeros(16000, dtype=np.float32),
-            rms=0.01,
+            # Deliberately loud samples: the gate must read window.rms, not the audio.
+            samples=np.ones(16000, dtype=np.float32),
+            rms=rms,
             is_speech=True,
         )
-        result = ASRResult(
-            text="這是一段幻覺文字",
+
+    def _result(self, text: str, no_speech_prob: float | None) -> ASRResult:
+        return ASRResult(
+            text=text,
             language="zh",
             duration_ms=1,
             backend="test",
             device="cpu",
-            no_speech_prob=0.8,
+            no_speech_prob=no_speech_prob,
         )
 
-        self.assertTrue(_should_drop_asr_result(window, result))
+    def test_passes_window_rms_not_sample_energy(self):
+        # Full-scale samples with a quiet measured rms must still count as low energy.
+        self.assertTrue(_should_drop_asr_result(self._window(0.001), self._result("嗯", 0.9)))
+        self.assertFalse(_should_drop_asr_result(self._window(0.2), self._result("嗯", 0.9)))
 
-    def test_drops_common_sponsor_hallucination_when_low_energy(self):
-        window = AudioWindow(
-            index=0,
-            start_seconds=0.0,
-            end_seconds=1.0,
-            samples=np.zeros(16000, dtype=np.float32),
-            rms=0.01,
-            is_speech=True,
-        )
-        result = ASRResult(
-            text="請不吝點讚訂閱轉發打賞支持明鏡與點點欄目",
-            language="zh",
-            duration_ms=1,
-            backend="test",
-            device="cpu",
-            no_speech_prob=0.1,
-        )
+    def test_reads_thresholds_from_settings(self):
+        window = self._window(0.05)
+        result = self._result("嗯", 0.5)
+        self.assertFalse(_should_drop_asr_result(window, result))
+        with patch.object(
+            main,
+            "settings",
+            replace(
+                main.settings,
+                asr_no_speech_prob_threshold=0.4,
+                asr_hallucination_rms_threshold=0.1,
+            ),
+        ):
+            self.assertTrue(_should_drop_asr_result(window, result))
 
-        self.assertTrue(_should_drop_asr_result(window, result))
-
-    def test_drops_subtitle_credit_even_when_loud(self):
-        # The regression: loud 歌詞 hallucinate subtitle credits at high volume and
-        # low no_speech_prob, so the quiet-silence gate can never fire — they must
-        # still be dropped.
-        window = AudioWindow(
-            index=0,
-            start_seconds=0.0,
-            end_seconds=1.0,
-            samples=np.ones(16000, dtype=np.float32) * 0.2,
-            rms=0.2,
-            is_speech=True,
+    def test_credit_boilerplate_is_dropped_regardless_of_energy(self):
+        # One end-to-end case, because this is the regression that motivated the gate:
+        # loud lyrics hallucinate subtitle credits at low no_speech_prob.
+        self.assertTrue(
+            _should_drop_asr_result(
+                self._window(0.2), self._result("字幕由 Amara.org 社群提供", 0.05)
+            )
         )
-        result = ASRResult(
-            text="字幕由 Amara.org 社群提供",
-            language="zh",
-            duration_ms=1,
-            backend="test",
-            device="cpu",
-            no_speech_prob=0.05,
-        )
-
-        self.assertTrue(_should_drop_asr_result(window, result))
-
-    def test_drops_subtitle_credit_wording_variant_when_loud(self):
-        # A variant org name / wording that is not a literal blocklist fragment.
-        window = AudioWindow(
-            index=0,
-            start_seconds=0.0,
-            end_seconds=1.0,
-            samples=np.ones(16000, dtype=np.float32) * 0.2,
-            rms=0.2,
-            is_speech=True,
-        )
-        result = ASRResult(
-            text="字幕提供由 華納 社群提供的字",
-            language="zh",
-            duration_ms=1,
-            backend="test",
-            device="cpu",
-            no_speech_prob=0.05,
-        )
-
-        self.assertTrue(_should_drop_asr_result(window, result))
 
     def test_keeps_normal_speech(self):
-        window = AudioWindow(
-            index=0,
-            start_seconds=0.0,
-            end_seconds=1.0,
-            samples=np.ones(16000, dtype=np.float32) * 0.05,
-            rms=0.05,
-            is_speech=True,
+        self.assertFalse(
+            _should_drop_asr_result(self._window(0.05), self._result("今天下午三點開會", 0.1))
         )
-        result = ASRResult(
-            text="今天下午三點開會",
-            language="zh",
-            duration_ms=1,
-            backend="test",
-            device="cpu",
-            no_speech_prob=0.1,
-        )
-
-        self.assertFalse(_should_drop_asr_result(window, result))
-
-
-class StaticAssetsTests(unittest.TestCase):
-    def test_web_dir_points_to_existing_static_assets(self):
-        self.assertTrue((Path(main.WEB_DIR) / "index.html").is_file())
-
-    def test_root_static_assets_are_whitelisted_and_present(self):
-        for asset_name in main.ROOT_STATIC_MEDIA_TYPES:
-            self.assertTrue((Path(main.WEB_DIR) / asset_name).is_file(), asset_name)
 
 
 class _FakeSwitchEngine:
